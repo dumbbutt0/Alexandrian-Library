@@ -1,0 +1,6 @@
+[mcp_servers.alexandrian_library]
+command = "uv"
+args = ["run", "mcp_server.py"]
+cwd = "."
+required = true
+env = { ALEXANDRIAN_AGENT_HOST = "codex" }

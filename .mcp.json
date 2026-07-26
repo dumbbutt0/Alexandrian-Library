@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "alexandrian-library": {
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "run",
+        "${CLAUDE_PROJECT_DIR:-.}/mcp_server.py"
+      ],
+      "env": {
+        "ALEXANDRIAN_AGENT_HOST": "claude"
+      }
+    }
+  }
+}

@@ -1,0 +1,96 @@
+Alexandrian Library: Deferred Next Steps
+
+Status
+
+These are candidate improvements to revisit after the complete basic local app
+has been proven. They are not requirements for the current prototype, and each
+meaningful design decision should be reviewed before implementation.
+
+
+Current Prototype Focus
+
+- Select Codex or Claude as the active agent host
+- Hold a visible terminal conversation
+- Save normalized user and assistant messages
+- Keep the conversation open while switching hosts with /bye
+- Close it with /finish and mark it ready for review
+- Prove a basic post-conversation review
+- Prove that reviewed conversations can become useful book material
+
+
+Conversation Continuity and Librarian Behavior
+
+- Send the Alexandrian Librarian instructions with each stateless host call
+- Enforce actual read-only permissions through each host, not only prompt text
+- Include previous normalized dialogue so the model receives conversation context
+- Keep capture policy separate from model-context policy
+- Define clear behavior when the conversation exceeds a model's context limit
+- Persist the active conversation so an unfinished chat can survive a restart
+- Record the exact Librarian skill version or content hash used
+
+
+Transcript Schema and Reliability
+
+- Add a transcript schema version
+- Give events stable IDs and explicit sequence numbers
+- Give each user and assistant exchange a shared turn ID
+- Record normalized backend failures in the transcript
+- Avoid saving unredacted stderr that may contain sensitive information
+- Let the user retry, switch hosts, or finish after a backend failure
+- Make /finish idempotent and reject duplicate finish events
+- Verify that a conversation has meaningful content before finishing it
+- Write settings atomically so interruption cannot corrupt settings.json
+- Distinguish agent host, model provider, model, host version, and configuration
+
+
+Raw and Derived Data Boundaries
+
+- Keep data/conversations append-only until /finish
+- Treat a finished raw transcript as immutable
+- Write reviewer output under data/reviews instead of changing the transcript
+- Write later book artifacts separately from raw conversations and reviews
+- Consider adding a final content hash to detect accidental transcript changes
+- Store post-review status outside the immutable raw transcript
+- Treat every transcript field as untrusted data, not reviewer instructions
+- Clearly delimit reviewer instructions from transcript content
+
+
+Selective Research and Tool Evidence
+
+- Capture useful research activity instead of every tool call
+- Preserve searches, source URLs, relevant retrieved results, and external API
+  or command results that materially affected an answer
+- Record why an evidence result was selected for preservation
+- Distinguish evidence used in an answer from incidental tool activity
+- Treat captured evidence as information seen during the conversation, not as
+  verified truth
+- Let later review classify evidence as verified, challenged, superseded, or
+  rejected without rewriting the raw event
+
+
+Privacy and Secret Handling
+
+- Define fields that must never be stored
+- Redact API keys, authorization headers, cookies, and other secrets
+- Consider private paths, usernames, email addresses, and proprietary text
+- Warn the user before broader command, API, or research-result capture
+- Provide a way to exclude or delete a sensitive conversation
+- Decide whether raw provider output should ever be retained
+
+
+Later Product Work
+
+- Ollama and custom Pi research-harness integration
+- Conversation titles, search, and browsing
+- Database storage if JSONL no longer meets demonstrated needs
+- GUI development
+- Vector or semantic retrieval
+- Automated book organization and formatting
+- Multi-user storage, concurrency controls, and access permissions
+
+
+Review Rule
+
+Do not implement this file as one large upgrade. Revisit the smallest relevant
+item after the local prototype exposes a real limitation, compare the available
+options, and obtain engineering agreement before changing the system.

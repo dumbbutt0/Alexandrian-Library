@@ -1,0 +1,21 @@
+# Captured chats may contain private information and should stay local.
+data/conversations/*.jsonl
+
+# Pre-book reviews may contain private conversation material.
+data/reviews/*.md
+data/reviews/*.json
+
+# Source approvals and human book-planning decisions are local review state.
+data/review_sessions/*.json
+data/review_decisions/*.json
+
+# Book plans and approvals may contain private research material.
+data/books/
+
+# Promoted knowledge may contain private conversations and research.
+data/knowledge/
+
+# Backend selection is local runtime state.
+data/settings.json
+
+__pycache__/
