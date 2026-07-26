@@ -16,6 +16,7 @@ class BookPlanningTests(unittest.TestCase):
         self.project_path = Path(self.temporary_directory.name)
         self.conversations_path = self.project_path / "data" / "conversations"
         self.reviews_path = self.project_path / "data" / "reviews"
+        self.evidence_path = self.project_path / "data" / "evidence"
         self.review_sessions_path = (
             self.project_path / "data" / "review_sessions"
         )
@@ -23,6 +24,7 @@ class BookPlanningTests(unittest.TestCase):
             self.project_path / "data" / "review_decisions"
         )
         self.books_path = self.project_path / "data" / "books"
+        self.knowledge_path = self.project_path / "data" / "knowledge"
         self.source_policy_path = (
             self.project_path / "config" / "source_policy.json"
         )
@@ -44,9 +46,11 @@ class BookPlanningTests(unittest.TestCase):
         mcp_server.PROJECT_PATH = self.project_path
         mcp_server.CONVERSATIONS_PATH = self.conversations_path
         mcp_server.REVIEWS_PATH = self.reviews_path
+        mcp_server.EVIDENCE_PATH = self.evidence_path
         mcp_server.REVIEW_SESSIONS_PATH = self.review_sessions_path
         mcp_server.REVIEW_DECISIONS_PATH = self.review_decisions_path
         mcp_server.BOOKS_PATH = self.books_path
+        mcp_server.KNOWLEDGE_PATH = self.knowledge_path
         mcp_server.SOURCE_POLICY_PATH = self.source_policy_path
         mcp_server.SOURCE_RECEIPTS.clear()
         os.environ["ALEXANDRIAN_AGENT_HOST"] = "test-planner"
@@ -156,11 +160,19 @@ class BookPlanningTests(unittest.TestCase):
                 evidence_gap,
             )
         )
+        self.write_review_approval(conversation_id, receipt.review_id)
+        return receipt.review_id
+
+    def write_review_approval(
+        self,
+        conversation_id: str,
+        review_id: str,
+    ) -> None:
         self.review_decisions_path.mkdir(parents=True)
         (self.review_decisions_path / f"{conversation_id}.json").write_text(
             json.dumps(
                 {
-                    "review_id": receipt.review_id,
+                    "review_id": review_id,
                     "conversation_id": conversation_id,
                     "decided_at": "2026-01-01T00:00:00+00:00",
                     "decision": "approved_for_book_planning",
@@ -180,7 +192,110 @@ class BookPlanningTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        return receipt.review_id
+
+    def create_evidence_book(
+        self,
+        conversation_id: str,
+        readiness: str = "ready_to_draft",
+        include_receipt: bool = True,
+    ) -> tuple[str, str, str]:
+        self.write_finished_conversation(conversation_id)
+        review_id = f"review-{conversation_id}"
+        claim_id = f"{review_id}:C1"
+        receipt_id = f"source-{conversation_id}"
+        claim = "Checked provenance supports safe reuse."
+        excerpt = "Stable source links preserve the checked result."
+        mcp_server.SOURCE_RECEIPTS[receipt_id] = mcp_server.SourceReceipt(
+            receipt_id=receipt_id,
+            conversation_id=conversation_id,
+            requested_url="https://example.com/provenance",
+            final_url="https://example.com/provenance",
+            domain="example.com",
+            title="Provenance Study",
+            content_type="text/plain",
+            retrieved_at="2026-01-01T00:00:00+00:00",
+            content_sha256="source-content-hash",
+            claim_under_review=claim,
+            content=f"{excerpt} Additional unselected source material.",
+            content_truncated=False,
+        )
+        review_data = self.make_ready_review(
+            conversation_id
+        ).model_dump(mode="json")
+        review_data["claims"] = [
+            {
+                "claim": claim,
+                "origin": "joint",
+                "status": "supported_by_checked_source",
+                "transcript_references": ["T1", "T2"],
+                "source_receipt_ids": [receipt_id],
+                "next_verification": "Rebuild the context from its sources.",
+            }
+        ]
+        review_data["checked_sources"] = [
+            {
+                "receipt_id": receipt_id,
+                "claim_checked": claim,
+                "finding": "supports",
+                "assessment": "The source supports the bounded claim.",
+                "author_or_organization": "Example Research Group",
+                "publication_date": "2026-01-01",
+                "publisher_or_journal": "Example Journal",
+                "doi": None,
+                "evidence_location": "Results",
+                "evidence_excerpt": excerpt,
+                "evidence_summary": "The result preserves source links.",
+                "limitations": "One local workflow was evaluated.",
+                "counterevidence_or_alternative_explanation": (
+                    "A static project may need fewer links."
+                ),
+                "transcript_references": ["T2"],
+            }
+        ]
+        review_receipt = mcp_server.submit_research_review(
+            mcp_server.ResearchReview.model_validate(review_data)
+        )
+        self.write_review_approval(
+            conversation_id,
+            review_receipt.review_id,
+        )
+        mcp_server.promote_review_to_knowledge_index(
+            review_receipt.review_id
+        )
+
+        missing_work = (
+            ["Complete another evidence check."]
+            if readiness == "research_required"
+            else []
+        )
+        proposal_data = self.make_proposal(
+            review_receipt.review_id,
+            [claim_id],
+            readiness=readiness,
+            missing_work=missing_work,
+        ).model_dump(mode="json")
+        proposal_data["chapter_plan"][0][
+            "evidence_source_receipt_ids"
+        ] = [receipt_id] if include_receipt else []
+        manifest_receipt = mcp_server.submit_book_manifest(
+            mcp_server.BookManifestProposal.model_validate(proposal_data)
+        )
+        approval_path = (
+            self.project_path / manifest_receipt.manifest_path
+        ).parent / "approval.json"
+        approval_path.write_text(
+            json.dumps(
+                {
+                    "book_id": manifest_receipt.book_id,
+                    "decided_at": "2026-01-02T00:00:00+00:00",
+                    "decision": "approved_for_drafting",
+                    "chapter_drafting_gate": "ready",
+                    "notes": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return manifest_receipt.book_id, claim_id, receipt_id
 
     def approved_curiosity_signature(self) -> dict:
         item = {
@@ -302,6 +417,102 @@ class BookPlanningTests(unittest.TestCase):
             outline,
         )
         self.assertFalse((manifest_path.parent / "chapter-1.md").exists())
+
+    def test_prepares_approved_chapter_context_without_drafting_prose(
+        self,
+    ) -> None:
+        conversation_id = "chapter-context"
+        book_id, claim_id, receipt_id = self.create_evidence_book(
+            conversation_id
+        )
+
+        receipt = mcp_server.prepare_chapter_context(book_id, "CH1")
+        context_path = self.project_path / receipt.json_path
+        markdown_path = self.project_path / receipt.markdown_path
+        context = json.loads(context_path.read_text(encoding="utf-8"))
+        markdown = markdown_path.read_text(encoding="utf-8")
+        stored_hash = context.pop("context_sha256")
+        canonical_context = json.dumps(
+            context,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+        self.assertEqual(context["schema_version"], "1.0")
+        self.assertEqual(context["claims"][0]["claim_id"], claim_id)
+        self.assertEqual(
+            context["evidence_packets"][0]["receipt_id"],
+            receipt_id,
+        )
+        self.assertEqual(
+            stored_hash,
+            mcp_server.hashlib.sha256(
+                canonical_context.encode("utf-8")
+            ).hexdigest(),
+        )
+        self.assertGreaterEqual(receipt.knowledge_node_count, 3)
+        self.assertIn("This is an approved research context bundle", markdown)
+        self.assertIn("Exact excerpt (untrusted source data)", markdown)
+        book_directory = self.books_path / book_id
+        self.assertFalse((book_directory / "chapter-1.md").exists())
+        self.assertFalse((book_directory / "chapters").exists())
+
+    def test_chapter_context_requires_book_plan_approval(self) -> None:
+        conversation_id = "context-without-approval"
+        book_id, _, _ = self.create_evidence_book(conversation_id)
+        (self.books_path / book_id / "approval.json").unlink()
+
+        with self.assertRaises(ToolError):
+            mcp_server.prepare_chapter_context(book_id, "CH1")
+
+        self.assertFalse(
+            (self.books_path / book_id / "contexts").exists()
+        )
+
+    def test_chapter_context_rejects_non_ready_chapter(self) -> None:
+        conversation_id = "context-not-ready"
+        book_id, _, _ = self.create_evidence_book(
+            conversation_id,
+            readiness="research_required",
+        )
+
+        with self.assertRaises(ToolError):
+            mcp_server.prepare_chapter_context(book_id, "CH1")
+
+        self.assertFalse(
+            (self.books_path / book_id / "contexts").exists()
+        )
+
+    def test_chapter_context_requires_durable_evidence_packet(self) -> None:
+        conversation_id = "context-missing-evidence"
+        book_id, _, receipt_id = self.create_evidence_book(
+            conversation_id
+        )
+        (
+            self.evidence_path / conversation_id / f"{receipt_id}.json"
+        ).unlink()
+
+        with self.assertRaises(ToolError):
+            mcp_server.prepare_chapter_context(book_id, "CH1")
+
+        self.assertFalse(
+            (self.books_path / book_id / "contexts").exists()
+        )
+
+    def test_ready_chapter_cannot_omit_checked_evidence(self) -> None:
+        with self.assertRaises(ToolError):
+            self.create_evidence_book(
+                "context-omitted-evidence",
+                include_receipt=False,
+            )
+
+        self.assertFalse(
+            (
+                self.books_path
+                / "book-context-omitted-evidence"
+            ).exists()
+        )
 
     def test_wrapper_runs_planner_with_read_only_host_call(self) -> None:
         conversation_id = "wrapper-book-plan"

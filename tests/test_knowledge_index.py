@@ -15,6 +15,7 @@ class KnowledgeIndexTests(unittest.TestCase):
         self.project_path = Path(self.temporary_directory.name)
         self.conversations_path = self.project_path / "data" / "conversations"
         self.reviews_path = self.project_path / "data" / "reviews"
+        self.evidence_path = self.project_path / "data" / "evidence"
         self.review_sessions_path = (
             self.project_path / "data" / "review_sessions"
         )
@@ -44,6 +45,7 @@ class KnowledgeIndexTests(unittest.TestCase):
         mcp_server.PROJECT_PATH = self.project_path
         mcp_server.CONVERSATIONS_PATH = self.conversations_path
         mcp_server.REVIEWS_PATH = self.reviews_path
+        mcp_server.EVIDENCE_PATH = self.evidence_path
         mcp_server.REVIEW_SESSIONS_PATH = self.review_sessions_path
         mcp_server.REVIEW_DECISIONS_PATH = self.review_decisions_path
         mcp_server.BOOKS_PATH = self.books_path
@@ -173,6 +175,9 @@ class KnowledgeIndexTests(unittest.TestCase):
                         "publisher_or_journal": "Example Journal",
                         "doi": None,
                         "evidence_location": "Section 2",
+                        "evidence_excerpt": (
+                            "Stable identifiers preserved source lineage."
+                        ),
                         "evidence_summary": (
                             "Stable identifiers preserved source lineage."
                         ),
@@ -255,7 +260,10 @@ class KnowledgeIndexTests(unittest.TestCase):
             retrieved_at="2026-01-01T00:00:00+00:00",
             content_sha256="abc123",
             claim_under_review=claim,
-            content="RAW SOURCE BODY MUST NOT ENTER THE INDEX",
+            content=(
+                "Stable identifiers preserved source lineage. "
+                "RAW SOURCE BODY MUST NOT ENTER THE INDEX"
+            ),
             content_truncated=False,
         )
         receipt = mcp_server.submit_research_review(

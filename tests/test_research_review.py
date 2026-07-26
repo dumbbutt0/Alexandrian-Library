@@ -17,6 +17,7 @@ class ResearchReviewTests(unittest.TestCase):
         self.project_path = Path(self.temporary_directory.name)
         self.conversations_path = self.project_path / "data" / "conversations"
         self.reviews_path = self.project_path / "data" / "reviews"
+        self.evidence_path = self.project_path / "data" / "evidence"
         self.review_sessions_path = self.project_path / "data" / "review_sessions"
         self.review_decisions_path = self.project_path / "data" / "review_decisions"
         self.source_policy_path = self.project_path / "config" / "source_policy.json"
@@ -27,6 +28,7 @@ class ResearchReviewTests(unittest.TestCase):
         mcp_server.PROJECT_PATH = self.project_path
         mcp_server.CONVERSATIONS_PATH = self.conversations_path
         mcp_server.REVIEWS_PATH = self.reviews_path
+        mcp_server.EVIDENCE_PATH = self.evidence_path
         mcp_server.REVIEW_SESSIONS_PATH = self.review_sessions_path
         mcp_server.SOURCE_POLICY_PATH = self.source_policy_path
         mcp_server.SOURCE_RECEIPTS.clear()
@@ -515,6 +517,9 @@ class ResearchReviewTests(unittest.TestCase):
                 "publisher_or_journal": "Example Journal",
                 "doi": None,
                 "evidence_location": "Results section",
+                "evidence_excerpt": (
+                    "The measured result supports the narrow claim."
+                ),
                 "evidence_summary": "The reported measurement supports the claim.",
                 "limitations": "The source reports one bounded measurement.",
                 "counterevidence_or_alternative_explanation": (
@@ -553,12 +558,98 @@ class ResearchReviewTests(unittest.TestCase):
             source_result.receipt_id,
             mcp_server.SOURCE_RECEIPTS,
         )
+        packet_path = (
+            self.evidence_path
+            / conversation_id
+            / f"{source_result.receipt_id}.json"
+        )
+        packet = json.loads(packet_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            packet["evidence_excerpt"],
+            "The measured result supports the narrow claim.",
+        )
+        self.assertEqual(
+            packet["evidence_excerpt_sha256"],
+            mcp_server.hashlib.sha256(
+                packet["evidence_excerpt"].encode("utf-8")
+            ).hexdigest(),
+        )
+        self.assertNotIn("content", packet)
+        self.assertEqual(
+            receipt.evidence_packet_paths,
+            [
+                str(
+                    packet_path.relative_to(self.project_path)
+                )
+            ],
+        )
         saved_markdown = (
             self.reviews_path / f"{conversation_id}.md"
         ).read_text(encoding="utf-8")
         self.assertIn("## Scope and Working Definitions", saved_markdown)
         self.assertIn("### Research Trail", saved_markdown)
         self.assertIn("Evidence location: Results section", saved_markdown)
+
+    def test_fabricated_evidence_excerpt_writes_nothing(self) -> None:
+        conversation_id = "fabricated-excerpt"
+        self.write_finished_conversation(conversation_id)
+        receipt_id = "source-real"
+        claim = "The narrow claim"
+        mcp_server.SOURCE_RECEIPTS[receipt_id] = mcp_server.SourceReceipt(
+            receipt_id=receipt_id,
+            conversation_id=conversation_id,
+            requested_url="https://example.com/research",
+            final_url="https://example.com/research",
+            domain="example.com",
+            title="A Real Source",
+            content_type="text/plain",
+            retrieved_at="2026-01-01T00:00:00+00:00",
+            content_sha256="source-hash",
+            claim_under_review=claim,
+            content="The source reports a different bounded result.",
+            content_truncated=False,
+        )
+        review_data = self.make_review(conversation_id).model_dump(mode="json")
+        review_data["claims"] = [
+            {
+                "claim": claim,
+                "origin": "assistant",
+                "status": "supported_by_checked_source",
+                "transcript_references": ["T2"],
+                "source_receipt_ids": [receipt_id],
+                "next_verification": "Replicate the measurement.",
+            }
+        ]
+        review_data["checked_sources"] = [
+            {
+                "receipt_id": receipt_id,
+                "claim_checked": claim,
+                "finding": "supports",
+                "assessment": "The source supports the claim.",
+                "author_or_organization": None,
+                "publication_date": None,
+                "publisher_or_journal": None,
+                "doi": None,
+                "evidence_location": "Results",
+                "evidence_excerpt": "A passage the source never contained.",
+                "evidence_summary": "An invented summary.",
+                "limitations": "Unknown.",
+                "counterevidence_or_alternative_explanation": "Unknown.",
+                "transcript_references": ["T2"],
+            }
+        ]
+
+        with self.assertRaises(ToolError):
+            mcp_server.submit_research_review(
+                mcp_server.ResearchReview.model_validate(review_data)
+            )
+
+        self.assertFalse(
+            (self.reviews_path / f"{conversation_id}.json").exists()
+        )
+        self.assertFalse(
+            (self.evidence_path / conversation_id).exists()
+        )
 
     def test_fabricated_source_receipt_writes_nothing(self) -> None:
         conversation_id = "fabricated-receipt"
@@ -575,6 +666,7 @@ class ResearchReviewTests(unittest.TestCase):
                 "publisher_or_journal": None,
                 "doi": None,
                 "evidence_location": "Unknown",
+                "evidence_excerpt": "Invented evidence",
                 "evidence_summary": "Invented evidence",
                 "limitations": "Unknown",
                 "counterevidence_or_alternative_explanation": "Unknown",
@@ -608,7 +700,7 @@ class ResearchReviewTests(unittest.TestCase):
         saved_markdown = markdown_path.read_text(encoding="utf-8")
 
         self.assertEqual(receipt.research_route.value, "research_seed")
-        self.assertEqual(saved_json["review_schema_version"], "1.1")
+        self.assertEqual(saved_json["review_schema_version"], "1.2")
         self.assertEqual(saved_json["reviewer_host"], "test-host")
         self.assertEqual(
             saved_json["review"]["core_question"]["transcript_references"],

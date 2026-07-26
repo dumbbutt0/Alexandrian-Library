@@ -5,6 +5,9 @@ data/conversations/*.jsonl
 data/reviews/*.md
 data/reviews/*.json
 
+# Bounded source excerpts remain local research evidence.
+data/evidence/
+
 # Source approvals and human book-planning decisions are local review state.
 data/review_sessions/*.json
 data/review_decisions/*.json
