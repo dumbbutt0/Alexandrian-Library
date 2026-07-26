@@ -98,6 +98,21 @@ class KnowledgeIndexTests(unittest.TestCase):
             {
                 "conversation_id": conversation_id,
                 "core_question": core_question,
+                "curiosity_signature": {
+                    "why_this_question_matters": [
+                        {
+                            "text": (
+                                "The user wants research to remain reusable."
+                            ),
+                            "transcript_references": ["T1"],
+                        }
+                    ],
+                    "original_intuition": [core_question],
+                    "surprising_connections": [],
+                    "central_tensions": [],
+                    "desired_transformation": [],
+                    "questions_that_must_remain_open": [core_question],
+                },
                 "scope": {
                     "included_topics": [core_question],
                     "excluded_topics": [],
@@ -259,6 +274,10 @@ class KnowledgeIndexTests(unittest.TestCase):
                     "confirmed_core_question_or_thesis": (
                         "How should research become reusable knowledge?"
                     ),
+                    "curiosity_signature_decision": "accepted",
+                    "approved_curiosity_signature": (
+                        self.approved_curiosity_signature()
+                    ),
                     "accepted_belief_revisions": [
                         "A maintained index is more useful than loose notes."
                     ],
@@ -269,6 +288,34 @@ class KnowledgeIndexTests(unittest.TestCase):
             encoding="utf-8",
         )
         return receipt.review_id
+
+    def approved_curiosity_signature(self) -> dict:
+        return {
+            "why_this_question_matters": [
+                {
+                    "text": "The user wants research to remain reusable.",
+                    "provenance": "review_extraction",
+                    "transcript_references": ["T1"],
+                }
+            ],
+            "original_intuition": [
+                {
+                    "text": "How should research become reusable knowledge?",
+                    "provenance": "review_extraction",
+                    "transcript_references": ["T1"],
+                }
+            ],
+            "surprising_connections": [],
+            "central_tensions": [],
+            "desired_transformation": [],
+            "questions_that_must_remain_open": [
+                {
+                    "text": "How should research become reusable knowledge?",
+                    "provenance": "review_extraction",
+                    "transcript_references": ["T1"],
+                }
+            ],
+        }
 
     def test_promotion_writes_canonical_markdown_and_derived_graph(self) -> None:
         review_id = self.create_eligible_review("successful-index")
@@ -329,6 +376,11 @@ class KnowledgeIndexTests(unittest.TestCase):
         )
         self.assertIn("source-index-test", combined_output)
         self.assertIn("[[ki-successful-index-", combined_output)
+        self.assertIn("## Why This Question Matters", combined_output)
+        self.assertIn(
+            "The user wants research to remain reusable.",
+            combined_output,
+        )
         self.assertNotIn(
             "RAW SOURCE BODY MUST NOT ENTER THE INDEX",
             combined_output,
@@ -357,6 +409,36 @@ class KnowledgeIndexTests(unittest.TestCase):
             encoding="utf-8"
         ).splitlines()
         self.assertEqual(len(events), 1)
+
+    def test_human_curiosity_correction_is_preserved_in_core_node(self) -> None:
+        review_id = self.create_eligible_review("corrected-index")
+        decision_path = self.review_decisions_path / "corrected-index.json"
+        decision = json.loads(decision_path.read_text(encoding="utf-8"))
+        decision["curiosity_signature_decision"] = "corrected"
+        decision["approved_curiosity_signature"][
+            "why_this_question_matters"
+        ] = [
+            {
+                "text": "This matters because I want a reusable research method.",
+                "provenance": "human_checkpoint",
+                "transcript_references": [],
+            }
+        ]
+        decision_path.write_text(json.dumps(decision), encoding="utf-8")
+
+        receipt = mcp_server.promote_review_to_knowledge_index(review_id)
+        core_path = (
+            self.project_path
+            / receipt.review_nodes_path
+            / "ki-corrected-index-core-question.md"
+        )
+        core_node = core_path.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "This matters because I want a reusable research method.",
+            core_node,
+        )
+        self.assertIn("`human checkpoint correction`", core_node)
 
     def test_changed_claim_identity_cannot_enter_index(self) -> None:
         review_id = self.create_eligible_review("changed-claim-index")

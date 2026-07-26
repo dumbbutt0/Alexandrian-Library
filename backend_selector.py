@@ -700,6 +700,133 @@ def parse_optional_list(value: str) -> list[str]:
     return [item.strip() for item in value.split(";") if item.strip()]
 
 
+CURIOSITY_SIGNATURE_FIELDS = (
+    ("why_this_question_matters", "Why this question matters", False),
+    ("original_intuition", "Original intuition", False),
+    ("surprising_connections", "Surprising connections", True),
+    ("central_tensions", "Central tensions", True),
+    ("desired_transformation", "Desired transformation", False),
+    (
+        "questions_that_must_remain_open",
+        "Questions that must remain open",
+        True,
+    ),
+)
+
+
+def validate_review_curiosity_signature(value: object) -> dict:
+    """Validate the reviewer-proposed signature needed by the checkpoint."""
+    if not isinstance(value, dict):
+        raise RuntimeError("Research review has no curiosity signature.")
+
+    expected_fields = {
+        field_name for field_name, _, _ in CURIOSITY_SIGNATURE_FIELDS
+    }
+    if set(value) != expected_fields:
+        raise RuntimeError("Research review curiosity signature is incomplete.")
+
+    for field_name, _, allows_multiple in CURIOSITY_SIGNATURE_FIELDS:
+        items = value[field_name]
+        if not isinstance(items, list):
+            raise RuntimeError(
+                f"Curiosity signature field is not a list: {field_name}"
+            )
+        for item in items:
+            if (
+                not isinstance(item, dict)
+                or not isinstance(item.get("text"), str)
+                or not item["text"].strip()
+                or not isinstance(item.get("transcript_references"), list)
+                or not item["transcript_references"]
+                or any(
+                    not isinstance(reference, str)
+                    for reference in item["transcript_references"]
+                )
+            ):
+                raise RuntimeError(
+                    f"Curiosity signature field is invalid: {field_name}"
+                )
+        if not allows_multiple and len(items) > 1:
+            raise RuntimeError(
+                f"Curiosity signature field must be singular: {field_name}"
+            )
+    return value
+
+
+def display_curiosity_signature(signature: dict) -> None:
+    """Display the reviewer extraction before the user approves it."""
+    print("\nReviewer-proposed curiosity signature")
+    for field_name, label, _ in CURIOSITY_SIGNATURE_FIELDS:
+        print(f"\n{label}:")
+        items = signature[field_name]
+        if not items:
+            print("  Not established in this conversation.")
+            continue
+        for item in items:
+            references = ", ".join(item["transcript_references"])
+            print(f"  - {item['text']} ({references})")
+
+
+def accepted_curiosity_signature(signature: dict) -> dict:
+    """Preserve reviewer extraction with explicit transcript provenance."""
+    return {
+        field_name: [
+            {
+                "text": item["text"],
+                "provenance": "review_extraction",
+                "transcript_references": item["transcript_references"],
+            }
+            for item in signature[field_name]
+        ]
+        for field_name, _, _ in CURIOSITY_SIGNATURE_FIELDS
+    }
+
+
+def prompt_for_curiosity_signature(signature: dict) -> tuple[str, dict]:
+    """Accept the full signature or correct only fields the user selects."""
+    print("\nCuriosity-signature checkpoint")
+    print("1. Accept the reviewer-proposed signature")
+    print("2. Correct individual fields")
+
+    while True:
+        choice = input("Select curiosity-signature status: ").strip()
+        if choice in {"1", "2"}:
+            break
+        print("Invalid selection. Please enter 1 or 2.")
+
+    approved = accepted_curiosity_signature(signature)
+    if choice == "1":
+        return "accepted", approved
+
+    print(
+        "\nFor each field, press Enter to keep it or enter - to clear it."
+    )
+    print("For list fields, separate multiple replacements with semicolons.")
+    for field_name, label, allows_multiple in CURIOSITY_SIGNATURE_FIELDS:
+        replacement = input(f"{label}: ").strip()
+        if not replacement:
+            continue
+        if replacement == "-":
+            approved[field_name] = []
+            continue
+
+        texts = (
+            parse_optional_list(replacement)
+            if allows_multiple
+            else [replacement]
+        )
+        approved[field_name] = [
+            {
+                "text": text,
+                "provenance": "human_checkpoint",
+                "transcript_references": [],
+            }
+            for text in texts
+        ]
+
+    return "corrected", approved
+
+
 def record_human_review_checkpoint(json_path: Path) -> Path:
     """Record the user's independent decision about book planning."""
     try:
@@ -707,6 +834,9 @@ def record_human_review_checkpoint(json_path: Path) -> Path:
         review = review_document["review"]
         core_question = review["core_question"]["text"]
         research_route = review["research_route"]
+        curiosity_signature = validate_review_curiosity_signature(
+            review["curiosity_signature"]
+        )
     except (KeyError, TypeError, json.JSONDecodeError, OSError) as error:
         raise RuntimeError(
             f"The research review could not be prepared for approval: {json_path}."
@@ -714,6 +844,7 @@ def record_human_review_checkpoint(json_path: Path) -> Path:
 
     print("\nBook-planning checkpoint")
     print(f"Core question: {core_question}")
+    display_curiosity_signature(curiosity_signature)
     print("1. Approve for book planning")
     print("2. Return for more research or revision")
     print("3. Hold without book planning")
@@ -753,6 +884,20 @@ def record_human_review_checkpoint(json_path: Path) -> Path:
             "(optional, separate multiple items with semicolons): "
         )
     )
+    book_planning_gate = (
+        "ready"
+        if decisions[choice] == "approved_for_book_planning"
+        and research_route == "ready_for_book_consideration"
+        else "blocked"
+    )
+    if book_planning_gate == "ready":
+        (
+            curiosity_signature_decision,
+            approved_curiosity_signature,
+        ) = prompt_for_curiosity_signature(curiosity_signature)
+    else:
+        curiosity_signature_decision = "not_reviewed"
+        approved_curiosity_signature = None
 
     decision_path = REVIEW_DECISIONS_PATH / f"{json_path.stem}.json"
     decision_record = {
@@ -761,15 +906,12 @@ def record_human_review_checkpoint(json_path: Path) -> Path:
         "decided_at": current_utc_time(),
         "decision": decisions[choice],
         "review_research_route": research_route,
-        "book_planning_gate": (
-            "ready"
-            if decisions[choice] == "approved_for_book_planning"
-            and research_route == "ready_for_book_consideration"
-            else "blocked"
-        ),
+        "book_planning_gate": book_planning_gate,
         "confirmed_core_question_or_thesis": (
             confirmed_question or core_question
         ),
+        "curiosity_signature_decision": curiosity_signature_decision,
+        "approved_curiosity_signature": approved_curiosity_signature,
         "accepted_belief_revisions": accepted_revisions,
         "disputed_points": disputed_points,
         "excluded_material": excluded_material,

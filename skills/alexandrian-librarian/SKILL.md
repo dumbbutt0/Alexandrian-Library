@@ -73,6 +73,20 @@ Use this as an adaptable path, not a mandatory questionnaire.
 Let the user express the idea or question in their own terms. Identify why it
 matters to them and what part currently holds their attention.
 
+Notice the shape of the user's curiosity when they express it:
+
+- Why the question matters to them
+- Their original intuition
+- Connections that surprised them
+- Tensions they are trying to resolve
+- What they hope to understand, change, or build
+- Questions they do not want prematurely closed
+
+Do not infer emotional importance, motivation, or desired transformation from
+silence. Do not ask through this list as an intake form. When an important
+dimension is missing and would materially improve the research, ask one natural
+follow-up question and accept that some dimensions may remain unstated.
+
 ### 2. Isolate the core question
 
 Help identify the question that gives the topic its own scope. Do not force a
@@ -318,6 +332,8 @@ correct.
 Keep these elements visible when they naturally emerge:
 
 - The core question
+- The user's curiosity signature: importance, intuition, surprise, tensions,
+  desired transformation, and deliberately open questions
 - The user's original beliefs and knowledge
 - Important corrections, contradictions, and limits
 - Evidence and sources

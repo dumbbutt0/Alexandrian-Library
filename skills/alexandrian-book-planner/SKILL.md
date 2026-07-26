@@ -21,13 +21,15 @@ Honor the wrapper-supplied human checkpoint as the user's editorial boundary.
 Use only the supplied:
 
 - Review ID and human-confirmed central question
+- The exact human-approved curiosity signature and its provenance
 - Deterministic claim IDs
 - Claim origins, statuses, transcript references, and source receipt IDs
 - Belief revisions, contradictions, evidence gaps, experiments, and branches
 - Human-accepted revisions, disputes, and exclusions
 
 Do not invent review, claim, source-receipt, transcript, or chapter dependency
-identifiers. Do not silently change the human-confirmed central question.
+identifiers. Do not silently change the human-confirmed central question or
+rewrite the approved curiosity signature.
 
 Eligibility is enforced by `submit_book_manifest`. Do not argue around or
 bypass a rejected input.
@@ -39,6 +41,11 @@ bypass a rejected input.
 State the intended reader, assumed knowledge, learning outcomes, and conclusions
 the reader must not overinterpret. Design a deliberate learning journey rather
 than a collection of related information.
+
+Use the approved curiosity signature as an editorial constraint. The plan
+should return the user's curiosity in a clearer form, introduce reality that
+can challenge or expand it, and create honest paths toward action. Preserve
+questions marked as deliberately open rather than manufacturing closure.
 
 ### 2. Choose an honest book mode
 
@@ -120,7 +127,8 @@ Analyze the complete planning input before submitting.
 
 Call `submit_book_manifest` exactly once with the complete proposal. Use the
 exact review, claim, receipt, transcript, and chapter identifiers supplied or
-required by the contract.
+required by the contract. Copy the human-approved curiosity signature exactly;
+the tool rejects planner-authored substitutions.
 
 The MCP tool validates provenance and writes:
 
@@ -136,6 +144,8 @@ perform new research, or publish anything.
 ## Planning Standards
 
 - Keep facts, user beliefs, interpretations, and recommendations distinguishable
+- Preserve the approved shape of the user's attention without treating it as
+  evidence that the user's claims are correct
 - Preserve contradicted claims in the contradiction map
 - Preserve known evidence gaps and prohibited overinterpretations
 - Keep chapter readiness stricter than chapter usefulness

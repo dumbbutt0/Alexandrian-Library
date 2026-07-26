@@ -98,6 +98,14 @@ class BookPlanningTests(unittest.TestCase):
             {
                 "conversation_id": conversation_id,
                 "core_question": core_question,
+                "curiosity_signature": {
+                    "why_this_question_matters": [],
+                    "original_intuition": [core_question],
+                    "surprising_connections": [],
+                    "central_tensions": [],
+                    "desired_transformation": [],
+                    "questions_that_must_remain_open": [core_question],
+                },
                 "scope": {
                     "included_topics": [core_question],
                     "excluded_topics": [],
@@ -161,6 +169,10 @@ class BookPlanningTests(unittest.TestCase):
                     "confirmed_core_question_or_thesis": (
                         "How can evidence become a trustworthy book?"
                     ),
+                    "curiosity_signature_decision": "accepted",
+                    "approved_curiosity_signature": (
+                        self.approved_curiosity_signature()
+                    ),
                     "accepted_belief_revisions": [],
                     "disputed_points": [],
                     "excluded_material": [],
@@ -169,6 +181,21 @@ class BookPlanningTests(unittest.TestCase):
             encoding="utf-8",
         )
         return receipt.review_id
+
+    def approved_curiosity_signature(self) -> dict:
+        item = {
+            "text": "How can evidence become a trustworthy book?",
+            "provenance": "review_extraction",
+            "transcript_references": ["T1"],
+        }
+        return {
+            "why_this_question_matters": [],
+            "original_intuition": [item],
+            "surprising_connections": [],
+            "central_tensions": [],
+            "desired_transformation": [],
+            "questions_that_must_remain_open": [item],
+        }
 
     def make_proposal(
         self,
@@ -191,6 +218,7 @@ class BookPlanningTests(unittest.TestCase):
                 "central_question": (
                     "How can evidence become a trustworthy book?"
                 ),
+                "curiosity_signature": self.approved_curiosity_signature(),
                 "provisional_thesis": None,
                 "input_review_ids": [review_id],
                 "intended_reader": "A learner building research tools",
@@ -261,13 +289,14 @@ class BookPlanningTests(unittest.TestCase):
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         outline = outline_path.read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["schema_version"], "1.0")
+        self.assertEqual(manifest["schema_version"], "1.1")
         self.assertEqual(manifest["lifecycle_status"], "planning")
         self.assertEqual(
             manifest["approval_status"],
             "awaiting_human_approval",
         )
         self.assertIn(f"{review_id}:C1", outline)
+        self.assertIn("## Curiosity Signature", outline)
         self.assertIn(
             "This artifact plans a book. It does not contain chapter prose.",
             outline,
@@ -327,6 +356,26 @@ class BookPlanningTests(unittest.TestCase):
 
         with self.assertRaises(ToolError):
             mcp_server.submit_book_manifest(proposal)
+
+        self.assertFalse(
+            (self.books_path / f"book-{conversation_id}").exists()
+        )
+
+    def test_planner_cannot_rewrite_approved_curiosity(self) -> None:
+        conversation_id = "changed-curiosity"
+        review_id = self.create_eligible_review(conversation_id)
+        proposal_data = self.make_proposal(
+            review_id,
+            [f"{review_id}:C1"],
+        ).model_dump(mode="json")
+        proposal_data["curiosity_signature"]["original_intuition"][0][
+            "text"
+        ] = "A planner-authored replacement."
+
+        with self.assertRaises(ToolError):
+            mcp_server.submit_book_manifest(
+                mcp_server.BookManifestProposal.model_validate(proposal_data)
+            )
 
         self.assertFalse(
             (self.books_path / f"book-{conversation_id}").exists()

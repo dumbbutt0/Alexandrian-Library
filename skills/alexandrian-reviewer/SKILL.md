@@ -1,6 +1,6 @@
 ---
 name: alexandrian-reviewer
-description: Double-check, extract, and route research material from completed Alexandrian Library conversations. Use when a finished transcript must become a grounded pre-book record of its core question, scope, definitions, starting beliefs, belief revisions, research trail, citation-ready checked claims, evidence gaps, connected ideas, separate research branches, thought questions, experiments, use cases, and next research state without writing the final book.
+description: Double-check, extract, and route research material from completed Alexandrian Library conversations. Use when a finished transcript must become a grounded pre-book record of its core question, curiosity signature, scope, definitions, starting beliefs, belief revisions, research trail, citation-ready checked claims, evidence gaps, connected ideas, separate research branches, thought questions, experiments, use cases, and next research state without writing the final book.
 ---
 
 # Alexandrian Research Reviewer
@@ -55,20 +55,40 @@ a contested definition. Ground each boundary and definition in the transcript.
 Do not silently settle a disputed term or expand the scope to make the material
 appear more complete.
 
-### 3. Preserve the starting model
+### 3. Extract the curiosity signature
+
+Preserve the shape of the user's attention separately from the factual status
+of the idea:
+
+- Why this question matters
+- The user's original intuition
+- Connections the user found surprising
+- Central tensions the user wants to resolve
+- The understanding, change, or capability the user wants to gain
+- Questions the user wants to keep open
+
+Use only user-message transcript references for these fields. Do not infer
+motivation, emotional importance, surprise, or desired transformation from an
+assistant response or from what seems narratively appropriate. Use an empty
+list when a dimension was not established.
+
+The curiosity signature records authorship and intellectual direction. It does
+not validate the user's claims.
+
+### 4. Preserve the starting model
 
 Extract the user's original beliefs, concept-specific demonstrated
 understanding, and apparent misunderstandings. Treat competency observations
 as local to this topic and transcript, never as a general ranking of the user.
 
-### 4. Track belief revision
+### 5. Track belief revision
 
 For each meaningful challenge, distinguish the original belief, the assistant's
 challenge, the user's later response, and whether the revision was accepted,
 rejected, unresolved, or never addressed. Do not treat an assistant correction
 as a user belief change without evidence from the user.
 
-### 5. Double-check claims against approved sources
+### 6. Double-check claims against approved sources
 
 Classify claims by who introduced them and what the transcript actually
 establishes.
@@ -104,13 +124,13 @@ by the reviewer. Record the actual research question or query, candidate source,
 inclusion or exclusion decision, and reason in the research trail. State the
 next verification needed for each important claim.
 
-### 6. Connect and separate research
+### 7. Connect and separate research
 
 Label how connected ideas relate to the core question. Separate branches when
 they introduce a different research question, measurement problem, prerequisite,
 application, or implementation path.
 
-### 7. Preserve questions, experiments, and use cases
+### 8. Preserve questions, experiments, and use cases
 
 Extract questions that could deepen the user's reasoning. Record an experiment
 only when its hypothesis, observable outcome, comparison or baseline,
@@ -118,7 +138,7 @@ falsifying or weakening evidence, and major unresolved dependency can be
 stated. Preserve use cases as research candidates; do not develop them into
 projects in this stage.
 
-### 8. Route the research
+### 9. Route the research
 
 Choose exactly one next state:
 
@@ -148,6 +168,8 @@ Then call `submit_research_review` exactly once with:
 
 - The exact `conversation_id` supplied by the wrapper
 - Every required structured review field
+- A curiosity signature grounded only in user-message references, with empty
+  fields where the conversation did not establish an answer
 - Valid `T` references for every grounded item
 - Every checked-source assessment and its real source receipt ID
 - Receipt IDs on claims whose status depends on checked sources

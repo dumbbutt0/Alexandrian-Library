@@ -52,6 +52,22 @@ RELATIONSHIP_LABELS = {
     "tested_by": "Tested by",
 }
 
+CURIOSITY_FIELD_LABELS = {
+    "why_this_question_matters": "Why This Question Matters",
+    "original_intuition": "Original Intuition",
+    "surprising_connections": "Surprising Connections",
+    "central_tensions": "Central Tensions",
+    "desired_transformation": "Desired Transformation",
+    "questions_that_must_remain_open": (
+        "Questions That Must Remain Open"
+    ),
+}
+CURIOSITY_SINGLE_VALUE_FIELDS = {
+    "why_this_question_matters",
+    "original_intuition",
+    "desired_transformation",
+}
+
 
 class KnowledgeIndexError(RuntimeError):
     """Report a validation or persistence failure in the knowledge index."""
@@ -244,6 +260,98 @@ def build_review_nodes(
             "Approved review identity or research route does not match its record."
         )
 
+    review_signature = review.get("curiosity_signature")
+    approved_signature = human_decision.get("approved_curiosity_signature")
+    signature_decision = human_decision.get("curiosity_signature_decision")
+    if (
+        not isinstance(review_signature, dict)
+        or not isinstance(approved_signature, dict)
+        or signature_decision not in {"accepted", "corrected"}
+        or set(review_signature) != set(CURIOSITY_FIELD_LABELS)
+        or set(approved_signature) != set(CURIOSITY_FIELD_LABELS)
+    ):
+        raise KnowledgeIndexError(
+            "Approved review has no valid human-approved curiosity signature."
+        )
+
+    expected_accepted_signature = {}
+    for field_name in CURIOSITY_FIELD_LABELS:
+        review_items = review_signature[field_name]
+        approved_items = approved_signature[field_name]
+        if not isinstance(review_items, list) or not isinstance(
+            approved_items,
+            list,
+        ):
+            raise KnowledgeIndexError(
+                f"Curiosity signature field is invalid: {field_name}"
+            )
+        if (
+            field_name in CURIOSITY_SINGLE_VALUE_FIELDS
+            and (len(review_items) > 1 or len(approved_items) > 1)
+        ):
+            raise KnowledgeIndexError(
+                f"Curiosity signature field must be singular: {field_name}"
+            )
+
+        expected_accepted_signature[field_name] = []
+        grounded_items = set()
+        for item in review_items:
+            if (
+                not isinstance(item, dict)
+                or not normalized_text(item.get("text"))
+                or not string_list(item.get("transcript_references"))
+            ):
+                raise KnowledgeIndexError(
+                    f"Reviewed curiosity field is invalid: {field_name}"
+                )
+            normalized_item = {
+                "text": normalized_text(item["text"]),
+                "provenance": "review_extraction",
+                "transcript_references": list(
+                    string_list(item["transcript_references"])
+                ),
+            }
+            expected_accepted_signature[field_name].append(normalized_item)
+            grounded_items.add(
+                (
+                    normalized_item["text"],
+                    tuple(normalized_item["transcript_references"]),
+                )
+            )
+
+        for item in approved_items:
+            if not isinstance(item, dict):
+                raise KnowledgeIndexError(
+                    f"Approved curiosity field is invalid: {field_name}"
+                )
+            text = normalized_text(item.get("text"))
+            provenance = item.get("provenance")
+            references = string_list(item.get("transcript_references"))
+            if not text or provenance not in {
+                "review_extraction",
+                "human_checkpoint",
+            }:
+                raise KnowledgeIndexError(
+                    f"Approved curiosity field is invalid: {field_name}"
+                )
+            if provenance == "review_extraction":
+                if (text, references) not in grounded_items:
+                    raise KnowledgeIndexError(
+                        "Approved curiosity signature invents review provenance."
+                    )
+            elif references:
+                raise KnowledgeIndexError(
+                    "Human curiosity corrections cannot claim transcript provenance."
+                )
+
+    if (
+        signature_decision == "accepted"
+        and approved_signature != expected_accepted_signature
+    ):
+        raise KnowledgeIndexError(
+            "Accepted curiosity signature differs from the reviewed extraction."
+        )
+
     review_claims = review.get("claims")
     claim_index = review_document.get("claim_index")
     if not isinstance(review_claims, list) or not isinstance(claim_index, list):
@@ -272,6 +380,27 @@ def build_review_nodes(
     )
     core_id = make_node_id(conversation_id, "core-question")
     core_sections = []
+    signature_references = []
+    for field_name, heading in CURIOSITY_FIELD_LABELS.items():
+        items = approved_signature[field_name]
+        if not items:
+            body = "Not established."
+        else:
+            rendered_items = []
+            for item in items:
+                references = string_list(item.get("transcript_references"))
+                signature_references.extend(references)
+                provenance = (
+                    ", ".join(f"`{reference}`" for reference in references)
+                    if references
+                    else "`human checkpoint correction`"
+                )
+                rendered_items.append(
+                    f"- {normalized_text(item['text'])} ({provenance})"
+                )
+            body = "\n".join(rendered_items)
+        core_sections.append(KnowledgeSection(heading, body))
+
     if original_core_question != confirmed_core_question:
         core_sections.append(
             KnowledgeSection("Reviewer wording", original_core_question)
@@ -303,7 +432,12 @@ def build_review_nodes(
             summary=confirmed_core_question,
             status="active",
             source_review_ids=(review_id,),
-            transcript_references=grounded_references(core_record),
+            transcript_references=tuple(
+                dict.fromkeys(
+                    grounded_references(core_record)
+                    + tuple(signature_references)
+                )
+            ),
             sections=tuple(core_sections),
         )
     ]

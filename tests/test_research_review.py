@@ -92,6 +92,14 @@ class ResearchReviewTests(unittest.TestCase):
             {
                 "conversation_id": conversation_id,
                 "core_question": grounded_text,
+                "curiosity_signature": {
+                    "why_this_question_matters": [],
+                    "original_intuition": [grounded_text],
+                    "surprising_connections": [],
+                    "central_tensions": [],
+                    "desired_transformation": [],
+                    "questions_that_must_remain_open": [grounded_text],
+                },
                 "scope": {
                     "included_topics": [grounded_text],
                     "excluded_topics": [],
@@ -600,12 +608,14 @@ class ResearchReviewTests(unittest.TestCase):
         saved_markdown = markdown_path.read_text(encoding="utf-8")
 
         self.assertEqual(receipt.research_route.value, "research_seed")
+        self.assertEqual(saved_json["review_schema_version"], "1.1")
         self.assertEqual(saved_json["reviewer_host"], "test-host")
         self.assertEqual(
             saved_json["review"]["core_question"]["transcript_references"],
             ["T1"],
         )
         self.assertIn("# Alexandrian Research Review", saved_markdown)
+        self.assertIn("## Curiosity Signature", saved_markdown)
         self.assertIn("Route: `research_seed`", saved_markdown)
         self.assertIn("#### Human Source Permissions", saved_markdown)
 
@@ -650,6 +660,136 @@ class ResearchReviewTests(unittest.TestCase):
         self.assertEqual(
             review_path.read_text(encoding="utf-8"),
             original_review,
+        )
+
+    def test_curiosity_signature_rejects_assistant_provenance(self) -> None:
+        conversation_id = "assistant-curiosity"
+        self.write_finished_conversation(conversation_id)
+        review_data = self.make_review(conversation_id).model_dump(mode="json")
+        review_data["curiosity_signature"]["original_intuition"][0][
+            "transcript_references"
+        ] = ["T2"]
+
+        with self.assertRaises(ToolError):
+            mcp_server.submit_research_review(
+                mcp_server.ResearchReview.model_validate(review_data)
+            )
+
+        self.assertFalse(
+            (self.reviews_path / f"{conversation_id}.json").exists()
+        )
+
+    def test_review_requires_signature_object_but_allows_empty_fields(
+        self,
+    ) -> None:
+        conversation_id = "empty-curiosity"
+        self.write_finished_conversation(conversation_id)
+        review_data = self.make_review(conversation_id).model_dump(mode="json")
+        review_data_without_signature = dict(review_data)
+        review_data_without_signature.pop("curiosity_signature")
+
+        with self.assertRaises(ValueError):
+            mcp_server.ResearchReview.model_validate(
+                review_data_without_signature
+            )
+
+        review_data["curiosity_signature"] = {
+            "why_this_question_matters": [],
+            "original_intuition": [],
+            "surprising_connections": [],
+            "central_tensions": [],
+            "desired_transformation": [],
+            "questions_that_must_remain_open": [],
+        }
+        receipt = mcp_server.submit_research_review(
+            mcp_server.ResearchReview.model_validate(review_data)
+        )
+        self.assertEqual(receipt.review_id, f"review-{conversation_id}")
+
+    def test_ready_checkpoint_accepts_curiosity_without_extra_prompts(self) -> None:
+        conversation_id = "accepted-curiosity"
+        self.write_finished_conversation(conversation_id)
+        review_data = self.make_review(conversation_id).model_dump(mode="json")
+        review_data["research_route"] = "ready_for_book_consideration"
+        mcp_server.submit_research_review(
+            mcp_server.ResearchReview.model_validate(review_data)
+        )
+        review_path = self.reviews_path / f"{conversation_id}.json"
+        responses = iter(["1", "", "", "", "", "1"])
+
+        with (
+            patch.object(
+                backend_selector,
+                "REVIEW_DECISIONS_PATH",
+                self.review_decisions_path,
+            ),
+            patch("builtins.input", side_effect=lambda _prompt: next(responses)),
+        ):
+            decision_path = backend_selector.record_human_review_checkpoint(
+                review_path
+            )
+
+        decision = json.loads(decision_path.read_text(encoding="utf-8"))
+        self.assertEqual(decision["curiosity_signature_decision"], "accepted")
+        self.assertEqual(
+            decision["approved_curiosity_signature"]["original_intuition"][0][
+                "provenance"
+            ],
+            "review_extraction",
+        )
+
+    def test_ready_checkpoint_can_correct_individual_curiosity_fields(
+        self,
+    ) -> None:
+        conversation_id = "corrected-curiosity"
+        self.write_finished_conversation(conversation_id)
+        review_data = self.make_review(conversation_id).model_dump(mode="json")
+        review_data["research_route"] = "ready_for_book_consideration"
+        mcp_server.submit_research_review(
+            mcp_server.ResearchReview.model_validate(review_data)
+        )
+        review_path = self.reviews_path / f"{conversation_id}.json"
+        responses = iter(
+            [
+                "1",
+                "",
+                "",
+                "",
+                "",
+                "2",
+                "This question matters because I want a reusable method.",
+                "",
+                "Research graphs;Book architecture",
+                "-",
+                "Build a reality blueprint.",
+                "",
+            ]
+        )
+
+        with (
+            patch.object(
+                backend_selector,
+                "REVIEW_DECISIONS_PATH",
+                self.review_decisions_path,
+            ),
+            patch("builtins.input", side_effect=lambda _prompt: next(responses)),
+        ):
+            decision_path = backend_selector.record_human_review_checkpoint(
+                review_path
+            )
+
+        decision = json.loads(decision_path.read_text(encoding="utf-8"))
+        signature = decision["approved_curiosity_signature"]
+        self.assertEqual(decision["curiosity_signature_decision"], "corrected")
+        self.assertEqual(
+            signature["why_this_question_matters"][0]["provenance"],
+            "human_checkpoint",
+        )
+        self.assertEqual(len(signature["surprising_connections"]), 2)
+        self.assertEqual(signature["central_tensions"], [])
+        self.assertEqual(
+            signature["original_intuition"][0]["provenance"],
+            "review_extraction",
         )
 
     def test_invalid_transcript_reference_writes_nothing(self) -> None:
