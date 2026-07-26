@@ -21,6 +21,7 @@ class ResearchReviewTests(unittest.TestCase):
         self.review_sessions_path = self.project_path / "data" / "review_sessions"
         self.review_decisions_path = self.project_path / "data" / "review_decisions"
         self.source_policy_path = self.project_path / "config" / "source_policy.json"
+        self.settings_path = self.project_path / "data" / "settings.json"
         self.conversations_path.mkdir(parents=True)
         self.source_policy_path.parent.mkdir(parents=True)
         self.write_source_policy([])
@@ -31,6 +32,8 @@ class ResearchReviewTests(unittest.TestCase):
         mcp_server.EVIDENCE_PATH = self.evidence_path
         mcp_server.REVIEW_SESSIONS_PATH = self.review_sessions_path
         mcp_server.SOURCE_POLICY_PATH = self.source_policy_path
+        backend_selector.SETTINGS_PATH = self.settings_path
+        backend_selector.REVIEW_SESSIONS_PATH = self.review_sessions_path
         mcp_server.SOURCE_RECEIPTS.clear()
         os.environ["ALEXANDRIAN_AGENT_HOST"] = "test-host"
 
@@ -163,6 +166,102 @@ class ResearchReviewTests(unittest.TestCase):
 
         mock_readline.parse_and_bind.assert_called_once_with(
             "set enable-bracketed-paste on"
+        )
+
+    def test_research_mode_defaults_safe_then_remembers_previous_use(
+        self,
+    ) -> None:
+        self.assertEqual(backend_selector.load_research_mode(), "safe")
+
+        backend_selector.save_research_mode("auto_approve")
+        backend_selector.save_active_backend("codex")
+        backend_selector.save_active_backend(None)
+
+        settings = json.loads(
+            self.settings_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            backend_selector.load_research_mode(),
+            "auto_approve",
+        )
+        self.assertEqual(settings["research_mode"], "auto_approve")
+        self.assertIsNone(settings["active_backend"])
+        self.assertEqual(
+            backend_selector.normalize_research_mode_choice("auto"),
+            "auto_approve",
+        )
+
+    def test_review_research_mode_snapshot_does_not_follow_later_changes(
+        self,
+    ) -> None:
+        conversation_id = "mode-snapshot"
+
+        first_mode = backend_selector.snapshot_review_research_mode(
+            conversation_id,
+            "auto_approve",
+        )
+        backend_selector.save_research_mode("safe")
+        retained_mode = backend_selector.snapshot_review_research_mode(
+            conversation_id,
+            "safe",
+        )
+        session = json.loads(
+            (
+                self.review_sessions_path / f"{conversation_id}.json"
+            ).read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(first_mode, "auto_approve")
+        self.assertEqual(retained_mode, "auto_approve")
+        self.assertEqual(session["research_mode"], "auto_approve")
+
+    def test_finish_event_records_snapshotted_research_mode(self) -> None:
+        with patch.object(
+            backend_selector,
+            "CONVERSATIONS_PATH",
+            self.conversations_path,
+        ):
+            conversation_path = backend_selector.create_conversation()
+            backend_selector.finish_conversation(
+                conversation_path,
+                "auto_approve",
+            )
+
+        events = [
+            json.loads(line)
+            for line in conversation_path.read_text(
+                encoding="utf-8"
+            ).splitlines()
+        ]
+        self.assertEqual(
+            events[-1]["research_mode"],
+            "auto_approve",
+        )
+
+    def test_terminal_research_command_updates_persistent_mode(self) -> None:
+        responses = iter(["/research auto", "/bye"])
+
+        with (
+            patch.object(
+                backend_selector,
+                "load_skill_instructions",
+                return_value="Librarian instructions",
+            ),
+            patch(
+                "builtins.input",
+                side_effect=lambda _prompt: next(responses),
+            ),
+        ):
+            conversation_path = backend_selector.run_capture_prompt_loop(
+                "codex",
+                "/usr/bin/codex",
+                None,
+            )
+
+        self.assertIsNone(conversation_path)
+        self.assertEqual(
+            backend_selector.load_research_mode(),
+            "auto_approve",
         )
 
     def test_review_capture_commands_use_narrow_permissions(self) -> None:
@@ -319,6 +418,161 @@ class ResearchReviewTests(unittest.TestCase):
             )
         )
         self.assertEqual(session["pending_requests"][0]["domain"], "example.com")
+
+    def test_auto_approve_fetches_unknown_source_without_persisting_domain(
+        self,
+    ) -> None:
+        conversation_id = "auto-approved-source"
+        self.write_finished_conversation(conversation_id)
+        backend_selector.snapshot_review_research_mode(
+            conversation_id,
+            "auto_approve",
+        )
+        response = MagicMock()
+        headers = Message()
+        headers["Content-Type"] = "text/plain; charset=utf-8"
+        response.headers = headers
+        response.geturl.return_value = "https://example.com/research"
+        response.read.return_value = b"Bounded evidence."
+        opener = MagicMock()
+        opener.open.return_value.__enter__.return_value = response
+
+        with patch.object(
+            mcp_server.urllib_request,
+            "build_opener",
+            return_value=opener,
+        ):
+            result = mcp_server.fetch_research_source(
+                conversation_id,
+                "https://example.com/research",
+                "The claim under review",
+                "Check the primary source.",
+            )
+
+        session = json.loads(
+            (
+                self.review_sessions_path / f"{conversation_id}.json"
+            ).read_text(encoding="utf-8")
+        )
+        policy = json.loads(
+            self.source_policy_path.read_text(encoding="utf-8")
+        )
+        decision = session["decisions"][0]
+        self.assertEqual(result.status, "fetched")
+        self.assertEqual(session["pending_requests"], [])
+        self.assertEqual(decision["decision"], "auto_allow_once")
+        self.assertEqual(decision["authorized_by"], "auto_approve_mode")
+        self.assertEqual(decision["fetch_status"], "fetched")
+        self.assertEqual(decision["receipt_id"], result.receipt_id)
+        self.assertEqual(policy["approved_domains"], [])
+
+    def test_public_destination_validation_accepts_ipv4_and_ipv6(self) -> None:
+        records = [
+            (
+                mcp_server.socket.AF_INET,
+                mcp_server.socket.SOCK_STREAM,
+                6,
+                "",
+                ("8.8.8.8", 443),
+            ),
+            (
+                mcp_server.socket.AF_INET6,
+                mcp_server.socket.SOCK_STREAM,
+                6,
+                "",
+                ("2606:4700:4700::1111", 443, 0, 0),
+            ),
+        ]
+
+        with patch.object(
+            mcp_server.socket,
+            "getaddrinfo",
+            return_value=records,
+        ):
+            addresses = mcp_server.resolve_public_addresses("example.com")
+
+        self.assertEqual(
+            addresses,
+            ("8.8.8.8", "2606:4700:4700::1111"),
+        )
+
+    def test_destination_validation_rejects_private_or_mixed_dns(self) -> None:
+        for addresses in (
+            ["127.0.0.1"],
+            ["192.168.1.20"],
+            ["8.8.8.8", "10.0.0.5"],
+        ):
+            records = [
+                (
+                    mcp_server.socket.AF_INET,
+                    mcp_server.socket.SOCK_STREAM,
+                    6,
+                    "",
+                    (address, 443),
+                )
+                for address in addresses
+            ]
+            with (
+                self.subTest(addresses=addresses),
+                patch.object(
+                    mcp_server.socket,
+                    "getaddrinfo",
+                    return_value=records,
+                ),
+                self.assertRaises(ToolError),
+            ):
+                mcp_server.resolve_public_addresses("example.com")
+
+    def test_pinned_https_connection_uses_only_validated_address(
+        self,
+    ) -> None:
+        tls_context = MagicMock()
+        raw_socket = MagicMock()
+        wrapped_socket = MagicMock()
+        tls_context.wrap_socket.return_value = wrapped_socket
+        connection = mcp_server.PinnedHTTPSConnection(
+            "example.com",
+            timeout=5,
+            context=tls_context,
+            validated_addresses=("8.8.8.8",),
+        )
+
+        with patch.object(
+            mcp_server.socket,
+            "create_connection",
+            return_value=raw_socket,
+        ) as create_connection:
+            connection.connect()
+
+        create_connection.assert_called_once_with(
+            ("8.8.8.8", 443),
+            5,
+            None,
+        )
+        tls_context.wrap_socket.assert_called_once_with(
+            raw_socket,
+            server_hostname="example.com",
+        )
+        self.assertIs(connection.sock, wrapped_socket)
+
+    def test_redirect_cannot_leave_exact_approved_domain(self) -> None:
+        policy = mcp_server.SourcePolicy(
+            approved_domains=["example.com"],
+        )
+        handler = mcp_server.GuardedRedirectHandler(policy)
+        request = mcp_server.urllib_request.Request(
+            "https://example.com/start"
+        )
+
+        with self.assertRaises(ToolError):
+            handler.redirect_request(
+                request,
+                None,
+                302,
+                "Found",
+                {},
+                "https://other.example/target",
+            )
 
     def test_wrapper_records_allow_once_without_changing_domain_policy(self) -> None:
         conversation_id = "allow-once"
@@ -700,7 +954,7 @@ class ResearchReviewTests(unittest.TestCase):
         saved_markdown = markdown_path.read_text(encoding="utf-8")
 
         self.assertEqual(receipt.research_route.value, "research_seed")
-        self.assertEqual(saved_json["review_schema_version"], "1.2")
+        self.assertEqual(saved_json["review_schema_version"], "1.3")
         self.assertEqual(saved_json["reviewer_host"], "test-host")
         self.assertEqual(
             saved_json["review"]["core_question"]["transcript_references"],
@@ -709,7 +963,10 @@ class ResearchReviewTests(unittest.TestCase):
         self.assertIn("# Alexandrian Research Review", saved_markdown)
         self.assertIn("## Curiosity Signature", saved_markdown)
         self.assertIn("Route: `research_seed`", saved_markdown)
-        self.assertIn("#### Human Source Permissions", saved_markdown)
+        self.assertIn(
+            "#### Source Permissions and Automatic Authorizations",
+            saved_markdown,
+        )
 
     def test_human_checkpoint_is_stored_separately_from_review(self) -> None:
         conversation_id = "human-checkpoint"

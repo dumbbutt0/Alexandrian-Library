@@ -106,18 +106,23 @@ decision data supplied by the wrapper. Do not retry a rejected source. Record
 the rejection in the research trail and preserve the unanswered claim as an
 evidence gap.
 
+The wrapper may instead authorize unknown public sources automatically for
+this review. When the tool returns a fetched receipt, use it normally. Treat
+automatic network permission only as permission to inspect the source, never
+as evidence that the source is authoritative or correct.
+
 Use only receipt-backed sources to mark a claim as supported, contradicted, or
 qualified by a checked source. A receipt proves what was fetched, not that the
 source is correct. Compare the source's actual scope, evidence, date, and
 limitations against the claim. Preserve citation-ready metadata when the source
-exposes it, the location of the relevant evidence, a concise evidence summary,
-limitations, and counterevidence or a serious alternative explanation. Do not
-invent missing authors, dates, publishers, journals, or identifiers.
+exposes it, the location of the relevant evidence, a bounded exact excerpt from
+the fetched content, a concise evidence summary, limitations, and
+counterevidence or a serious alternative explanation. Do not invent missing
+authors, dates, publishers, journals, or identifiers.
 
-If the source domain is not approved, the fetch fails, or no appropriate source
-is available, preserve the claim as an evidence gap. Do not bypass the source
-policy with generic WebFetch, shell commands, another network tool, or a guessed
-receipt.
+If the fetch fails or no appropriate source is available, preserve the claim as
+an evidence gap. Do not bypass the source policy with generic WebFetch, shell
+commands, another network tool, or a guessed receipt.
 
 Keep sources merely mentioned in the transcript separate from sources checked
 by the reviewer. Record the actual research question or query, candidate source,

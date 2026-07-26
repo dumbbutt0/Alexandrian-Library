@@ -21,6 +21,8 @@ BACKENDS = {
     "2": "claude",
     "3": "ollama",
 }
+RESEARCH_MODES = {"safe", "auto_approve"}
+DEFAULT_RESEARCH_MODE = "safe"
 
 BACKEND_ARGUMENTS = {
     "codex": [],
@@ -67,34 +69,73 @@ def enable_multiline_terminal_paste() -> None:
         readline.parse_and_bind("set enable-bracketed-paste on")
 
 
-def load_active_backend() -> str | None:
-    """Load the saved backend when it is still a supported choice."""
+def load_settings() -> dict:
+    """Load local user preferences, falling back safely when unavailable."""
     try:
         settings = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return None
+        return {}
     except (json.JSONDecodeError, OSError):
-        print("Saved backend selection could not be read. Choose a backend.")
-        return None
+        print("Saved settings could not be read. Using safe defaults.")
+        return {}
 
     if not isinstance(settings, dict):
-        return None
+        return {}
 
-    active_backend = settings.get("active_backend")
+    return settings
+
+
+def save_settings(settings: dict) -> None:
+    """Persist local preferences without discarding unrelated settings."""
+    atomic_write_json(SETTINGS_PATH, settings)
+
+
+def load_active_backend() -> str | None:
+    """Load the saved backend when it is still a supported choice."""
+    active_backend = load_settings().get("active_backend")
     if active_backend in BACKENDS.values():
         return active_backend
 
     return None
 
 
+def load_research_mode() -> str:
+    """Load the previous research mode, defaulting safe on first use."""
+    research_mode = load_settings().get("research_mode")
+    if research_mode in RESEARCH_MODES:
+        return research_mode
+
+    return DEFAULT_RESEARCH_MODE
+
+
+def save_research_mode(research_mode: str) -> None:
+    """Remember the selected research mode for later conversations."""
+    if research_mode not in RESEARCH_MODES:
+        raise ValueError(f"Unsupported research mode: {research_mode}")
+
+    settings = load_settings()
+    settings["research_mode"] = research_mode
+    save_settings(settings)
+
+
+def normalize_research_mode_choice(value: str) -> str | None:
+    """Normalize terminal shorthand into one supported research mode."""
+    choices = {
+        "safe": "safe",
+        "auto": "auto_approve",
+        "auto_approve": "auto_approve",
+    }
+    return choices.get(value.strip().lower())
+
+
 def save_active_backend(backend: str | None) -> None:
-    """Persist one selected backend, or JSON null when none is selected."""
-    SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    settings = {"active_backend": backend}
-    SETTINGS_PATH.write_text(
-        json.dumps(settings, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    """Persist one backend selection without losing other preferences."""
+    if backend is not None and backend not in BACKENDS.values():
+        raise ValueError(f"Unsupported backend: {backend}")
+
+    settings = load_settings()
+    settings["active_backend"] = backend
+    save_settings(settings)
 
 
 def current_utc_time() -> str:
@@ -147,6 +188,10 @@ def load_review_session(conversation_id: str) -> dict:
         or session.get("conversation_id") != conversation_id
         or not isinstance(session.get("pending_requests"), list)
         or not isinstance(session.get("decisions"), list)
+        or (
+            session.get("research_mode") is not None
+            and session.get("research_mode") not in RESEARCH_MODES
+        )
     ):
         raise RuntimeError("Review source-approval state is invalid.")
 
@@ -156,6 +201,27 @@ def load_review_session(conversation_id: str) -> dict:
 def save_review_session(conversation_id: str, session: dict) -> None:
     """Save source decisions for the next provider review pass."""
     atomic_write_json(review_session_path(conversation_id), session)
+
+
+def snapshot_review_research_mode(
+    conversation_id: str,
+    selected_mode: str,
+) -> str:
+    """Freeze research authority for one review without changing it later."""
+    if selected_mode not in RESEARCH_MODES:
+        raise ValueError(f"Unsupported research mode: {selected_mode}")
+
+    session = load_review_session(conversation_id)
+    existing_mode = session.get("research_mode")
+    if existing_mode in RESEARCH_MODES:
+        return existing_mode
+    if existing_mode is not None:
+        raise RuntimeError("Review research mode is invalid.")
+
+    session["research_mode"] = selected_mode
+    session["research_mode_selected_at"] = current_utc_time()
+    save_review_session(conversation_id, session)
+    return selected_mode
 
 
 def add_approved_domain(domain: str) -> None:
@@ -304,13 +370,20 @@ def append_conversation_message(
     )
 
 
-def finish_conversation(conversation_path: Path) -> None:
+def finish_conversation(
+    conversation_path: Path,
+    research_mode: str = DEFAULT_RESEARCH_MODE,
+) -> None:
     """Mark a durable conversation as ready for later book review."""
+    if research_mode not in RESEARCH_MODES:
+        raise ValueError(f"Unsupported research mode: {research_mode}")
+
     append_conversation_event(
         conversation_path,
         {
             "type": "conversation_finished",
             "status": "ready_for_review",
+            "research_mode": research_mode,
             "finished_at": current_utc_time(),
         },
     )
@@ -1127,12 +1200,32 @@ def run_capture_prompt_loop(
         LIBRARIAN_SKILL_PATH,
         "Alexandrian Librarian",
     )
-    print(f"\nUsing {backend}. Enter /bye to switch or /finish to finish.")
+    research_mode = load_research_mode()
+    print(
+        f"\nUsing {backend}. Research mode: {research_mode}. "
+        "Enter /research safe, /research auto, /bye, or /finish."
+    )
 
     while True:
         user_prompt = input("\nPrompt: ")
         clear_entered_prompt_line()
         command = user_prompt.strip().lower()
+
+        if command.startswith("/research"):
+            command_parts = command.split()
+            requested_mode = (
+                normalize_research_mode_choice(command_parts[1])
+                if len(command_parts) == 2
+                else None
+            )
+            if requested_mode is None:
+                print("Use /research safe or /research auto.")
+                continue
+
+            research_mode = requested_mode
+            save_research_mode(research_mode)
+            print(f"\nResearch mode saved: {research_mode}")
+            continue
 
         if command == "/bye":
             return conversation_path
@@ -1142,10 +1235,15 @@ def run_capture_prompt_loop(
                 print("\nThere is no active conversation to finish.")
                 continue
 
-            finish_conversation(conversation_path)
+            snapshotted_mode = snapshot_review_research_mode(
+                conversation_path.stem,
+                research_mode,
+            )
+            finish_conversation(conversation_path, snapshotted_mode)
             print(
                 "\nConversation finished and marked ready for review:"
                 f"\n{conversation_path}"
+                f"\nResearch mode: {snapshotted_mode}"
             )
 
             print("\nReviewing finished conversation...")
