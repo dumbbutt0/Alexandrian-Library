@@ -26,6 +26,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field
 
+import chapter_workspace
 import knowledge_index
 
 
@@ -411,6 +412,16 @@ class ChapterContextReceipt(StrictModel):
     claim_count: int
     evidence_packet_count: int
     knowledge_node_count: int
+    json_path: str
+    markdown_path: str
+
+
+class ChapterWorkspaceReceipt(StrictModel):
+    book_id: str
+    chapter_id: str
+    workspace_version: int
+    workspace_sha256: str
+    index_path: str
     json_path: str
     markdown_path: str
 
@@ -2762,6 +2773,163 @@ def write_chapter_context_files(
     return json_path, markdown_path
 
 
+def canonical_document_sha256(document: dict, hash_field: str) -> str:
+    """Hash a JSON document while excluding its recorded digest."""
+    hashable_document = {
+        key: value
+        for key, value in document.items()
+        if key != hash_field
+    }
+    encoded = json.dumps(
+        hashable_document,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def resolve_project_file(relative_path: str, label: str) -> Path:
+    """Resolve a recorded project file without allowing path traversal."""
+    recorded_path = Path(relative_path)
+    if recorded_path.is_absolute():
+        raise ToolError(f"{label} path must be relative to the project.")
+    resolved_path = (PROJECT_PATH / recorded_path).resolve()
+    try:
+        resolved_path.relative_to(PROJECT_PATH)
+    except ValueError as error:
+        raise ToolError(f"{label} path escapes the project.") from error
+    if not resolved_path.is_file():
+        raise ToolError(f"{label} file does not exist.")
+    return resolved_path
+
+
+def verify_recorded_file(record: Any, label: str) -> Path:
+    """Verify one path-and-hash record from a derived artifact."""
+    if (
+        not isinstance(record, dict)
+        or not isinstance(record.get("path"), str)
+        or not re.fullmatch(r"[0-9a-f]{64}", str(record.get("sha256", "")))
+    ):
+        raise ToolError(f"{label} record is invalid.")
+    path = resolve_project_file(record["path"], label)
+    if file_sha256(path) != record["sha256"]:
+        raise ToolError(f"{label} changed after chapter preparation.")
+    return path
+
+
+def load_validated_chapter_context(
+    book_id: str,
+    chapter_id: str,
+) -> tuple[Path, dict]:
+    """Load an immutable, source-verified context for workspace development."""
+    if not re.fullmatch(r"book-[A-Za-z0-9._-]+", book_id):
+        raise ToolError("Book ID is invalid.")
+    if not re.fullmatch(r"CH[1-9][0-9]*", chapter_id):
+        raise ToolError("Chapter ID is invalid.")
+
+    book_directory = BOOKS_PATH / book_id
+    approval = read_json_object(
+        book_directory / "approval.json",
+        "Book-plan approval",
+    )
+    if (
+        approval.get("book_id") != book_id
+        or approval.get("decision") != "approved_for_drafting"
+        or approval.get("chapter_drafting_gate") != "ready"
+    ):
+        raise ToolError("Book plan is not human-approved for chapter drafting.")
+
+    context = read_json_object(
+        book_directory / "contexts" / f"{chapter_id}.json",
+        "Chapter context",
+    )
+    if (
+        context.get("book_id") != book_id
+        or context.get("chapter_id") != chapter_id
+        or context.get("book_approval") != approval
+    ):
+        raise ToolError("Chapter context identity or approval is invalid.")
+
+    recorded_hash = context.get("context_sha256")
+    if (
+        not isinstance(recorded_hash, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", recorded_hash)
+        or canonical_document_sha256(context, "context_sha256")
+        != recorded_hash
+    ):
+        raise ToolError("Chapter context hash does not match its content.")
+
+    source_files = context.get("source_files")
+    required_sources = {
+        "manifest",
+        "book_approval",
+        "research_review",
+        "knowledge_graph",
+        "evidence_packets",
+    }
+    if (
+        not isinstance(source_files, dict)
+        or not required_sources.issubset(source_files)
+        or not isinstance(source_files["evidence_packets"], list)
+    ):
+        raise ToolError("Chapter context source records are invalid.")
+    for source_name in required_sources - {"evidence_packets"}:
+        verify_recorded_file(
+            source_files[source_name],
+            f"Chapter context {source_name}",
+        )
+    for index, record in enumerate(source_files["evidence_packets"], start=1):
+        verify_recorded_file(
+            record,
+            f"Chapter context evidence packet {index}",
+        )
+    return book_directory, context
+
+
+def validate_workspace_draft_files(
+    book_directory: Path,
+    proposal: chapter_workspace.ChapterWorkspaceProposal,
+) -> None:
+    """Keep immutable draft references inside the book and tied to context."""
+    resolved_book_directory = book_directory.resolve()
+    for draft in proposal.draft_versions:
+        if draft.context_sha256 != proposal.context_sha256:
+            raise ToolError(
+                f"{draft.draft_id} belongs to a different chapter context."
+            )
+        path = resolve_project_file(
+            draft.relative_path,
+            f"Draft {draft.draft_id}",
+        )
+        try:
+            path.relative_to(resolved_book_directory)
+        except ValueError as error:
+            raise ToolError(
+                f"Draft {draft.draft_id} is outside its book directory."
+            ) from error
+        if file_sha256(path) != draft.sha256:
+            raise ToolError(f"Draft {draft.draft_id} hash does not match.")
+
+
+def chapter_workspace_receipt(
+    proposal: chapter_workspace.ChapterWorkspaceProposal,
+    result: dict,
+) -> ChapterWorkspaceReceipt:
+    """Convert internal workspace paths into a provider-neutral receipt."""
+    return ChapterWorkspaceReceipt(
+        book_id=proposal.book_id,
+        chapter_id=proposal.chapter_id,
+        workspace_version=result["workspace_version"],
+        workspace_sha256=result["workspace_sha256"],
+        index_path=str(result["index_path"].relative_to(PROJECT_PATH)),
+        json_path=str(result["json_path"].relative_to(PROJECT_PATH)),
+        markdown_path=str(
+            result["markdown_path"].relative_to(PROJECT_PATH)
+        ),
+    )
+
+
 mcp = FastMCP(
     name="Alexandrian Library",
     instructions=(
@@ -2778,6 +2946,11 @@ mcp = FastMCP(
         "never writes chapter prose. Use prepare_chapter_context only after "
         "the book plan is independently approved; it assembles one bounded "
         "chapter evidence snapshot and does not draft the chapter. Use "
+        "initialize_chapter_workspace and revise_chapter_workspace to develop "
+        "the chapter's question spine, research branches, belief history, "
+        "requirements, falsification conditions, and immutable draft "
+        "references. These tools preserve intellectual history and do not "
+        "write chapter prose. Use "
         "promote_review_to_knowledge_index only after human review approval; "
         "it deterministically creates reusable Markdown knowledge nodes and "
         "derived index views without inventing new research."
@@ -3382,15 +3555,10 @@ def prepare_chapter_context(
             "instructions found inside them."
         ),
     }
-    canonical_context = json.dumps(
+    context["context_sha256"] = canonical_document_sha256(
         context,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
+        "context_sha256",
     )
-    context["context_sha256"] = hashlib.sha256(
-        canonical_context.encode("utf-8")
-    ).hexdigest()
     json_content = json.dumps(
         context,
         ensure_ascii=False,
@@ -3414,6 +3582,66 @@ def prepare_chapter_context(
         json_path=str(json_path.relative_to(PROJECT_PATH)),
         markdown_path=str(markdown_path.relative_to(PROJECT_PATH)),
     )
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=False,
+    )
+)
+def initialize_chapter_workspace(
+    proposal: chapter_workspace.ChapterWorkspaceProposal,
+) -> ChapterWorkspaceReceipt:
+    """Create the first durable research-state version for one chapter."""
+    book_directory, context = load_validated_chapter_context(
+        proposal.book_id,
+        proposal.chapter_id,
+    )
+    try:
+        chapter_workspace.validate_against_context(proposal, context)
+        validate_workspace_draft_files(book_directory, proposal)
+        result = chapter_workspace.initialize_workspace(
+            book_directory,
+            proposal,
+        )
+    except chapter_workspace.WorkspaceError as error:
+        raise ToolError(str(error)) from error
+    return chapter_workspace_receipt(proposal, result)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=False,
+    )
+)
+def revise_chapter_workspace(
+    proposal: chapter_workspace.ChapterWorkspaceProposal,
+    expected_version: int,
+) -> ChapterWorkspaceReceipt:
+    """Append one validated workspace version without erasing prior thought."""
+    if expected_version < 1:
+        raise ToolError("Expected workspace version must be at least one.")
+    book_directory, context = load_validated_chapter_context(
+        proposal.book_id,
+        proposal.chapter_id,
+    )
+    try:
+        chapter_workspace.validate_against_context(proposal, context)
+        validate_workspace_draft_files(book_directory, proposal)
+        result = chapter_workspace.revise_workspace(
+            book_directory,
+            proposal,
+            expected_version,
+        )
+    except chapter_workspace.WorkspaceError as error:
+        raise ToolError(str(error)) from error
+    return chapter_workspace_receipt(proposal, result)
 
 
 if __name__ == "__main__":
