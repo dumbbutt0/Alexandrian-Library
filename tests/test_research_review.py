@@ -289,10 +289,25 @@ class ResearchReviewTests(unittest.TestCase):
             "book prompt",
             backend_selector.BOOK_PLAN_CALL,
         )
+        claude_chapter_command = backend_selector.build_capture_command(
+            "claude",
+            "/usr/bin/claude",
+            "chapter prompt",
+            backend_selector.CHAPTER_DEVELOPMENT_CALL,
+        )
+        codex_chapter_command = backend_selector.build_capture_command(
+            "codex",
+            "/usr/bin/codex",
+            "chapter prompt",
+            backend_selector.CHAPTER_DEVELOPMENT_CALL,
+        )
 
         self.assertIn("dontAsk", claude_command)
         self.assertIn(backend_selector.CLAUDE_REVIEW_TOOLS, claude_command)
-        self.assertIn("WebFetch,WebSearch", claude_command)
+        self.assertIn(
+            "WebFetch,WebSearch,Bash,Edit,Write",
+            claude_command,
+        )
         self.assertIn(
             backend_selector.CLAUDE_BOOK_PLAN_TOOLS,
             claude_book_command,
@@ -300,6 +315,15 @@ class ResearchReviewTests(unittest.TestCase):
         self.assertNotIn(
             backend_selector.CLAUDE_REVIEW_TOOLS,
             claude_book_command,
+        )
+        self.assertIn(
+            backend_selector.CLAUDE_CHAPTER_DEVELOPMENT_TOOLS,
+            claude_chapter_command,
+        )
+        self.assertTrue(
+            backend_selector.CLAUDE_CHAPTER_DEVELOPMENT_TOOLS.startswith(
+                "Read,"
+            )
         )
         self.assertEqual(
             codex_command,
@@ -321,6 +345,17 @@ class ResearchReviewTests(unittest.TestCase):
                 "--sandbox",
                 "read-only",
                 "book prompt",
+            ],
+        )
+        self.assertEqual(
+            codex_chapter_command,
+            [
+                "/usr/bin/codex",
+                "exec",
+                "--json",
+                "--sandbox",
+                "read-only",
+                "chapter prompt",
             ],
         )
 

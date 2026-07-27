@@ -474,23 +474,29 @@ class ChapterWorkspaceTests(unittest.TestCase):
         self.assertTrue(lock_path.exists())
 
     def test_draft_references_are_verified_and_immutable(self) -> None:
-        self.initialize()
-        draft_path = self.book_directory / "drafts" / "CH1" / "v001.md"
-        draft_path.parent.mkdir(parents=True)
-        draft_path.write_text("First bounded draft.\n", encoding="utf-8")
+        workspace_receipt = self.initialize()
+        draft_receipt = mcp_server.save_chapter_draft(
+            mcp_server.ChapterDraftSubmission(
+                book_id=self.book_id,
+                chapter_id=self.chapter_id,
+                context_sha256=self.context["context_sha256"],
+                expected_workspace_version=1,
+                expected_workspace_sha256=(
+                    workspace_receipt.workspace_sha256
+                ),
+                markdown="First bounded draft.",
+            )
+        )
+        draft_path = self.project_path / draft_receipt.relative_path
         proposal_data = self.make_proposal().model_dump(mode="json")
         proposal_data["draft_versions"] = [
             {
-                "draft_id": "D1",
-                "relative_path": str(
-                    draft_path.relative_to(self.project_path)
-                ),
-                "sha256": hashlib.sha256(
-                    draft_path.read_bytes()
-                ).hexdigest(),
-                "context_sha256": self.context["context_sha256"],
-                "provider": "codex",
-                "created_at": "2026-07-26T00:00:00+00:00",
+                "draft_id": draft_receipt.draft_id,
+                "relative_path": draft_receipt.relative_path,
+                "sha256": draft_receipt.sha256,
+                "context_sha256": draft_receipt.context_sha256,
+                "provider": draft_receipt.provider,
+                "created_at": draft_receipt.created_at,
             }
         ]
         proposal_data["targeted_revisions"] = [
@@ -510,6 +516,19 @@ class ChapterWorkspaceTests(unittest.TestCase):
             )
         )
         mcp_server.revise_chapter_workspace(proposal, 1)
+        self.assertEqual(
+            draft_path.read_text(encoding="utf-8"),
+            "First bounded draft.\n",
+        )
+        metadata = json.loads(
+            (
+                self.project_path / draft_receipt.metadata_path
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            metadata["source_workspace_sha256"],
+            workspace_receipt.workspace_sha256,
+        )
 
         mutated_data = proposal.model_dump(mode="json")
         mutated_data["draft_versions"][0]["provider"] = "claude"
@@ -520,6 +539,39 @@ class ChapterWorkspaceTests(unittest.TestCase):
                 ),
                 2,
             )
+
+    def test_unregistered_draft_blocks_another_draft(self) -> None:
+        workspace_receipt = self.initialize()
+        stale_submission = mcp_server.ChapterDraftSubmission(
+            book_id=self.book_id,
+            chapter_id=self.chapter_id,
+            context_sha256=self.context["context_sha256"],
+            expected_workspace_version=1,
+            expected_workspace_sha256="f" * 64,
+            markdown="This stale draft must not be saved.",
+        )
+        with self.assertRaises(ToolError):
+            mcp_server.save_chapter_draft(stale_submission)
+
+        submission = mcp_server.ChapterDraftSubmission(
+            book_id=self.book_id,
+            chapter_id=self.chapter_id,
+            context_sha256=self.context["context_sha256"],
+            expected_workspace_version=1,
+            expected_workspace_sha256=workspace_receipt.workspace_sha256,
+            markdown="A draft awaiting workspace registration.",
+        )
+        mcp_server.save_chapter_draft(submission)
+
+        with self.assertRaises(ToolError):
+            mcp_server.save_chapter_draft(submission)
+
+        draft_files = list(
+            (
+                self.book_directory / "drafts" / self.chapter_id
+            ).glob("D*.md")
+        )
+        self.assertEqual(len(draft_files), 1)
 
 
 if __name__ == "__main__":

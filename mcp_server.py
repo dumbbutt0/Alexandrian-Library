@@ -426,6 +426,29 @@ class ChapterWorkspaceReceipt(StrictModel):
     markdown_path: str
 
 
+class ChapterDraftSubmission(StrictModel):
+    book_id: str = Field(pattern=r"^book-[A-Za-z0-9._-]+$")
+    chapter_id: str = Field(pattern=r"^CH[1-9][0-9]*$")
+    context_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    expected_workspace_version: int = Field(ge=1)
+    expected_workspace_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    markdown: str = Field(min_length=1, max_length=2_000_000)
+
+
+class ChapterDraftReceipt(StrictModel):
+    book_id: str
+    chapter_id: str
+    draft_id: str
+    relative_path: str
+    metadata_path: str
+    sha256: str
+    context_sha256: str
+    source_workspace_version: int
+    source_workspace_sha256: str
+    provider: str
+    created_at: str
+
+
 class SourcePolicy(StrictModel):
     approved_domains: list[str] = Field(default_factory=list)
     allow_subdomains: bool = False
@@ -2930,6 +2953,123 @@ def chapter_workspace_receipt(
     )
 
 
+def save_chapter_draft_files(
+    book_directory: Path,
+    submission: ChapterDraftSubmission,
+    workspace_document: dict,
+) -> ChapterDraftReceipt:
+    """Save one immutable draft and its provenance receipt."""
+    if not submission.markdown.strip():
+        raise ToolError("Chapter draft cannot contain only whitespace.")
+
+    workspace = workspace_document["workspace"]
+    registered_draft_ids = {
+        record["draft_id"] for record in workspace["draft_versions"]
+    }
+    draft_id = f"D{len(registered_draft_ids) + 1}"
+    draft_directory = (
+        book_directory / "drafts" / submission.chapter_id
+    )
+    draft_directory.mkdir(parents=True, exist_ok=True)
+    lock_path = draft_directory / ".draft.lock"
+    try:
+        lock_descriptor = os.open(
+            lock_path,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+            0o600,
+        )
+    except FileExistsError as error:
+        raise ToolError("Another chapter draft save is in progress.") from error
+    except OSError as error:
+        raise ToolError("Chapter draft lock could not be created.") from error
+
+    try:
+        for metadata_path in draft_directory.glob("D*.json"):
+            metadata = read_json_object(
+                metadata_path,
+                "Chapter draft metadata",
+            )
+            existing_draft_id = metadata.get("draft_id")
+            if existing_draft_id not in registered_draft_ids:
+                raise ToolError(
+                    "An unregistered chapter draft already exists. Register "
+                    "its receipt before creating another draft."
+                )
+
+        markdown_path = draft_directory / f"{draft_id}.md"
+        metadata_path = draft_directory / f"{draft_id}.json"
+        if markdown_path.exists() or metadata_path.exists():
+            raise ToolError(f"Chapter draft {draft_id} already exists.")
+
+        markdown = submission.markdown.rstrip() + "\n"
+        draft_sha256 = hashlib.sha256(
+            markdown.encode("utf-8")
+        ).hexdigest()
+        created_at = current_utc_time()
+        provider = os.environ.get("ALEXANDRIAN_AGENT_HOST", "unknown")
+        relative_path = str(markdown_path.relative_to(PROJECT_PATH))
+        metadata_relative_path = str(
+            metadata_path.relative_to(PROJECT_PATH)
+        )
+        metadata = {
+            "schema_version": "1.0",
+            "book_id": submission.book_id,
+            "chapter_id": submission.chapter_id,
+            "draft_id": draft_id,
+            "relative_path": relative_path,
+            "sha256": draft_sha256,
+            "context_sha256": submission.context_sha256,
+            "source_workspace_version": (
+                submission.expected_workspace_version
+            ),
+            "source_workspace_sha256": (
+                submission.expected_workspace_sha256
+            ),
+            "provider": provider,
+            "created_at": created_at,
+        }
+        suffix = f".tmp-{uuid.uuid4().hex}"
+        temporary_markdown = markdown_path.with_name(
+            markdown_path.name + suffix
+        )
+        temporary_metadata = metadata_path.with_name(
+            metadata_path.name + suffix
+        )
+        installed_markdown = False
+        try:
+            temporary_markdown.write_text(markdown, encoding="utf-8")
+            temporary_metadata.write_text(
+                json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            os.replace(temporary_markdown, markdown_path)
+            installed_markdown = True
+            os.replace(temporary_metadata, metadata_path)
+        except OSError as error:
+            temporary_markdown.unlink(missing_ok=True)
+            temporary_metadata.unlink(missing_ok=True)
+            if installed_markdown:
+                markdown_path.unlink(missing_ok=True)
+            raise ToolError("Chapter draft could not be saved.") from error
+    finally:
+        os.close(lock_descriptor)
+        lock_path.unlink(missing_ok=True)
+
+    return ChapterDraftReceipt(
+        book_id=submission.book_id,
+        chapter_id=submission.chapter_id,
+        draft_id=draft_id,
+        relative_path=relative_path,
+        metadata_path=metadata_relative_path,
+        sha256=draft_sha256,
+        context_sha256=submission.context_sha256,
+        source_workspace_version=submission.expected_workspace_version,
+        source_workspace_sha256=submission.expected_workspace_sha256,
+        provider=provider,
+        created_at=created_at,
+    )
+
+
 mcp = FastMCP(
     name="Alexandrian Library",
     instructions=(
@@ -2949,8 +3089,10 @@ mcp = FastMCP(
         "initialize_chapter_workspace and revise_chapter_workspace to develop "
         "the chapter's question spine, research branches, belief history, "
         "requirements, falsification conditions, and immutable draft "
-        "references. These tools preserve intellectual history and do not "
-        "write chapter prose. Use "
+        "references. Use save_chapter_draft only for one bounded rough draft "
+        "whose source workspace is still current, then register its exact "
+        "receipt through revise_chapter_workspace. These tools preserve "
+        "intellectual history. Use "
         "promote_review_to_knowledge_index only after human review approval; "
         "it deterministically creates reusable Markdown knowledge nodes and "
         "derived index views without inventing new research."
@@ -3610,6 +3752,86 @@ def initialize_chapter_workspace(
     except chapter_workspace.WorkspaceError as error:
         raise ToolError(str(error)) from error
     return chapter_workspace_receipt(proposal, result)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=False,
+    )
+)
+def save_chapter_draft(
+    submission: ChapterDraftSubmission,
+) -> ChapterDraftReceipt:
+    """Save one immutable rough draft from the current chapter workspace."""
+    book_directory, context = load_validated_chapter_context(
+        submission.book_id,
+        submission.chapter_id,
+    )
+    if submission.context_sha256 != context["context_sha256"]:
+        raise ToolError("Draft context does not match the approved chapter.")
+
+    workspace_directory = chapter_workspace.workspace_directory(
+        book_directory,
+        submission.chapter_id,
+    )
+    workspace_lock_path = workspace_directory / ".revision.lock"
+    try:
+        lock_descriptor = os.open(
+            workspace_lock_path,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+            0o600,
+        )
+    except FileExistsError as error:
+        raise ToolError(
+            "Another chapter workspace operation is in progress."
+        ) from error
+    except OSError as error:
+        raise ToolError(
+            "Chapter workspace lock could not be created."
+        ) from error
+
+    try:
+        _, index, workspace_document = (
+            chapter_workspace.load_current_workspace(
+                book_directory,
+                submission.chapter_id,
+            )
+        )
+        if (
+            index.get("book_id") != submission.book_id
+            or index.get("current_version")
+            != submission.expected_workspace_version
+            or workspace_document.get("workspace_sha256")
+            != submission.expected_workspace_sha256
+        ):
+            raise ToolError(
+                "Chapter workspace changed before the draft was saved."
+            )
+        try:
+            proposal = (
+                chapter_workspace.ChapterWorkspaceProposal.model_validate(
+                    workspace_document["workspace"]
+                )
+            )
+            chapter_workspace.validate_against_context(proposal, context)
+        except (KeyError, ValueError, chapter_workspace.WorkspaceError) as error:
+            raise ToolError(
+                "Current chapter workspace is invalid."
+            ) from error
+        validate_workspace_draft_files(book_directory, proposal)
+        return save_chapter_draft_files(
+            book_directory,
+            submission,
+            workspace_document,
+        )
+    except chapter_workspace.WorkspaceError as error:
+        raise ToolError(str(error)) from error
+    finally:
+        os.close(lock_descriptor)
+        workspace_lock_path.unlink(missing_ok=True)
 
 
 @mcp.tool(

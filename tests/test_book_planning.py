@@ -560,6 +560,89 @@ class BookPlanningTests(unittest.TestCase):
             [backend_selector.BOOK_PLAN_CALL],
         )
 
+    def test_wrapper_runs_one_new_chapter_development_pass(self) -> None:
+        book_id, _, _ = self.create_evidence_book(
+            "wrapper-chapter-development"
+        )
+        captured_call_purposes = []
+
+        def capture_side_effect(
+            _backend: str,
+            _program_path: str,
+            prompt: str,
+            call_purpose: str,
+        ) -> tuple[list[dict], str]:
+            captured_call_purposes.append(call_purpose)
+            self.assertIn(book_id, prompt)
+            self.assertIn('"chapter_id": "CH1"', prompt)
+            context_path = (
+                self.books_path / book_id / "contexts" / "CH1.json"
+            )
+            context_path.parent.mkdir(parents=True)
+            context_path.write_text("{}\n", encoding="utf-8")
+            workspace_directory = (
+                self.books_path / book_id / "workspaces" / "CH1"
+            )
+            versions_directory = workspace_directory / "versions"
+            versions_directory.mkdir(parents=True)
+            (versions_directory / "v001.json").write_text(
+                "{}\n",
+                encoding="utf-8",
+            )
+            (versions_directory / "v001.md").write_text(
+                "# Initial Chapter Workspace\n",
+                encoding="utf-8",
+            )
+            (workspace_directory / "index.json").write_text(
+                json.dumps(
+                    {
+                        "book_id": book_id,
+                        "chapter_id": "CH1",
+                        "context_sha256": "a" * 64,
+                        "current_version": 1,
+                        "current_json_path": "versions/v001.json",
+                        "current_markdown_path": "versions/v001.md",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return [], "Chapter workspace initialized."
+
+        with (
+            patch.object(
+                backend_selector,
+                "PROJECT_PATH",
+                self.project_path,
+            ),
+            patch.object(
+                backend_selector,
+                "BOOKS_PATH",
+                self.books_path,
+            ),
+            patch.object(
+                backend_selector,
+                "capture_backend_response",
+                side_effect=capture_side_effect,
+            ),
+        ):
+            json_path, markdown_path, body, version = (
+                backend_selector.develop_chapter_once(
+                    "codex",
+                    "/usr/bin/codex",
+                    book_id,
+                    "CH1",
+                )
+            )
+
+        self.assertTrue(json_path.is_file())
+        self.assertTrue(markdown_path.is_file())
+        self.assertEqual(body, "# Initial Chapter Workspace")
+        self.assertEqual(version, 1)
+        self.assertEqual(
+            captured_call_purposes,
+            [backend_selector.CHAPTER_DEVELOPMENT_CALL],
+        )
+
     def test_unknown_claim_prevents_any_book_files(self) -> None:
         conversation_id = "unknown-claim"
         review_id = self.create_eligible_review(conversation_id)
