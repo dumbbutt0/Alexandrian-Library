@@ -430,6 +430,39 @@ class ResearchReviewTests(unittest.TestCase):
             ],
         )
 
+    def test_captured_backend_does_not_inherit_terminal_input(self) -> None:
+        completed = Mock(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "agent_message",
+                        "text": "Captured response.",
+                    },
+                }
+            ),
+            stderr="",
+        )
+
+        with patch.object(
+            backend_selector.subprocess,
+            "run",
+            return_value=completed,
+        ) as run:
+            _, response = backend_selector.capture_backend_response(
+                "codex",
+                "/usr/bin/codex",
+                "Review prompt",
+                backend_selector.REVIEW_CALL,
+            )
+
+        self.assertEqual(response, "Captured response.")
+        self.assertIs(
+            run.call_args.kwargs["stdin"],
+            backend_selector.subprocess.DEVNULL,
+        )
+
     def test_review_restarts_after_wrapper_resolves_unknown_source(self) -> None:
         conversation_id = "provider-neutral-loop"
         self.write_finished_conversation(conversation_id)

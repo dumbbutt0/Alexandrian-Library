@@ -972,6 +972,7 @@ def capture_backend_response(
     completed_process = subprocess.run(
         command,
         capture_output=True,
+        stdin=subprocess.DEVNULL,
         text=True,
         check=False,
         cwd=PROJECT_PATH,
