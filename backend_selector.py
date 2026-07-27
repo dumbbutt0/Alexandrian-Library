@@ -9,6 +9,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+import book_assembler
 import knowledge_index
 
 try:
@@ -2480,6 +2481,376 @@ def review_finished_conversation(
     return json_path, markdown_path, review_body
 
 
+def load_workflow_json(path: Path, label: str) -> dict:
+    """Read one wrapper-owned JSON artifact used to continue a workflow."""
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as error:
+        raise RuntimeError(f"{label} could not be read at {path}.") from error
+    if not isinstance(document, dict):
+        raise RuntimeError(f"{label} must contain a JSON object.")
+    return document
+
+
+def conversation_is_finished(conversation_path: Path) -> bool:
+    """Return whether one durable conversation has a valid finish event."""
+    try:
+        events = load_conversation_events(conversation_path)
+    except RuntimeError:
+        return False
+    return any(
+        event.get("type") == "conversation_finished"
+        and event.get("status") == "ready_for_review"
+        for event in events
+    )
+
+
+def workflow_stage(conversation_path: Path) -> str:
+    """Derive the next action from canonical artifacts instead of RAM state."""
+    if not conversation_is_finished(conversation_path):
+        raise RuntimeError("Only a finished conversation can enter book workflow.")
+
+    conversation_id = conversation_path.stem
+    review_json = REVIEWS_PATH / f"{conversation_id}.json"
+    review_markdown = REVIEWS_PATH / f"{conversation_id}.md"
+    if review_json.exists() != review_markdown.exists():
+        raise RuntimeError("Research review output is only partially present.")
+    if not review_json.exists():
+        return "research_review"
+
+    review_document = load_workflow_json(
+        review_json,
+        "Canonical research review",
+    )
+    review_id = review_document.get("review_id")
+    if (
+        review_document.get("conversation_id") != conversation_id
+        or not isinstance(review_id, str)
+    ):
+        raise RuntimeError("Canonical research review identity is invalid.")
+
+    decision_path = REVIEW_DECISIONS_PATH / f"{conversation_id}.json"
+    if not decision_path.exists():
+        return "review_checkpoint"
+    decision = load_workflow_json(
+        decision_path,
+        "Human review checkpoint",
+    )
+    if (
+        decision.get("conversation_id") != conversation_id
+        or decision.get("review_id") != review_id
+    ):
+        raise RuntimeError("Human review checkpoint identity is invalid.")
+    if decision.get("book_planning_gate") != "ready":
+        return "review_held"
+
+    knowledge_directory = KNOWLEDGE_PATH / "nodes" / review_id
+    if not knowledge_directory.is_dir():
+        return "knowledge_promotion"
+
+    book_id = f"book-{conversation_id}"
+    book_directory = BOOKS_PATH / book_id
+    manifest_path = book_directory / "manifest.json"
+    outline_path = book_directory / "outline.md"
+    if manifest_path.exists() != outline_path.exists():
+        raise RuntimeError("Book-plan output is only partially present.")
+    if not manifest_path.exists():
+        return "book_plan"
+
+    manifest = load_workflow_json(manifest_path, "Book manifest")
+    if manifest.get("book_id") != book_id:
+        raise RuntimeError("Book manifest identity is invalid.")
+    approval_path = book_directory / "approval.json"
+    if not approval_path.exists():
+        return "book_plan_checkpoint"
+    approval = load_workflow_json(approval_path, "Book-plan approval")
+    if approval.get("book_id") != book_id:
+        raise RuntimeError("Book-plan approval identity is invalid.")
+    if approval.get("chapter_drafting_gate") != "ready":
+        return "book_plan_held"
+
+    assembly_path = book_directory / "assembly.json"
+    book_path = book_directory / "book.md"
+    if assembly_path.exists() or book_path.exists():
+        book_assembler.verify_existing_assembly(
+            PROJECT_PATH,
+            book_directory,
+            book_id,
+        )
+        return "complete"
+
+    included_chapters = [
+        chapter
+        for chapter in manifest.get("chapter_plan", [])
+        if isinstance(chapter, dict)
+        and chapter.get("material_disposition") in {"include", "appendix"}
+    ]
+    if not included_chapters:
+        raise RuntimeError("Approved book plan has no included chapters.")
+    if any(
+        chapter.get("readiness") != "ready_to_draft"
+        for chapter in included_chapters
+    ):
+        return "chapter_plan_blocked"
+
+    for chapter in included_chapters:
+        chapter_id = chapter.get("chapter_id")
+        if not isinstance(chapter_id, str):
+            raise RuntimeError("Approved book plan has an invalid chapter.")
+        run_path = chapter_run_path(book_id, chapter_id)
+        if not run_path.exists():
+            return "chapter_development"
+        run = load_workflow_json(run_path, f"{chapter_id} run state")
+        if run.get("status") != "chapter_complete":
+            return "chapter_development"
+
+    return "book_assembly"
+
+
+WORKFLOW_STAGE_LABELS = {
+    "research_review": "research review",
+    "review_checkpoint": "human review checkpoint",
+    "review_held": "held after research review",
+    "knowledge_promotion": "knowledge-index promotion",
+    "book_plan": "book planning",
+    "book_plan_checkpoint": "human book-plan checkpoint",
+    "book_plan_held": "held after book planning",
+    "chapter_plan_blocked": "blocked chapter plan",
+    "chapter_development": "chapter development",
+    "book_assembly": "final book assembly",
+    "complete": "complete",
+}
+
+
+def discover_resumable_workflows() -> list[tuple[Path, str]]:
+    """Find finished conversations whose book workflow is not complete."""
+    workflows = []
+    for conversation_path in sorted(CONVERSATIONS_PATH.glob("*.jsonl")):
+        if not conversation_is_finished(conversation_path):
+            continue
+        try:
+            stage = workflow_stage(conversation_path)
+        except RuntimeError:
+            stage = "workflow_error"
+        if stage == "complete":
+            continue
+        workflows.append((conversation_path, stage))
+    return workflows
+
+
+def select_resumable_workflow() -> Path | None:
+    """Let the user select one durable workflow without changing its state."""
+    workflows = discover_resumable_workflows()
+    if not workflows:
+        print("\nNo unfinished book workflows were found.")
+        return None
+
+    print("\nUnfinished book workflows:")
+    for index, (path, stage) in enumerate(workflows, start=1):
+        label = WORKFLOW_STAGE_LABELS.get(stage, "workflow error")
+        print(f"{index}. {path.stem} - {label}")
+    print("0. Return to the conversation")
+
+    while True:
+        choice = input("Select a workflow: ").strip()
+        if choice == "0":
+            return None
+        if choice.isdigit() and 1 <= int(choice) <= len(workflows):
+            return workflows[int(choice) - 1][0]
+        print(f"Invalid selection. Enter 0 through {len(workflows)}.")
+
+
+def continue_book_workflow(
+    backend: str,
+    program_path: str,
+    conversation_path: Path,
+) -> dict:
+    """Continue one finished conversation from its first unfinished stage."""
+    conversation_id = conversation_path.stem
+    review_json = REVIEWS_PATH / f"{conversation_id}.json"
+    review_markdown = REVIEWS_PATH / f"{conversation_id}.md"
+    decision_path = REVIEW_DECISIONS_PATH / f"{conversation_id}.json"
+    book_id = f"book-{conversation_id}"
+    book_directory = BOOKS_PATH / book_id
+    manifest_path = book_directory / "manifest.json"
+    outline_path = book_directory / "outline.md"
+    approval_path = book_directory / "approval.json"
+
+    while True:
+        stage = workflow_stage(conversation_path)
+
+        if stage == "research_review":
+            print("\nReviewing finished conversation...")
+            json_path, markdown_path, review_body = (
+                review_finished_conversation(
+                    backend,
+                    program_path,
+                    conversation_path,
+                )
+            )
+            display_chat_section("RESEARCH REVIEW", review_body)
+            print(
+                "\nCanonical review saved to:"
+                f"\n{json_path}"
+                "\n\nReadable review saved to:"
+                f"\n{markdown_path}"
+            )
+            continue
+
+        if stage == "review_checkpoint":
+            decision_path = record_human_review_checkpoint(review_json)
+            print(
+                "\nHuman book-planning decision saved to:"
+                f"\n{decision_path}"
+            )
+            continue
+
+        if stage == "review_held":
+            return {
+                "status": "review_held",
+                "conversation_id": conversation_id,
+                "decision_path": str(decision_path),
+            }
+
+        if stage == "knowledge_promotion":
+            print("\nPromoting approved research into the knowledge index...")
+            receipt = promote_review_to_index(review_json, decision_path)
+            print(
+                "\nKnowledge nodes saved to:"
+                f"\n{receipt['review_nodes_path']}"
+                "\n\nReadable knowledge index saved to:"
+                f"\n{receipt['index_path']}"
+                "\n\nMachine-readable graph saved to:"
+                f"\n{receipt['graph_path']}"
+            )
+            continue
+
+        if stage == "book_plan":
+            print("\nPlanning the approved book...")
+            manifest_path, outline_path, outline_body = plan_book_from_review(
+                backend,
+                program_path,
+                review_json,
+                decision_path,
+            )
+            display_chat_section("BOOK PLAN", outline_body)
+            print(
+                "\nCanonical book manifest saved to:"
+                f"\n{manifest_path}"
+                "\n\nReadable book outline saved to:"
+                f"\n{outline_path}"
+            )
+            continue
+
+        if stage == "book_plan_checkpoint":
+            try:
+                outline_body = outline_path.read_text(
+                    encoding="utf-8"
+                ).strip()
+            except OSError as error:
+                raise RuntimeError(
+                    f"Book outline could not be read at {outline_path}."
+                ) from error
+            display_chat_section("BOOK PLAN", outline_body)
+            approval_path = record_book_plan_checkpoint(manifest_path)
+            print(
+                "\nHuman book-plan decision saved to:"
+                f"\n{approval_path}"
+            )
+            continue
+
+        if stage == "book_plan_held":
+            return {
+                "status": "book_plan_held",
+                "conversation_id": conversation_id,
+                "approval_path": str(approval_path),
+            }
+
+        if stage == "chapter_plan_blocked":
+            return {
+                "status": "chapter_plan_blocked",
+                "conversation_id": conversation_id,
+                "manifest_path": str(manifest_path),
+                "reason": (
+                    "At least one included chapter still has unresolved "
+                    "research, experiment, contradiction, or human work."
+                ),
+            }
+
+        if stage == "chapter_development":
+            manifest = load_workflow_json(manifest_path, "Book manifest")
+            print("\nRunning the bounded chapter completion workflow...")
+            chapter_results = run_ready_book_chapters(
+                backend,
+                program_path,
+                manifest,
+            )
+            if not chapter_results:
+                return {
+                    "status": "chapter_plan_blocked",
+                    "conversation_id": conversation_id,
+                    "manifest_path": str(manifest_path),
+                    "reason": "No included chapter is ready for development.",
+                }
+            for chapter_result in chapter_results:
+                chapter_id = chapter_result["chapter_id"]
+                status = chapter_result["status"]
+                print(
+                    f"\n{chapter_id} workflow status: {status}"
+                    "\nRun state saved to:"
+                    f"\n{chapter_run_path(book_id, chapter_id)}"
+                )
+                if status != "chapter_complete":
+                    return {
+                        "status": status,
+                        "conversation_id": conversation_id,
+                        "chapter_id": chapter_id,
+                        "run_path": str(
+                            chapter_run_path(book_id, chapter_id)
+                        ),
+                        "reason": chapter_result.get("stop_reason"),
+                        "human_input_requests": chapter_result.get(
+                            "human_input_requests",
+                            [],
+                        ),
+                    }
+            continue
+
+        if stage == "book_assembly":
+            print("\nAssembling the completed book...")
+            try:
+                receipt = book_assembler.assemble_book(
+                    PROJECT_PATH,
+                    book_id,
+                )
+            except book_assembler.BookAssemblyError as error:
+                raise RuntimeError(str(error)) from error
+            print(
+                "\nFinished book saved to:"
+                f"\n{PROJECT_PATH / receipt['book_path']}"
+                "\n\nAssembly receipt saved to:"
+                f"\n{book_directory / 'assembly.json'}"
+            )
+            continue
+
+        if stage == "complete":
+            receipt = load_workflow_json(
+                book_directory / "assembly.json",
+                "Book assembly receipt",
+            )
+            return {
+                "status": "complete",
+                "conversation_id": conversation_id,
+                "book_id": book_id,
+                "book_path": str(PROJECT_PATH / receipt["book_path"]),
+                "assembly_path": str(
+                    book_directory / "assembly.json"
+                ),
+            }
+
+        raise RuntimeError(f"Unsupported workflow stage: {stage}.")
+
+
 def run_capture_prompt_loop(
     backend: str,
     program_path: str,
@@ -2493,7 +2864,7 @@ def run_capture_prompt_loop(
     research_mode = load_research_mode()
     print(
         f"\nUsing {backend}. Research mode: {research_mode}. "
-        "Enter /research safe, /research auto, /bye, or /finish."
+        "Enter /research safe, /research auto, /resume, /bye, or /finish."
     )
 
     while True:
@@ -2520,6 +2891,28 @@ def run_capture_prompt_loop(
         if command == "/bye":
             return conversation_path
 
+        if command == "/resume":
+            resumable_path = select_resumable_workflow()
+            if resumable_path is None:
+                continue
+            try:
+                result = continue_book_workflow(
+                    backend,
+                    program_path,
+                    resumable_path,
+                )
+            except RuntimeError as error:
+                display_chat_section("WORKFLOW ERROR", str(error))
+                print(
+                    "Durable workflow state remains saved for another resume."
+                )
+                continue
+            display_chat_section(
+                "WORKFLOW STATUS",
+                json.dumps(result, ensure_ascii=False, indent=2),
+            )
+            continue
+
         if command == "/finish":
             if conversation_path is None:
                 print("\nThere is no active conversation to finish.")
@@ -2536,186 +2929,22 @@ def run_capture_prompt_loop(
                 f"\nResearch mode: {snapshotted_mode}"
             )
 
-            print("\nReviewing finished conversation...")
-
             try:
-                json_path, markdown_path, review_body = (
-                    review_finished_conversation(
-                        backend,
-                        program_path,
-                        conversation_path,
-                    )
+                result = continue_book_workflow(
+                    backend,
+                    program_path,
+                    conversation_path,
                 )
             except RuntimeError as error:
-                display_chat_section("REVIEW ERROR", str(error))
-                print("The conversation remains saved and ready for review.")
-                return None
-
-            display_chat_section("RESEARCH REVIEW", review_body)
-            try:
-                decision_path = record_human_review_checkpoint(json_path)
-            except RuntimeError as error:
-                display_chat_section("CHECKPOINT ERROR", str(error))
-                decision_path = None
-
-            print(
-                "\nCanonical review saved to:"
-                f"\n{json_path}"
-                "\n\nReadable review saved to:"
-                f"\n{markdown_path}"
-            )
-            if decision_path is not None:
+                display_chat_section("WORKFLOW ERROR", str(error))
                 print(
-                    "\nHuman book-planning decision saved to:"
-                    f"\n{decision_path}"
+                    "Durable workflow state remains saved for another resume."
                 )
-
-                try:
-                    decision_record = json.loads(
-                        decision_path.read_text(encoding="utf-8")
-                    )
-                except (json.JSONDecodeError, OSError):
-                    decision_record = {}
-
-                if decision_record.get("book_planning_gate") == "ready":
-                    print("\nPromoting approved research into the knowledge index...")
-
-                    try:
-                        knowledge_receipt = promote_review_to_index(
-                            json_path,
-                            decision_path,
-                        )
-                    except RuntimeError as error:
-                        display_chat_section("KNOWLEDGE INDEX ERROR", str(error))
-                        print(
-                            "The approved research review remains saved for "
-                            "later promotion."
-                        )
-                        return None
-
-                    print(
-                        "\nKnowledge nodes saved to:"
-                        f"\n{knowledge_receipt['review_nodes_path']}"
-                        "\n\nReadable knowledge index saved to:"
-                        f"\n{knowledge_receipt['index_path']}"
-                        "\n\nMachine-readable graph saved to:"
-                        f"\n{knowledge_receipt['graph_path']}"
-                    )
-                    print("\nPlanning the approved book...")
-
-                    try:
-                        manifest_path, outline_path, outline_body = (
-                            plan_book_from_review(
-                                backend,
-                                program_path,
-                                json_path,
-                                decision_path,
-                            )
-                        )
-                    except RuntimeError as error:
-                        display_chat_section("BOOK PLAN ERROR", str(error))
-                        print(
-                            "The approved research review remains saved for "
-                            "book planning."
-                        )
-                        return None
-
-                    display_chat_section("BOOK PLAN", outline_body)
-
-                    try:
-                        book_approval_path = record_book_plan_checkpoint(
-                            manifest_path
-                        )
-                    except RuntimeError as error:
-                        display_chat_section(
-                            "BOOK APPROVAL ERROR",
-                            str(error),
-                        )
-                        book_approval_path = None
-
-                    print(
-                        "\nCanonical book manifest saved to:"
-                        f"\n{manifest_path}"
-                        "\n\nReadable book outline saved to:"
-                        f"\n{outline_path}"
-                    )
-                    if book_approval_path is not None:
-                        print(
-                            "\nHuman book-plan decision saved to:"
-                            f"\n{book_approval_path}"
-                        )
-                        try:
-                            book_approval = json.loads(
-                                book_approval_path.read_text(
-                                    encoding="utf-8"
-                                )
-                            )
-                            manifest = json.loads(
-                                manifest_path.read_text(encoding="utf-8")
-                            )
-                        except (json.JSONDecodeError, OSError):
-                            book_approval = {}
-                            manifest = {}
-
-                        if (
-                            book_approval.get("chapter_drafting_gate")
-                            == "ready"
-                        ):
-                            print(
-                                "\nRunning the bounded chapter completion "
-                                "workflow..."
-                            )
-                            try:
-                                chapter_results = (
-                                    run_ready_book_chapters(
-                                        backend,
-                                        program_path,
-                                        manifest,
-                                    )
-                                )
-                            except RuntimeError as error:
-                                display_chat_section(
-                                    "CHAPTER WORKFLOW ERROR",
-                                    str(error),
-                                )
-                                print(
-                                    "Durable chapter state remains saved "
-                                    "for a later resume."
-                                )
-                                return None
-
-                            if not chapter_results:
-                                print(
-                                    "\nNo approved chapter is currently "
-                                    "ready for development."
-                                )
-                            for chapter_result in chapter_results:
-                                chapter_id = chapter_result["chapter_id"]
-                                status = chapter_result["status"]
-                                print(
-                                    f"\n{chapter_id} workflow status: "
-                                    f"{status}"
-                                    "\nRun state saved to:"
-                                    f"\n{chapter_run_path(manifest['book_id'], chapter_id)}"
-                                )
-                                if status != "chapter_complete":
-                                    if chapter_result.get("stop_reason"):
-                                        print(
-                                            "Reason: "
-                                            f"{chapter_result['stop_reason']}"
-                                        )
-                                    for request in chapter_result.get(
-                                        "human_input_requests",
-                                        [],
-                                    ):
-                                        print(
-                                            "Human input required: "
-                                            f"{request}"
-                                        )
-                                    print(
-                                        "The workflow stopped safely before "
-                                        "book assembly."
-                                    )
+                return None
+            display_chat_section(
+                "WORKFLOW STATUS",
+                json.dumps(result, ensure_ascii=False, indent=2),
+            )
             return None
 
         if conversation_path is None:
