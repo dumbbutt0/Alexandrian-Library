@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import chapter_workspace
 import mcp_server
@@ -21,6 +22,20 @@ class ChapterWorkspaceTests(unittest.TestCase):
 
         mcp_server.PROJECT_PATH = self.project_path
         mcp_server.BOOKS_PATH = self.books_path
+        mcp_server.SOURCE_POLICY_PATH = (
+            self.project_path / "config" / "source_policy.json"
+        )
+        mcp_server.CHAPTER_SOURCE_RECEIPTS.clear()
+        self.write_json(
+            mcp_server.SOURCE_POLICY_PATH,
+            {
+                "approved_domains": [],
+                "allow_subdomains": False,
+                "max_response_bytes": 500000,
+                "max_text_characters": 30000,
+                "timeout_seconds": 15,
+            },
+        )
 
         self.approval = {
             "book_id": self.book_id,
@@ -104,6 +119,7 @@ class ChapterWorkspaceTests(unittest.TestCase):
         self.write_json(self.context_path, self.context)
 
     def tearDown(self) -> None:
+        mcp_server.CHAPTER_SOURCE_RECEIPTS.clear()
         self.temporary_directory.cleanup()
 
     def write_json(self, path: Path, value: dict) -> None:
@@ -310,6 +326,20 @@ class ChapterWorkspaceTests(unittest.TestCase):
                 "branch_and_requirement_handling",
                 "experiments_and_actionability",
             )
+        }
+
+    def make_research_request(self) -> dict:
+        return {
+            "research_question": (
+                "What evidence constrains the chapter's central mechanism?"
+            ),
+            "why_required": (
+                "The mechanism cannot be taught responsibly without evidence."
+            ),
+            "target_spine_sections": ["evidence_and_reasoning"],
+            "branch_ids": [],
+            "requirement_ids": [],
+            "desired_evidence": ["Primary research or official documentation."],
         }
 
     def initialize(self) -> mcp_server.ChapterWorkspaceReceipt:
@@ -615,6 +645,7 @@ class ChapterWorkspaceTests(unittest.TestCase):
                 "Develop the blocking design branch."
             ],
             human_input_requests=[],
+            research_request=self.make_research_request(),
         )
         receipt = mcp_server.submit_chapter_assessment(submission)
         document = json.loads(
@@ -633,6 +664,281 @@ class ChapterWorkspaceTests(unittest.TestCase):
         )
         with self.assertRaises(ToolError):
             mcp_server.submit_chapter_assessment(submission)
+
+    def test_continue_research_requires_one_structured_request(self) -> None:
+        workspace_receipt = self.initialize()
+        common = {
+            "book_id": self.book_id,
+            "chapter_id": self.chapter_id,
+            "context_sha256": self.context["context_sha256"],
+            "workspace_version": workspace_receipt.workspace_version,
+            "workspace_sha256": workspace_receipt.workspace_sha256,
+            "draft_id": None,
+            "criteria": self.make_assessment_criteria(),
+            "most_important_gap": "Evidence is missing.",
+            "required_next_actions": ["Research the missing evidence."],
+            "human_input_requests": [],
+        }
+        with self.assertRaises(ValueError):
+            mcp_server.ChapterAssessmentSubmission(
+                **common,
+                outcome="continue_research",
+            )
+        invalid_other_outcome = {
+            **common,
+            "draft_id": "D1",
+            "outcome": "revise_draft",
+            "research_request": self.make_research_request(),
+        }
+        with self.assertRaises(ValueError):
+            mcp_server.ChapterAssessmentSubmission(
+                **invalid_other_outcome,
+            )
+
+    def test_packet_admits_supplemental_evidence_without_context_mutation(
+        self,
+    ) -> None:
+        original_context = self.context_path.read_text(encoding="utf-8")
+        workspace_receipt = self.initialize()
+        request = self.make_research_request()
+        assessment_receipt = mcp_server.submit_chapter_assessment(
+            mcp_server.ChapterAssessmentSubmission(
+                book_id=self.book_id,
+                chapter_id=self.chapter_id,
+                context_sha256=self.context["context_sha256"],
+                workspace_version=workspace_receipt.workspace_version,
+                workspace_sha256=workspace_receipt.workspace_sha256,
+                draft_id=None,
+                criteria=self.make_assessment_criteria(),
+                outcome="continue_research",
+                most_important_gap=request["why_required"],
+                required_next_actions=[
+                    "Research the requested mechanism."
+                ],
+                human_input_requests=[],
+                research_request=request,
+            )
+        )
+        raw_receipt_id = "chapter-source-test"
+        raw_proposal = self.make_proposal().model_dump(mode="json")
+        raw_proposal["spine"]["evidence_and_reasoning"][
+            "evidence_receipt_ids"
+        ].append(raw_receipt_id)
+        with self.assertRaises(ToolError):
+            mcp_server.revise_chapter_workspace(
+                chapter_workspace.ChapterWorkspaceProposal.model_validate(
+                    raw_proposal
+                ),
+                1,
+            )
+
+        source_content = (
+            "The controlled result constrains the proposed mechanism."
+        )
+        mcp_server.CHAPTER_SOURCE_RECEIPTS[raw_receipt_id] = (
+            mcp_server.ChapterSourceReceipt(
+                receipt_id=raw_receipt_id,
+                book_id=self.book_id,
+                chapter_id=self.chapter_id,
+                assessment_id=assessment_receipt.assessment_id,
+                requested_url="https://example.com/study",
+                final_url="https://example.com/study",
+                domain="example.com",
+                title="Controlled Study",
+                content_type="text/html",
+                retrieved_at="2026-07-26T00:00:00+00:00",
+                content_sha256=hashlib.sha256(
+                    source_content.encode("utf-8")
+                ).hexdigest(),
+                research_question=request["research_question"],
+                content=source_content,
+                content_truncated=False,
+            )
+        )
+        research_submission = mcp_server.ChapterResearchSubmission(
+            book_id=self.book_id,
+            chapter_id=self.chapter_id,
+            assessment_id=assessment_receipt.assessment_id,
+            assessment_sha256=assessment_receipt.assessment_sha256,
+            context_sha256=self.context["context_sha256"],
+            workspace_version=workspace_receipt.workspace_version,
+            workspace_sha256=workspace_receipt.workspace_sha256,
+            research_request=request,
+            outcome="evidence_found",
+            checked_sources=[
+                {
+                    "receipt_id": raw_receipt_id,
+                    "finding": "qualifies",
+                    "assessment": (
+                        "The result narrows rather than proves the mechanism."
+                    ),
+                    "author_or_organization": "Example Laboratory",
+                    "publication_date": "2026",
+                    "publisher_or_journal": "Example Journal",
+                    "doi": None,
+                    "evidence_location": "Results",
+                    "evidence_excerpt": source_content,
+                    "evidence_summary": (
+                        "The controlled result places a bound on the claim."
+                    ),
+                    "limitations": "One controlled setting.",
+                    "counterevidence_or_alternative_explanation": (
+                        "Another mechanism could produce the same result."
+                    ),
+                }
+            ],
+            research_trail=[
+                {
+                    "candidate_source_url": "https://example.com/study",
+                    "decision": "included",
+                    "reason": "It directly tests the requested mechanism.",
+                    "receipt_id": raw_receipt_id,
+                }
+            ],
+            synthesis="The evidence constrains but does not prove the claim.",
+            remaining_uncertainty=(
+                "The mechanism has not been isolated across settings."
+            ),
+            developer_guidance=[
+                "Qualify the mechanism and preserve the alternative."
+            ],
+        )
+        packet_receipt = mcp_server.submit_chapter_research_packet(
+            research_submission
+        )
+        self.assertEqual(packet_receipt.research_packet_id, "R1")
+        packet_path = self.project_path / packet_receipt.json_path
+        packet_document = json.loads(
+            packet_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            packet_receipt.research_packet_sha256,
+            mcp_server.canonical_document_sha256(
+                packet_document,
+                "research_packet_sha256",
+            ),
+        )
+        with self.assertRaises(ToolError):
+            mcp_server.submit_chapter_research_packet(
+                research_submission
+            )
+
+        self.assertEqual(
+            self.context_path.read_text(encoding="utf-8"),
+            original_context,
+        )
+        _, augmented_context = mcp_server.load_validated_chapter_context(
+            self.book_id,
+            self.chapter_id,
+        )
+        self.assertIn(
+            raw_receipt_id,
+            {
+                packet["receipt_id"]
+                for packet in augmented_context["evidence_packets"]
+            },
+        )
+        admitted_proposal = self.make_proposal().model_dump(mode="json")
+        admitted_proposal["spine"]["evidence_and_reasoning"][
+            "evidence_receipt_ids"
+        ].append(raw_receipt_id)
+        revised = mcp_server.revise_chapter_workspace(
+            chapter_workspace.ChapterWorkspaceProposal.model_validate(
+                admitted_proposal
+            ),
+            1,
+        )
+        self.assertEqual(revised.workspace_version, 2)
+        packet_document["research"]["synthesis"] = "Tampered synthesis."
+        self.write_json(packet_path, packet_document)
+        with self.assertRaises(ToolError):
+            mcp_server.load_validated_chapter_context(
+                self.book_id,
+                self.chapter_id,
+            )
+
+    def test_chapter_fetch_uses_its_own_safe_mode_source_session(
+        self,
+    ) -> None:
+        workspace_receipt = self.initialize()
+        request = self.make_research_request()
+        assessment_receipt = mcp_server.submit_chapter_assessment(
+            mcp_server.ChapterAssessmentSubmission(
+                book_id=self.book_id,
+                chapter_id=self.chapter_id,
+                context_sha256=self.context["context_sha256"],
+                workspace_version=workspace_receipt.workspace_version,
+                workspace_sha256=workspace_receipt.workspace_sha256,
+                draft_id=None,
+                criteria=self.make_assessment_criteria(),
+                outcome="continue_research",
+                most_important_gap=request["why_required"],
+                required_next_actions=["Research the request."],
+                human_input_requests=[],
+                research_request=request,
+            )
+        )
+        session_path = mcp_server.chapter_research_session_path(
+            self.book_id,
+            self.chapter_id,
+            assessment_receipt.assessment_id,
+        )
+        session = {
+            "book_id": self.book_id,
+            "chapter_id": self.chapter_id,
+            "assessment_id": assessment_receipt.assessment_id,
+            "created_at": "2026-07-26T00:00:00+00:00",
+            "research_mode": "safe",
+            "pending_requests": [],
+            "decisions": [],
+        }
+        self.write_json(session_path, session)
+
+        approval = mcp_server.fetch_chapter_research_source(
+            self.book_id,
+            self.chapter_id,
+            assessment_receipt.assessment_id,
+            "https://example.com/study",
+            request["research_question"],
+            "Check one primary result.",
+        )
+        self.assertEqual(approval.status, "approval_required")
+        session = json.loads(session_path.read_text(encoding="utf-8"))
+        pending = session["pending_requests"][0]
+        session["pending_requests"] = []
+        session["decisions"].append(
+            {
+                **pending,
+                "decision": "allow_once",
+                "decided_at": "2026-07-26T00:01:00+00:00",
+            }
+        )
+        self.write_json(session_path, session)
+        source_text = "A primary result qualifies the proposed mechanism."
+        with patch.object(
+            mcp_server,
+            "fetch_source_content",
+            return_value=(
+                "https://example.com/study",
+                "text/html",
+                source_text,
+                "Primary Study",
+                source_text.encode("utf-8"),
+            ),
+        ):
+            fetched = mcp_server.fetch_chapter_research_source(
+                self.book_id,
+                self.chapter_id,
+                assessment_receipt.assessment_id,
+                "https://example.com/study",
+                request["research_question"],
+                "Check one primary result.",
+            )
+        self.assertEqual(fetched.status, "fetched")
+        self.assertIn(
+            fetched.receipt_id,
+            mcp_server.CHAPTER_SOURCE_RECEIPTS,
+        )
 
     def test_completion_requires_a_newer_final_pass_draft(self) -> None:
         workspace_receipt = self.initialize()

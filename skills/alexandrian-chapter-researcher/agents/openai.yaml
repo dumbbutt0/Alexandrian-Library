@@ -1,0 +1,4 @@
+interface:
+  display_name: "Alexandrian Chapter Researcher"
+  short_description: "Research one bounded chapter evidence gap"
+  default_prompt: "Use $alexandrian-chapter-researcher to investigate one evaluator-requested chapter evidence gap and save a grounded research packet."

@@ -28,7 +28,9 @@ class ChapterCompletionControllerTests(unittest.TestCase):
         self.chapter_id = "CH1"
         self.state = {"version": 0, "drafts": []}
         self.developer_final_flags = []
+        self.developer_research_paths = []
         self.evaluation_number = 0
+        self.research_number = 0
 
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
@@ -64,6 +66,7 @@ class ChapterCompletionControllerTests(unittest.TestCase):
         book_id: str,
         chapter_id: str,
         latest_assessment_path: str | None = None,
+        latest_research_packet_path: str | None = None,
         final_pass_requested: bool = False,
     ) -> tuple[Path, Path, str, int]:
         self.assertEqual(book_id, self.book_id)
@@ -73,6 +76,9 @@ class ChapterCompletionControllerTests(unittest.TestCase):
                 latest_assessment_path,
                 rf"assessments/{self.chapter_id}/A[1-9][0-9]*\.json$",
             )
+        self.developer_research_paths.append(
+            latest_research_packet_path
+        )
         self.developer_final_flags.append(final_pass_requested)
         self.state["version"] += 1
         if self.state["version"] == 2:
@@ -122,6 +128,7 @@ class ChapterCompletionControllerTests(unittest.TestCase):
             "assessment": {
                 "book_id": self.book_id,
                 "chapter_id": self.chapter_id,
+                "context_sha256": "c" * 64,
                 "workspace_version": self.state["version"],
                 "workspace_sha256": str(self.state["version"]) * 64,
                 "draft_id": draft_id,
@@ -130,6 +137,20 @@ class ChapterCompletionControllerTests(unittest.TestCase):
                 "most_important_gap": gap,
                 "required_next_actions": actions or [],
                 "human_input_requests": human_requests or [],
+                "research_request": (
+                    {
+                        "research_question": gap,
+                        "why_required": gap,
+                        "target_spine_sections": [
+                            "evidence_and_reasoning"
+                        ],
+                        "branch_ids": [],
+                        "requirement_ids": [],
+                        "desired_evidence": ["Primary or official evidence."],
+                    }
+                    if outcome == "continue_research"
+                    else None
+                ),
             },
         }
         path = (
@@ -142,6 +163,43 @@ class ChapterCompletionControllerTests(unittest.TestCase):
             / f"{assessment_id}.json"
         )
         return path, document, "Assessment"
+
+    def research_side_effect(
+        self,
+        _backend: str,
+        _program_path: str,
+        _assessment_path: Path,
+        assessment_document: dict,
+        _research_mode: str,
+    ) -> tuple[Path, dict, str]:
+        self.research_number += 1
+        packet_id = f"R{self.research_number}"
+        path = (
+            self.project_path
+            / "data"
+            / "books"
+            / self.book_id
+            / "research"
+            / self.chapter_id
+            / f"{packet_id}.json"
+        )
+        document = {
+            "research_packet_id": packet_id,
+            "research_packet_sha256": "f" * 64,
+            "research": {
+                "assessment_id": assessment_document["assessment_id"],
+                "assessment_sha256": assessment_document[
+                    "assessment_sha256"
+                ],
+                "workspace_sha256": assessment_document["assessment"][
+                    "workspace_sha256"
+                ],
+                "research_request": assessment_document["assessment"][
+                    "research_request"
+                ],
+            },
+        }
+        return path, document, "Research"
 
     def controller_patches(self) -> tuple:
         return (
@@ -166,6 +224,16 @@ class ChapterCompletionControllerTests(unittest.TestCase):
                 backend_selector,
                 "develop_chapter_once",
                 side_effect=self.develop_side_effect,
+            ),
+            patch.object(
+                backend_selector,
+                "research_chapter_once",
+                side_effect=self.research_side_effect,
+            ),
+            patch.object(
+                backend_selector,
+                "load_research_mode",
+                return_value="safe",
             ),
         )
 
@@ -214,11 +282,95 @@ class ChapterCompletionControllerTests(unittest.TestCase):
         self.assertEqual(result["status"], "chapter_complete")
         self.assertEqual(result["developer_passes_total"], 3)
         self.assertEqual(result["evaluator_passes_total"], 3)
+        self.assertEqual(result["researcher_passes_total"], 1)
         self.assertEqual(
             self.developer_final_flags,
             [False, False, True],
         )
+        self.assertIsNone(self.developer_research_paths[0])
+        self.assertRegex(
+            self.developer_research_paths[1],
+            r"research/CH1/R1\.json$",
+        )
         self.assertEqual(result["final_pass_source_draft_id"], "D1")
+
+    def test_recovers_saved_research_before_requesting_another_packet(
+        self,
+    ) -> None:
+        research_assessment = self.assessment_document(
+            "continue_research",
+            "A saved packet still needs Developer integration.",
+            draft_id=None,
+            actions=["Integrate the saved evidence."],
+        )
+        human_assessment = self.assessment_document(
+            "human_input_required",
+            "The user's interpretation is now required.",
+            draft_id="D1",
+            actions=["Ask for the user's interpretation."],
+            human_requests=["Which interpretation should be preserved?"],
+        )
+        outcomes = iter([research_assessment, human_assessment])
+        research_path = (
+            self.project_path
+            / "data"
+            / "books"
+            / self.book_id
+            / "research"
+            / self.chapter_id
+            / "R1.json"
+        )
+        research_document = {
+            "research_packet_id": "R1",
+            "research_packet_sha256": "f" * 64,
+            "research": {
+                "assessment_id": research_assessment[1]["assessment_id"],
+                "assessment_sha256": research_assessment[1][
+                    "assessment_sha256"
+                ],
+            },
+        }
+
+        with ExitStack() as stack:
+            for controller_patch in self.controller_patches():
+                stack.enter_context(controller_patch)
+            stack.enter_context(
+                patch.object(
+                    backend_selector,
+                    "evaluate_chapter_once",
+                    side_effect=lambda *_args: next(outcomes),
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    backend_selector,
+                    "matching_research_packet_for_assessment",
+                    return_value=(research_path, research_document),
+                )
+            )
+            researcher = stack.enter_context(
+                patch.object(
+                    backend_selector,
+                    "research_chapter_once",
+                    side_effect=AssertionError(
+                        "Saved research should be recovered."
+                    ),
+                )
+            )
+            result = backend_selector.run_chapter_completion_loop(
+                "codex",
+                "/usr/bin/codex",
+                self.book_id,
+                self.chapter_id,
+            )
+
+        researcher.assert_not_called()
+        self.assertEqual(result["status"], "human_input_required")
+        self.assertEqual(result["researcher_passes_total"], 0)
+        self.assertRegex(
+            self.developer_research_paths[1],
+            r"research/CH1/R1\.json$",
+        )
 
     def test_repeated_assessment_stops_as_no_progress(self) -> None:
         def develop_without_draft(*args, **kwargs):
@@ -242,7 +394,7 @@ class ChapterCompletionControllerTests(unittest.TestCase):
             )
 
         patches = list(self.controller_patches())
-        patches[-1] = patch.object(
+        patches[5] = patch.object(
             backend_selector,
             "develop_chapter_once",
             side_effect=develop_without_draft,

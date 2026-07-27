@@ -45,6 +45,13 @@ transition. Treat its required actions as evaluator findings, not unquestioned
 facts, but address the most important valid gap instead of silently doing
 unrelated work.
 
+When `latest_research_packet_path` is supplied, read it completely. Treat its
+checked sources as supplemental evidence admitted after the immutable starting
+context. Integrate only its exact evidence receipt IDs, distinguish its
+synthesis from source findings, preserve its limitations, and revise the
+workspace before attempting another draft. A no-admissible-evidence packet must
+bound or route the unresolved branch rather than becoming support for a claim.
+
 When `final_pass_requested` is true, save and register exactly one new draft.
 Focus that pass on whole-chapter coherence, accurate transitions, unnecessary
 repetition, learning rhythm, citation placement, and the evaluator's remaining
@@ -91,8 +98,8 @@ After initialization, stop without drafting prose.
 Read the canonical context, workspace index, and current workspace version.
 
 Select the highest-value unresolved branch or requirement. Prefer work that
-blocks the chapter's central lesson. Use only evidence already present in the
-approved context during this transition.
+blocks the chapter's central lesson. Use only evidence present in the approved
+context or wrapper-supplied validated research packets during this transition.
 
 Revise the workspace to:
 
