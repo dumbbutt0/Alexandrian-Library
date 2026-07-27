@@ -301,6 +301,18 @@ class ResearchReviewTests(unittest.TestCase):
             "chapter prompt",
             backend_selector.CHAPTER_DEVELOPMENT_CALL,
         )
+        claude_evaluator_command = backend_selector.build_capture_command(
+            "claude",
+            "/usr/bin/claude",
+            "evaluation prompt",
+            backend_selector.CHAPTER_EVALUATION_CALL,
+        )
+        codex_evaluator_command = backend_selector.build_capture_command(
+            "codex",
+            "/usr/bin/codex",
+            "evaluation prompt",
+            backend_selector.CHAPTER_EVALUATION_CALL,
+        )
 
         self.assertIn("dontAsk", claude_command)
         self.assertIn(backend_selector.CLAUDE_REVIEW_TOOLS, claude_command)
@@ -324,6 +336,14 @@ class ResearchReviewTests(unittest.TestCase):
             backend_selector.CLAUDE_CHAPTER_DEVELOPMENT_TOOLS.startswith(
                 "Read,"
             )
+        )
+        self.assertIn(
+            backend_selector.CLAUDE_CHAPTER_EVALUATION_TOOLS,
+            claude_evaluator_command,
+        )
+        self.assertNotIn(
+            "mcp__alexandrian-library__save_chapter_draft",
+            backend_selector.CLAUDE_CHAPTER_EVALUATION_TOOLS,
         )
         self.assertEqual(
             codex_command,
@@ -356,6 +376,17 @@ class ResearchReviewTests(unittest.TestCase):
                 "--sandbox",
                 "read-only",
                 "chapter prompt",
+            ],
+        )
+        self.assertEqual(
+            codex_evaluator_command,
+            [
+                "/usr/bin/codex",
+                "exec",
+                "--json",
+                "--sandbox",
+                "read-only",
+                "evaluation prompt",
             ],
         )
 

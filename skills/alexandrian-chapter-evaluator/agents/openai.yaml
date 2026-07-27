@@ -1,0 +1,4 @@
+interface:
+  display_name: "Alexandrian Chapter Evaluator"
+  short_description: "Evaluate chapter readiness and learning depth"
+  default_prompt: "Use $alexandrian-chapter-evaluator to assess one current Alexandrian chapter draft and record its next required state."

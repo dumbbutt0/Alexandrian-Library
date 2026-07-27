@@ -286,6 +286,32 @@ class ChapterWorkspaceTests(unittest.TestCase):
             }
         )
 
+    def make_assessment_criteria(
+        self,
+        status: str = "needs_work",
+    ) -> dict:
+        finding = {
+            "status": status,
+            "explanation": "The current state needs an explicit evaluation.",
+            "target_spine_sections": ["current_answer"],
+            "branch_ids": ["BR1"],
+            "requirement_ids": ["REQ1"],
+            "draft_ids": [],
+        }
+        return {
+            name: dict(finding)
+            for name in (
+                "central_lesson",
+                "evidence_grounding",
+                "curiosity_and_belief",
+                "contradictions_and_limits",
+                "intellectual_foundations",
+                "mechanism_and_falsification",
+                "branch_and_requirement_handling",
+                "experiments_and_actionability",
+            )
+        }
+
     def initialize(self) -> mcp_server.ChapterWorkspaceReceipt:
         return mcp_server.initialize_chapter_workspace(
             self.make_proposal()
@@ -572,6 +598,160 @@ class ChapterWorkspaceTests(unittest.TestCase):
             ).glob("D*.md")
         )
         self.assertEqual(len(draft_files), 1)
+
+    def test_assessment_is_hash_bound_and_cannot_repeat_state(self) -> None:
+        workspace_receipt = self.initialize()
+        submission = mcp_server.ChapterAssessmentSubmission(
+            book_id=self.book_id,
+            chapter_id=self.chapter_id,
+            context_sha256=self.context["context_sha256"],
+            workspace_version=workspace_receipt.workspace_version,
+            workspace_sha256=workspace_receipt.workspace_sha256,
+            draft_id=None,
+            criteria=self.make_assessment_criteria(),
+            outcome="continue_research",
+            most_important_gap="The central lesson remains underdeveloped.",
+            required_next_actions=[
+                "Develop the blocking design branch."
+            ],
+            human_input_requests=[],
+        )
+        receipt = mcp_server.submit_chapter_assessment(submission)
+        document = json.loads(
+            (self.project_path / receipt.json_path).read_text(
+                encoding="utf-8"
+            )
+        )
+
+        self.assertEqual(receipt.assessment_id, "A1")
+        self.assertEqual(
+            receipt.assessment_sha256,
+            mcp_server.canonical_document_sha256(
+                document,
+                "assessment_sha256",
+            ),
+        )
+        with self.assertRaises(ToolError):
+            mcp_server.submit_chapter_assessment(submission)
+
+    def test_completion_requires_a_newer_final_pass_draft(self) -> None:
+        workspace_receipt = self.initialize()
+        draft_receipt = mcp_server.save_chapter_draft(
+            mcp_server.ChapterDraftSubmission(
+                book_id=self.book_id,
+                chapter_id=self.chapter_id,
+                context_sha256=self.context["context_sha256"],
+                expected_workspace_version=1,
+                expected_workspace_sha256=(
+                    workspace_receipt.workspace_sha256
+                ),
+                markdown="A rough draft that has not received a final pass.",
+            )
+        )
+        proposal_data = self.make_proposal().model_dump(mode="json")
+        proposal_data["draft_versions"] = [
+            {
+                "draft_id": draft_receipt.draft_id,
+                "relative_path": draft_receipt.relative_path,
+                "sha256": draft_receipt.sha256,
+                "context_sha256": draft_receipt.context_sha256,
+                "provider": draft_receipt.provider,
+                "created_at": draft_receipt.created_at,
+            }
+        ]
+        revised = mcp_server.revise_chapter_workspace(
+            chapter_workspace.ChapterWorkspaceProposal.model_validate(
+                proposal_data
+            ),
+            1,
+        )
+        self.write_json(
+            self.book_directory / "runs" / "CH1.json",
+            {
+                "schema_version": "1.0",
+                "book_id": self.book_id,
+                "chapter_id": self.chapter_id,
+                "final_pass_requested": True,
+                "final_pass_source_draft_id": "D1",
+            },
+        )
+        criteria = self.make_assessment_criteria("satisfied")
+        for finding in criteria.values():
+            finding["draft_ids"] = ["D1"]
+        submission = mcp_server.ChapterAssessmentSubmission(
+            book_id=self.book_id,
+            chapter_id=self.chapter_id,
+            context_sha256=self.context["context_sha256"],
+            workspace_version=revised.workspace_version,
+            workspace_sha256=revised.workspace_sha256,
+            draft_id="D1",
+            criteria=criteria,
+            outcome="chapter_complete",
+            most_important_gap="No remaining applicable gap.",
+            required_next_actions=[],
+            human_input_requests=[],
+        )
+
+        with self.assertRaises(ToolError):
+            mcp_server.submit_chapter_assessment(submission)
+
+        second_draft = mcp_server.save_chapter_draft(
+            mcp_server.ChapterDraftSubmission(
+                book_id=self.book_id,
+                chapter_id=self.chapter_id,
+                context_sha256=self.context["context_sha256"],
+                expected_workspace_version=2,
+                expected_workspace_sha256=revised.workspace_sha256,
+                markdown="A newer draft produced for the final pass.",
+            )
+        )
+        current_workspace = json.loads(
+            (
+                self.book_directory
+                / "workspaces"
+                / "CH1"
+                / "versions"
+                / "v002.json"
+            ).read_text(encoding="utf-8")
+        )["workspace"]
+        current_workspace["draft_versions"].append(
+            {
+                "draft_id": second_draft.draft_id,
+                "relative_path": second_draft.relative_path,
+                "sha256": second_draft.sha256,
+                "context_sha256": second_draft.context_sha256,
+                "provider": second_draft.provider,
+                "created_at": second_draft.created_at,
+            }
+        )
+        final_workspace = mcp_server.revise_chapter_workspace(
+            chapter_workspace.ChapterWorkspaceProposal.model_validate(
+                current_workspace
+            ),
+            2,
+        )
+        final_criteria = self.make_assessment_criteria("satisfied")
+        for finding in final_criteria.values():
+            finding["draft_ids"] = ["D2"]
+        complete_receipt = mcp_server.submit_chapter_assessment(
+            mcp_server.ChapterAssessmentSubmission(
+                book_id=self.book_id,
+                chapter_id=self.chapter_id,
+                context_sha256=self.context["context_sha256"],
+                workspace_version=final_workspace.workspace_version,
+                workspace_sha256=final_workspace.workspace_sha256,
+                draft_id="D2",
+                criteria=final_criteria,
+                outcome="chapter_complete",
+                most_important_gap="No remaining applicable gap.",
+                required_next_actions=[],
+                human_input_requests=[],
+            )
+        )
+        self.assertEqual(
+            complete_receipt.outcome.value,
+            "chapter_complete",
+        )
 
 
 if __name__ == "__main__":

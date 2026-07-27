@@ -38,6 +38,19 @@ Stop after the selected transition succeeds.
 Repeated invocations may eventually exhaust the subject. A single invocation
 must remain bounded and reviewable.
 
+## Follow the Current Assessment
+
+When `latest_assessment_path` is supplied, read it before choosing the
+transition. Treat its required actions as evaluator findings, not unquestioned
+facts, but address the most important valid gap instead of silently doing
+unrelated work.
+
+When `final_pass_requested` is true, save and register exactly one new draft.
+Focus that pass on whole-chapter coherence, accurate transitions, unnecessary
+repetition, learning rhythm, citation placement, and the evaluator's remaining
+actions. Do not introduce a new thesis, erase uncertainty, or reopen routed
+branches merely to make the final draft sound more conclusive.
+
 ## Recover an Unregistered Draft First
 
 When `pending_draft_metadata_paths` is nonempty, do not create another draft.

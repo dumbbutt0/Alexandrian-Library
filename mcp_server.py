@@ -24,7 +24,7 @@ from urllib.parse import urljoin, urlsplit
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 import chapter_workspace
 import knowledge_index
@@ -447,6 +447,156 @@ class ChapterDraftReceipt(StrictModel):
     source_workspace_sha256: str
     provider: str
     created_at: str
+
+
+class AssessmentStatus(str, Enum):
+    SATISFIED = "satisfied"
+    NEEDS_WORK = "needs_work"
+    BLOCKED = "blocked"
+    NOT_APPLICABLE = "not_applicable"
+
+
+class ChapterAssessmentOutcome(str, Enum):
+    CONTINUE_RESEARCH = "continue_research"
+    REVISE_DRAFT = "revise_draft"
+    HUMAN_INPUT_REQUIRED = "human_input_required"
+    READY_FOR_FINAL_PASS = "ready_for_final_pass"
+    CHAPTER_COMPLETE = "chapter_complete"
+
+
+class ChapterAssessmentFinding(StrictModel):
+    status: AssessmentStatus
+    explanation: str = Field(min_length=1)
+    target_spine_sections: list[
+        Literal[
+            "central_question",
+            "original_intuition",
+            "why_it_matters",
+            "current_answer",
+            "evidence_and_reasoning",
+            "important_contradictions",
+            "evolution_of_understanding",
+            "practical_implications",
+            "unresolved_frontier",
+            "connection_to_larger_book",
+        ]
+    ] = Field(default_factory=list)
+    branch_ids: list[str] = Field(default_factory=list)
+    requirement_ids: list[str] = Field(default_factory=list)
+    draft_ids: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_unique_references(self) -> "ChapterAssessmentFinding":
+        for field_name in (
+            "target_spine_sections",
+            "branch_ids",
+            "requirement_ids",
+            "draft_ids",
+        ):
+            values = getattr(self, field_name)
+            if len(values) != len(set(values)):
+                raise ValueError(
+                    f"{field_name} cannot contain duplicate references."
+                )
+        return self
+
+
+class ChapterAssessmentCriteria(StrictModel):
+    central_lesson: ChapterAssessmentFinding
+    evidence_grounding: ChapterAssessmentFinding
+    curiosity_and_belief: ChapterAssessmentFinding
+    contradictions_and_limits: ChapterAssessmentFinding
+    intellectual_foundations: ChapterAssessmentFinding
+    mechanism_and_falsification: ChapterAssessmentFinding
+    branch_and_requirement_handling: ChapterAssessmentFinding
+    experiments_and_actionability: ChapterAssessmentFinding
+
+
+class ChapterAssessmentSubmission(StrictModel):
+    book_id: str = Field(pattern=r"^book-[A-Za-z0-9._-]+$")
+    chapter_id: str = Field(pattern=r"^CH[1-9][0-9]*$")
+    context_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    workspace_version: int = Field(ge=1)
+    workspace_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    draft_id: str | None = Field(default=None, pattern=r"^D[1-9][0-9]*$")
+    criteria: ChapterAssessmentCriteria
+    outcome: ChapterAssessmentOutcome
+    most_important_gap: str = Field(min_length=1)
+    required_next_actions: list[str] = Field(default_factory=list)
+    human_input_requests: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_outcome(self) -> "ChapterAssessmentSubmission":
+        draft_required = {
+            ChapterAssessmentOutcome.REVISE_DRAFT,
+            ChapterAssessmentOutcome.READY_FOR_FINAL_PASS,
+            ChapterAssessmentOutcome.CHAPTER_COMPLETE,
+        }
+        if self.outcome in draft_required and self.draft_id is None:
+            raise ValueError("This assessment outcome requires a draft.")
+        if (
+            self.outcome == ChapterAssessmentOutcome.HUMAN_INPUT_REQUIRED
+            and not self.human_input_requests
+        ):
+            raise ValueError(
+                "Human-input outcome requires at least one specific request."
+            )
+        if (
+            self.outcome != ChapterAssessmentOutcome.HUMAN_INPUT_REQUIRED
+            and self.human_input_requests
+        ):
+            raise ValueError(
+                "Human-input requests require the human-input outcome."
+            )
+        if (
+            self.outcome != ChapterAssessmentOutcome.CHAPTER_COMPLETE
+            and not self.required_next_actions
+        ):
+            raise ValueError(
+                "An incomplete chapter requires a next action."
+            )
+        findings = list(
+            self.criteria.model_dump(mode="json").values()
+        )
+        if self.outcome == ChapterAssessmentOutcome.READY_FOR_FINAL_PASS and any(
+            finding["status"] == AssessmentStatus.BLOCKED.value
+            for finding in findings
+        ):
+            raise ValueError("A blocked chapter cannot enter its final pass.")
+        if self.outcome == ChapterAssessmentOutcome.CHAPTER_COMPLETE:
+            if self.required_next_actions:
+                raise ValueError(
+                    "A complete chapter cannot require another action."
+                )
+            if any(
+                finding["status"]
+                not in {
+                    AssessmentStatus.SATISFIED.value,
+                    AssessmentStatus.NOT_APPLICABLE.value,
+                }
+                for finding in findings
+            ):
+                raise ValueError(
+                    "A complete chapter must satisfy every applicable criterion."
+                )
+            if not any(
+                finding["status"] == AssessmentStatus.SATISFIED.value
+                for finding in findings
+            ):
+                raise ValueError(
+                    "A complete chapter needs at least one satisfied criterion."
+                )
+        return self
+
+
+class ChapterAssessmentReceipt(StrictModel):
+    book_id: str
+    chapter_id: str
+    assessment_id: str
+    outcome: ChapterAssessmentOutcome
+    assessment_sha256: str
+    json_path: str
+    markdown_path: str
 
 
 class SourcePolicy(StrictModel):
@@ -3070,6 +3220,267 @@ def save_chapter_draft_files(
     )
 
 
+def validate_chapter_assessment_references(
+    submission: ChapterAssessmentSubmission,
+    workspace: chapter_workspace.ChapterWorkspaceProposal,
+) -> None:
+    """Keep evaluator findings tied to current durable chapter identities."""
+    branch_ids = {branch.branch_id for branch in workspace.branches}
+    requirement_ids = {
+        requirement.requirement_id
+        for requirement in workspace.development_requirements
+    }
+    draft_ids = {draft.draft_id for draft in workspace.draft_versions}
+    newest_draft_id = (
+        workspace.draft_versions[-1].draft_id
+        if workspace.draft_versions
+        else None
+    )
+    if submission.draft_id != newest_draft_id:
+        raise ToolError(
+            "Assessment must evaluate the newest registered draft, or null "
+            "when the workspace has no draft."
+        )
+
+    for criterion_name, finding in submission.criteria:
+        unknown_branches = sorted(set(finding.branch_ids) - branch_ids)
+        unknown_requirements = sorted(
+            set(finding.requirement_ids) - requirement_ids
+        )
+        unknown_drafts = sorted(set(finding.draft_ids) - draft_ids)
+        if unknown_branches:
+            raise ToolError(
+                f"{criterion_name} references unknown branches: "
+                + ", ".join(unknown_branches)
+            )
+        if unknown_requirements:
+            raise ToolError(
+                f"{criterion_name} references unknown requirements: "
+                + ", ".join(unknown_requirements)
+            )
+        if unknown_drafts:
+            raise ToolError(
+                f"{criterion_name} references unknown drafts: "
+                + ", ".join(unknown_drafts)
+            )
+
+
+def validate_chapter_completion_gate(
+    book_directory: Path,
+    submission: ChapterAssessmentSubmission,
+) -> None:
+    """Require wrapper-recorded final-pass state before chapter completion."""
+    if submission.outcome != ChapterAssessmentOutcome.CHAPTER_COMPLETE:
+        return
+    run = read_json_object(
+        book_directory / "runs" / f"{submission.chapter_id}.json",
+        "Chapter run state",
+    )
+    if (
+        run.get("schema_version") != "1.0"
+        or run.get("book_id") != submission.book_id
+        or run.get("chapter_id") != submission.chapter_id
+        or run.get("final_pass_requested") is not True
+        or not isinstance(run.get("final_pass_source_draft_id"), str)
+        or run.get("final_pass_source_draft_id") == submission.draft_id
+    ):
+        raise ToolError(
+            "Chapter completion requires a newer draft produced after the "
+            "wrapper-recorded final-pass request."
+        )
+
+
+def render_chapter_assessment(document: dict) -> str:
+    """Render one canonical assessment as a readable controller artifact."""
+    assessment = document["assessment"]
+    lines = [
+        "# Alexandrian Chapter Assessment",
+        "",
+        f"Assessment: `{document['assessment_id']}`",
+        "",
+        f"Book: `{assessment['book_id']}`",
+        "",
+        f"Chapter: `{assessment['chapter_id']}`",
+        "",
+        f"Workspace version: `{assessment['workspace_version']}`",
+        "",
+        f"Draft: `{assessment['draft_id'] or 'none'}`",
+        "",
+        f"Outcome: `{assessment['outcome']}`",
+        "",
+        "## Most Important Gap",
+        "",
+        assessment["most_important_gap"],
+        "",
+        "## Criteria",
+        "",
+    ]
+    for criterion_name, finding in assessment["criteria"].items():
+        lines.extend(
+            [
+                f"### {criterion_name.replace('_', ' ').title()}",
+                "",
+                f"Status: `{finding['status']}`",
+                "",
+                finding["explanation"],
+                "",
+                "- Spine sections: "
+                + (", ".join(finding["target_spine_sections"]) or "None"),
+                "- Branches: "
+                + (", ".join(finding["branch_ids"]) or "None"),
+                "- Requirements: "
+                + (", ".join(finding["requirement_ids"]) or "None"),
+                "- Drafts: "
+                + (", ".join(finding["draft_ids"]) or "None"),
+                "",
+            ]
+        )
+    lines.extend(["## Required Next Actions", ""])
+    lines.extend(
+        [f"- {action}" for action in assessment["required_next_actions"]]
+        or ["None."]
+    )
+    lines.extend(["", "## Human Input Requests", ""])
+    lines.extend(
+        [f"- {request}" for request in assessment["human_input_requests"]]
+        or ["None."]
+    )
+    lines.extend(
+        [
+            "",
+            f"Assessment hash: `{document['assessment_sha256']}`",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def write_chapter_assessment(
+    book_directory: Path,
+    submission: ChapterAssessmentSubmission,
+) -> ChapterAssessmentReceipt:
+    """Append one immutable, hash-bound assessment for a chapter state."""
+    assessment_directory = (
+        book_directory / "assessments" / submission.chapter_id
+    )
+    assessment_directory.mkdir(parents=True, exist_ok=True)
+    lock_path = assessment_directory / ".assessment.lock"
+    try:
+        lock_descriptor = os.open(
+            lock_path,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+            0o600,
+        )
+    except FileExistsError as error:
+        raise ToolError(
+            "Another chapter assessment save is in progress."
+        ) from error
+    except OSError as error:
+        raise ToolError(
+            "Chapter assessment lock could not be created."
+        ) from error
+
+    try:
+        existing_paths = []
+        for existing_path in assessment_directory.glob("A*.json"):
+            if not re.fullmatch(r"A[1-9][0-9]*", existing_path.stem):
+                raise ToolError(
+                    "Chapter assessment directory contains an invalid record."
+                )
+            existing_paths.append(existing_path)
+        existing_paths.sort(key=lambda path: int(path.stem[1:]))
+        for expected_number, existing_path in enumerate(
+            existing_paths,
+            start=1,
+        ):
+            expected_id = f"A{expected_number}"
+            existing = read_json_object(
+                existing_path,
+                "Chapter assessment",
+            )
+            if (
+                existing.get("assessment_id") != expected_id
+                or existing.get("assessment_sha256")
+                != canonical_document_sha256(
+                    existing,
+                    "assessment_sha256",
+                )
+            ):
+                raise ToolError(
+                    "Chapter assessment history is invalid."
+                )
+            existing_assessment = existing.get("assessment", {})
+            if (
+                isinstance(existing_assessment, dict)
+                and existing_assessment.get("workspace_sha256")
+                == submission.workspace_sha256
+                and existing_assessment.get("draft_id")
+                == submission.draft_id
+            ):
+                raise ToolError(
+                    "This workspace and draft state was already assessed."
+                )
+
+        assessment_id = f"A{len(existing_paths) + 1}"
+        assessed_at = current_utc_time()
+        assessment = submission.model_dump(mode="json")
+        document = {
+            "schema_version": "1.0",
+            "assessment_id": assessment_id,
+            "assessed_at": assessed_at,
+            "evaluator_host": os.environ.get(
+                "ALEXANDRIAN_AGENT_HOST",
+                "unknown",
+            ),
+            "assessment": assessment,
+        }
+        document["assessment_sha256"] = canonical_document_sha256(
+            document,
+            "assessment_sha256",
+        )
+        json_path = assessment_directory / f"{assessment_id}.json"
+        markdown_path = assessment_directory / f"{assessment_id}.md"
+        suffix = f".tmp-{uuid.uuid4().hex}"
+        temporary_json = json_path.with_name(json_path.name + suffix)
+        temporary_markdown = markdown_path.with_name(
+            markdown_path.name + suffix
+        )
+        installed_json = False
+        try:
+            temporary_json.write_text(
+                json.dumps(document, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            temporary_markdown.write_text(
+                render_chapter_assessment(document),
+                encoding="utf-8",
+            )
+            os.replace(temporary_json, json_path)
+            installed_json = True
+            os.replace(temporary_markdown, markdown_path)
+        except OSError as error:
+            temporary_json.unlink(missing_ok=True)
+            temporary_markdown.unlink(missing_ok=True)
+            if installed_json:
+                json_path.unlink(missing_ok=True)
+            raise ToolError(
+                "Chapter assessment could not be saved."
+            ) from error
+    finally:
+        os.close(lock_descriptor)
+        lock_path.unlink(missing_ok=True)
+
+    return ChapterAssessmentReceipt(
+        book_id=submission.book_id,
+        chapter_id=submission.chapter_id,
+        assessment_id=assessment_id,
+        outcome=submission.outcome,
+        assessment_sha256=document["assessment_sha256"],
+        json_path=str(json_path.relative_to(PROJECT_PATH)),
+        markdown_path=str(markdown_path.relative_to(PROJECT_PATH)),
+    )
+
+
 mcp = FastMCP(
     name="Alexandrian Library",
     instructions=(
@@ -3092,7 +3503,9 @@ mcp = FastMCP(
         "references. Use save_chapter_draft only for one bounded rough draft "
         "whose source workspace is still current, then register its exact "
         "receipt through revise_chapter_workspace. These tools preserve "
-        "intellectual history. Use "
+        "intellectual history. Use submit_chapter_assessment to append one "
+        "independent, hash-bound evaluation of the newest chapter state "
+        "without editing it. Use "
         "promote_review_to_knowledge_index only after human review approval; "
         "it deterministically creates reusable Markdown knowledge nodes and "
         "derived index views without inventing new research."
@@ -3827,6 +4240,85 @@ def save_chapter_draft(
             submission,
             workspace_document,
         )
+    except chapter_workspace.WorkspaceError as error:
+        raise ToolError(str(error)) from error
+    finally:
+        os.close(lock_descriptor)
+        workspace_lock_path.unlink(missing_ok=True)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=False,
+    )
+)
+def submit_chapter_assessment(
+    submission: ChapterAssessmentSubmission,
+) -> ChapterAssessmentReceipt:
+    """Record one independent evaluation of the current chapter state."""
+    book_directory, context = load_validated_chapter_context(
+        submission.book_id,
+        submission.chapter_id,
+    )
+    if submission.context_sha256 != context["context_sha256"]:
+        raise ToolError(
+            "Assessment context does not match the approved chapter."
+        )
+
+    workspace_directory = chapter_workspace.workspace_directory(
+        book_directory,
+        submission.chapter_id,
+    )
+    workspace_lock_path = workspace_directory / ".revision.lock"
+    try:
+        lock_descriptor = os.open(
+            workspace_lock_path,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+            0o600,
+        )
+    except FileExistsError as error:
+        raise ToolError(
+            "Another chapter workspace operation is in progress."
+        ) from error
+    except OSError as error:
+        raise ToolError(
+            "Chapter workspace lock could not be created."
+        ) from error
+
+    try:
+        _, index, workspace_document = (
+            chapter_workspace.load_current_workspace(
+                book_directory,
+                submission.chapter_id,
+            )
+        )
+        if (
+            index.get("book_id") != submission.book_id
+            or index.get("current_version") != submission.workspace_version
+            or workspace_document.get("workspace_sha256")
+            != submission.workspace_sha256
+        ):
+            raise ToolError(
+                "Chapter workspace changed before assessment submission."
+            )
+        try:
+            workspace = (
+                chapter_workspace.ChapterWorkspaceProposal.model_validate(
+                    workspace_document["workspace"]
+                )
+            )
+            chapter_workspace.validate_against_context(workspace, context)
+        except (KeyError, ValueError, chapter_workspace.WorkspaceError) as error:
+            raise ToolError(
+                "Current chapter workspace is invalid."
+            ) from error
+        validate_workspace_draft_files(book_directory, workspace)
+        validate_chapter_assessment_references(submission, workspace)
+        validate_chapter_completion_gate(book_directory, submission)
+        return write_chapter_assessment(book_directory, submission)
     except chapter_workspace.WorkspaceError as error:
         raise ToolError(str(error)) from error
     finally:
