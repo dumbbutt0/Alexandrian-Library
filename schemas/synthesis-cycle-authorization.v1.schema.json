@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://alexandrian-library.local/schemas/synthesis-cycle-authorization.v1.schema.json",
+  "title": "Alexandrian fresh synthesis cycle authorization",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "book_id",
+    "cycle_id",
+    "protocol_version",
+    "candidate_path",
+    "candidate_sha256",
+    "prior_cycle_id",
+    "prior_cycle_root_path",
+    "prior_terminal_receipt_path",
+    "prior_terminal_receipt_sha256",
+    "reason",
+    "human_decision_artifacts",
+    "maximum_synthesis_attempts",
+    "authorized_at",
+    "authorization_sha256"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "book_id": {
+      "type": "string",
+      "pattern": "^book-[A-Za-z0-9._-]+$"
+    },
+    "cycle_id": {
+      "const": "cycle-002"
+    },
+    "protocol_version": {
+      "const": "audited-plan-v2"
+    },
+    "candidate_path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "candidate_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "prior_cycle_id": {
+      "const": "cycle-001"
+    },
+    "prior_cycle_root_path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "prior_terminal_receipt_path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "prior_terminal_receipt_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1
+    },
+    "human_decision_artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["decision_id", "path", "sha256"],
+        "properties": {
+          "decision_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sha256": {
+            "$ref": "#/$defs/sha256"
+          }
+        }
+      }
+    },
+    "maximum_synthesis_attempts": {
+      "const": 2
+    },
+    "authorized_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "authorization_sha256": {
+      "$ref": "#/$defs/sha256"
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

@@ -117,6 +117,7 @@ class RequirementStatus(str, Enum):
     UNADDRESSED = "unaddressed"
     IN_PROGRESS = "in_progress"
     SATISFIED = "satisfied"
+    BOUNDED_UNRESOLVED = "bounded_unresolved"
     ROUTED = "routed"
 
 
@@ -245,11 +246,48 @@ class DevelopmentRequirement(ContextReferences):
     related_branch_ids: list[str] = Field(default_factory=list)
     status: RequirementStatus
     destination_id: str | None = None
+    closure_reason: ClosureReason | None = None
 
     @model_validator(mode="after")
     def validate_routing(self) -> "DevelopmentRequirement":
         if self.status == RequirementStatus.ROUTED and not self.destination_id:
             raise ValueError("A routed requirement needs a destination.")
+        if (
+            self.status == RequirementStatus.BOUNDED_UNRESOLVED
+            and self.closure_reason is None
+        ):
+            raise ValueError(
+                "A bounded requirement needs an explicit closure reason."
+            )
+        if (
+            self.status
+            in {
+                RequirementStatus.UNADDRESSED,
+                RequirementStatus.IN_PROGRESS,
+            }
+            and self.closure_reason is not None
+        ):
+            raise ValueError(
+                "An active requirement cannot have a closure reason."
+            )
+        return self
+
+
+class ChapterCompletionContract(StrictModel):
+    frozen: Literal[True] = True
+    frozen_at_version: int = Field(ge=1)
+    blocking_branch_ids: list[str] = Field(default_factory=list)
+    requirement_ids: list[str] = Field(default_factory=list)
+    research_packet_limit_per_item: int = Field(default=2, ge=1, le=10)
+
+    @model_validator(mode="after")
+    def validate_unique_ids(self) -> "ChapterCompletionContract":
+        for field_name in ("blocking_branch_ids", "requirement_ids"):
+            values = getattr(self, field_name)
+            if len(values) != len(set(values)):
+                raise ValueError(
+                    f"{field_name} cannot contain duplicate identities."
+                )
         return self
 
 
@@ -303,6 +341,7 @@ class ChapterWorkspaceProposal(StrictModel):
     book_id: str = Field(pattern=r"^book-[A-Za-z0-9._-]+$")
     chapter_id: str = Field(pattern=r"^CH[1-9][0-9]*$")
     context_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    completion_contract: ChapterCompletionContract | None = None
     current_position: CurrentPosition
     spine: ChapterSpine
     branches: list[ResearchBranch] = Field(default_factory=list)
@@ -338,6 +377,30 @@ class ChapterWorkspaceProposal(StrictModel):
         )
 
         branch_ids = {branch.branch_id for branch in self.branches}
+        blocking_branch_ids = {
+            branch.branch_id
+            for branch in self.branches
+            if branch.importance == BranchImportance.BLOCKING
+        }
+        requirement_ids = {
+            requirement.requirement_id
+            for requirement in self.development_requirements
+        }
+        if self.completion_contract is not None:
+            if (
+                set(self.completion_contract.blocking_branch_ids)
+                != blocking_branch_ids
+            ):
+                raise ValueError(
+                    "Completion contract must contain every blocking branch."
+                )
+            if (
+                set(self.completion_contract.requirement_ids)
+                != requirement_ids
+            ):
+                raise ValueError(
+                    "Completion contract must contain every requirement."
+                )
         draft_ids = {draft.draft_id for draft in self.draft_versions}
         for requirement in self.development_requirements:
             unknown = set(requirement.related_branch_ids) - branch_ids
@@ -354,6 +417,104 @@ class ChapterWorkspaceProposal(StrictModel):
             if set(revision.related_branch_ids) - branch_ids:
                 raise ValueError("A revision references an unknown branch.")
         return self
+
+
+def freeze_completion_contract(
+    proposal: ChapterWorkspaceProposal,
+    frozen_at_version: int,
+    source_workspace: dict | None = None,
+) -> ChapterWorkspaceProposal:
+    """Freeze the finite branch and requirement set for chapter closeout."""
+    source = source_workspace or proposal.model_dump(mode="json")
+    existing_contract = (
+        source.get("completion_contract")
+        if source_workspace is not None
+        else None
+    )
+    if existing_contract is not None:
+        contract = ChapterCompletionContract.model_validate(
+            existing_contract
+        )
+    else:
+        blocking_branch_ids = [
+            branch["branch_id"]
+            for branch in source.get("branches", [])
+            if branch.get("importance") == BranchImportance.BLOCKING.value
+        ]
+        requirement_ids = [
+            requirement["requirement_id"]
+            for requirement in source.get("development_requirements", [])
+        ]
+        contract = ChapterCompletionContract(
+            frozen_at_version=frozen_at_version,
+            blocking_branch_ids=blocking_branch_ids,
+            requirement_ids=requirement_ids,
+        )
+    if (
+        proposal.completion_contract is not None
+        and proposal.completion_contract != contract
+    ):
+        raise WorkspaceError(
+            "Workspace completion contract is derived by the Library and "
+            "cannot be supplied or changed by the agent."
+        )
+    if proposal.completion_contract == contract:
+        return proposal
+    try:
+        return ChapterWorkspaceProposal.model_validate(
+            {
+                **proposal.model_dump(mode="json"),
+                "completion_contract": contract.model_dump(mode="json"),
+            }
+        )
+    except ValueError as error:
+        raise WorkspaceError(
+            "Workspace cannot expand its blocking completion contract."
+        ) from error
+
+
+def completion_blockers(
+    workspace: ChapterWorkspaceProposal,
+) -> list[str]:
+    """Return every nonterminal item that prevents a chapter draft closeout."""
+    contract = workspace.completion_contract
+    if contract is None:
+        return ["completion contract is not frozen"]
+
+    blockers = []
+    for section_name in SPINE_SECTION_NAMES:
+        section = getattr(workspace.spine, section_name)
+        if section.status not in {
+            SectionStatus.ADDRESSED,
+            SectionStatus.ROUTED,
+        }:
+            blockers.append(f"spine:{section_name}")
+
+    branches = {
+        branch.branch_id: branch for branch in workspace.branches
+    }
+    for branch_id in contract.blocking_branch_ids:
+        branch = branches[branch_id]
+        if branch.status not in {
+            BranchStatus.RESOLVED,
+            BranchStatus.BOUNDED_UNRESOLVED,
+            BranchStatus.ROUTED,
+        }:
+            blockers.append(f"branch:{branch_id}")
+
+    requirements = {
+        requirement.requirement_id: requirement
+        for requirement in workspace.development_requirements
+    }
+    for requirement_id in contract.requirement_ids:
+        requirement = requirements[requirement_id]
+        if requirement.status not in {
+            RequirementStatus.SATISFIED,
+            RequirementStatus.BOUNDED_UNRESOLVED,
+            RequirementStatus.ROUTED,
+        }:
+            blockers.append(f"requirement:{requirement_id}")
+    return blockers
 
 
 def enforce_sequential_ids(
@@ -529,6 +690,12 @@ def validate_revision(
     """Preserve branch identity and append-only intellectual history."""
     proposed = proposal.model_dump(mode="json")
     previous = previous_document["workspace"]
+    previous_contract = previous.get("completion_contract")
+    proposed_contract = proposed.get("completion_contract")
+    if previous_contract is not None and proposed_contract != previous_contract:
+        raise WorkspaceError(
+            "Workspace completion contract is frozen and cannot change."
+        )
     enforce_preserved_records(
         previous,
         proposed,
@@ -651,6 +818,20 @@ def render_workspace(document: dict) -> str:
         "",
         f"Confidence basis: {workspace['current_position']['confidence_basis']}",
         "",
+        "## Completion Contract",
+        "",
+        (
+            "Not frozen."
+            if workspace.get("completion_contract") is None
+            else (
+                "Frozen at workspace version "
+                f"`{workspace['completion_contract']['frozen_at_version']}` "
+                "with a research limit of "
+                f"`{workspace['completion_contract']['research_packet_limit_per_item']}` "
+                "packet(s) per contracted item."
+            )
+        ),
+        "",
         "## Chapter Spine",
         "",
     ]
@@ -737,6 +918,7 @@ def initialize_workspace(
     if destination.exists():
         raise WorkspaceError("Chapter workspace already exists.")
 
+    proposal = freeze_completion_contract(proposal, 1)
     created_at = current_utc_time()
     document = make_workspace_document(proposal, 1, created_at)
     parent = destination.parent
@@ -870,6 +1052,11 @@ def revise_workspace_while_locked(
     if index.get("current_version") != expected_version:
         raise WorkspaceError("Workspace version changed before this revision.")
 
+    proposal = freeze_completion_contract(
+        proposal,
+        expected_version + 1,
+        previous.get("workspace"),
+    )
     validate_revision(previous, proposal)
     version = expected_version + 1
     document = make_workspace_document(

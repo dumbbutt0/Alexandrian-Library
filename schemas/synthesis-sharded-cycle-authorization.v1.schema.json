@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://alexandrian-library.local/schemas/synthesis-sharded-cycle-authorization.v1.schema.json",
+  "title": "Alexandrian sharded synthesis cycle authorization",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema_version",
+    "book_id",
+    "cycle_id",
+    "protocol_version",
+    "candidate_path",
+    "candidate_sha256",
+    "prior_cycle_id",
+    "prior_inventory_path",
+    "prior_inventory_sha256",
+    "prior_controller_path",
+    "prior_controller_sha256",
+    "exhausted_plan_failures",
+    "planning_shard_count",
+    "maximum_provider_calls_per_shard",
+    "maximum_global_audit_calls",
+    "rejected_global_audit_policy",
+    "authorization_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "book_id": {
+      "type": "string",
+      "pattern": "^book-[A-Za-z0-9._-]+$"
+    },
+    "cycle_id": {"const": "cycle-003"},
+    "protocol_version": {"const": "chapter-sharded-plan-v1"},
+    "candidate_path": {"type": "string", "minLength": 1},
+    "candidate_sha256": {"$ref": "#/$defs/sha256"},
+    "prior_cycle_id": {"const": "cycle-002"},
+    "prior_inventory_path": {"type": "string", "minLength": 1},
+    "prior_inventory_sha256": {"$ref": "#/$defs/sha256"},
+    "prior_controller_path": {"type": "string", "minLength": 1},
+    "prior_controller_sha256": {"$ref": "#/$defs/sha256"},
+    "exhausted_plan_failures": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "planning_shard_count": {"type": "integer", "minimum": 1},
+    "maximum_provider_calls_per_shard": {"const": 2},
+    "maximum_global_audit_calls": {"const": 1},
+    "rejected_global_audit_policy": {"const": "terminal_hold"},
+    "authorization_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

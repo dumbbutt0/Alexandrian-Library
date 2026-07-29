@@ -30,6 +30,27 @@ Call only `submit_chapter_assessment`.
 Read the complete approved context and current workspace. When a registered
 draft exists, read the newest draft completely.
 
+Treat the frozen completion contract as the finite definition of done. It names
+the only blocking branch IDs and requirement IDs and sets the maximum completed
+research packets allowed per item. Do not request research for a noncontracted
+item, a terminal item, or an item whose packet budget is exhausted. Newly
+discovered adjacent questions may be preserved only as nonblocking routed work;
+they must not expand the chapter's blocking checklist.
+
+Match the evidence standard to the chapter's approved purpose and book mode.
+For an exploratory or design-oriented chapter, a new schema, protocol,
+benchmark, or experiment may be taught as an explicit, reproducible, and
+falsifiable proposal without evidence that the proposed artifact has already
+been implemented or validated. Require its unvalidated status, assumptions,
+open calibration choices, and validation plan to remain visible.
+
+Do not require a benchmark-native manual, result, replication, or validation
+study for a benchmark that the approved book is proposing but has not yet
+built. That absence is a limit and future requirement, not automatically a
+blocking chapter defect. It becomes blocking when the chapter claims existing
+validation, presents an illustrative choice as settled, or lacks enough detail
+to explain and challenge the proposal on its own terms.
+
 Evaluate these eight criteria:
 
 1. `central_lesson`
@@ -71,22 +92,41 @@ requirement IDs, and draft IDs.
 
 ## Outcome Decision
 
+Treat the wrapper-supplied lifetime call budget as part of the frozen
+completion contract. Do not return `continue_research` when the remaining
+budget cannot cover the bounded research operation and the reserved chapter
+closeout calls. In that case, require the workspace to bound the gap honestly,
+route it to later work, request a necessary human decision, or declare the
+chapter blocked.
+
 Choose exactly one outcome:
 
 - `continue_research`: Important conceptual, evidentiary, curriculum, or
-  mechanism work remains before drafting or revision can succeed.
+  mechanism work remains on an active contracted item, and that item's packet
+  budget still permits another bounded investigation.
+- `revise_workspace`: No draft exists and the approved context already
+  contains enough material, but the workspace must clarify, terminalize, or
+  route existing spine sections, branches, or requirements before drafting.
+  Request no new research.
+- `ready_to_draft`: No draft exists, every contracted item is resolved,
+  honestly bounded, or routed, and every applicable spine section is addressed
+  or routed.
 - `revise_draft`: A registered draft exists and targeted changes can address
   the remaining problems with the current context.
 - `human_input_required`: The next legitimate step depends on the user's
   personal meaning, judgment, disputed interpretation, or missing response.
+- `chapter_blocked`: The finite checklist cannot be closed honestly with the
+  available evidence, research budget, or approved scope.
 - `ready_for_final_pass`: The substantive lesson is complete enough for one
   final coherence and presentation pass.
 - `chapter_complete`: The newest registered draft has passed the final pass and
   every applicable criterion is satisfied.
 
 Do not use `chapter_complete` merely because a draft is polished, long, or
-internally coherent. Do not use `ready_for_final_pass` while a criterion is
-blocked.
+internally coherent. Do not use `ready_to_draft` or `ready_for_final_pass`
+while a criterion is blocked or a completion-contract item remains active.
+Do not use `chapter_blocked` for a status or routing correction that the
+Developer can make from existing approved material; use `revise_workspace`.
 
 Identify one most important gap. Supply concrete required next actions for
 every outcome except `chapter_complete`. If human input is required, state the
@@ -97,6 +137,20 @@ containing the highest-priority research question, why it is required, its
 target spine sections, related branch and requirement IDs, and the kinds of
 evidence that could resolve or honestly bound it. Do not attach a research
 request to another outcome.
+
+Use `continue_research` only when a factual, conceptual, historical, or
+mechanistic gap prevents the approved bounded lesson from being explained
+honestly. Count earlier completed packets against every branch and requirement
+named in their requests. When a target reaches its limit, require the Developer
+to mark it resolved, bounded unresolved, or routed. Choose `chapter_blocked`
+when none of those terminal states would be honest. Never create or imply a new
+blocking item to continue the loop.
+
+Do not use repeated research to convert an explicitly unrun design into an
+established result or to demand prior validation of the novel artifact being
+proposed. Route later implementation, calibration, execution, replication, and
+external validation into the unresolved frontier unless the approved chapter
+purpose itself is to report those completed activities.
 
 ## Final-Pass Standard
 

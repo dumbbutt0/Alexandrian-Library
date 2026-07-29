@@ -1,0 +1,32 @@
+{
+  "claim_id": "SC3",
+  "source_kind": "candidate_only",
+  "canonical_claim_id": null,
+  "statement": "At this stage the profile must not be described as compliant with, derived from, similar to, affiliated with, endorsed by, certified under, based on, or inspired by ASD-STE100.",
+  "candidate_excerpt": "At this stage, the profile should not be described as compliant with, derived from, similar to, affiliated with, endorsed by, certified under, based on, or inspired by ASD-STE100.",
+  "candidate_location": "CH1 paragraph 2",
+  "certainty": "Project choice while the external record is incomplete.",
+  "scope_and_conditions": "At this stage only.",
+  "evidence_receipt_ids": [],
+  "attribution": "Candidate prose.",
+  "evidence_relationship": "No source establishes a legal prohibition.",
+  "authority_type": "candidate_prose",
+  "resolution_status": "project_choice",
+  "authority_source": "candidate_excerpt",
+  "authority_ref": "candidate_excerpt",
+  "authoritative_text": "At this stage, the profile should not be described as compliant with, derived from, similar to, affiliated with, endorsed by, certified under, based on, or inspired by ASD-STE100.",
+  "normalized_summary": "Avoid language that implies a relationship to ASD-STE100 while the record is incomplete.",
+  "protected_semantics": {
+    "claim_role": "project_choice",
+    "normative_force": "recommendation",
+    "normative_polarity": "negative",
+    "normative_surface_form": "should not",
+    "certainty": "Project choice while the external record is incomplete.",
+    "scope_and_conditions": "At this stage only.",
+    "attribution": "Candidate prose.",
+    "evidence_relationship": "No source establishes a legal prohibition.",
+    "resolution_status": "project_choice"
+  },
+  "required_in_edition": true,
+  "importance_reason": "Cycle 006 regression fixture."
+}

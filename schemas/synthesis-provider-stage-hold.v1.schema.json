@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://alexandrian-library.local/schemas/synthesis-provider-stage-hold.v1.schema.json",
+  "title": "Alexandrian synthesis provider-stage hold",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "book_id",
+    "cycle_id",
+    "stage",
+    "status",
+    "target_path",
+    "target_created",
+    "input_hash",
+    "maximum_provider_calls",
+    "same_provider_retry_allowed",
+    "consumed_backends",
+    "provider_attempts",
+    "controller_path",
+    "stage_event_sha256",
+    "recorded_at",
+    "hold_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "book_id": {
+      "type": "string",
+      "pattern": "^book-[A-Za-z0-9._-]+$"
+    },
+    "cycle_id": {
+      "type": "string",
+      "pattern": "^cycle-[0-9]{3,}$"
+    },
+    "stage": {
+      "type": "string",
+      "pattern": "^(edition|audit)-S[12]-.+|global-audit-S[12]$"
+    },
+    "status": {
+      "enum": [
+        "edition_provider_held",
+        "audit_provider_held",
+        "global_audit_provider_held"
+      ]
+    },
+    "target_path": {"type": "string", "minLength": 1},
+    "target_created": {"const": false},
+    "input_hash": {"$ref": "#/$defs/sha256"},
+    "maximum_provider_calls": {"const": 2},
+    "same_provider_retry_allowed": {"const": true},
+    "consumed_backends": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {"enum": ["codex", "claude"]}
+    },
+    "provider_attempts": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action_id",
+          "backend",
+          "failure_classification",
+          "diagnostic_sha256"
+        ],
+        "properties": {
+          "action_id": {"type": "string", "minLength": 1},
+          "backend": {"enum": ["codex", "claude"]},
+          "failure_classification": {"type": "string", "minLength": 1},
+          "diagnostic_sha256": {"$ref": "#/$defs/sha256"}
+        }
+      }
+    },
+    "controller_path": {"type": "string", "minLength": 1},
+    "stage_event_sha256": {"$ref": "#/$defs/sha256"},
+    "recorded_at": {"type": "string", "minLength": 1},
+    "hold_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

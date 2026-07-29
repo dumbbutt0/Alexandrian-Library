@@ -89,6 +89,379 @@ Later Product Work
 - Multi-user storage, concurrency controls, and access permissions
 
 
+Book-Level Synthesis Follow-Up
+
+- Baseline complete: raw candidate assembly now feeds a bounded synthesis,
+  independent claim-preservation audit, one optional correction, and the final
+  human editorial checkpoint
+- Evaluate whole-book coherence separately from chapter completeness
+- Give each chapter a distinct job and remove declining-information repetition
+- Preserve one running synthetic example across the complete manuscript when it
+  improves pedagogy
+- Translate workflow-local statements into book-global truth
+- Replace internal branch, requirement, packet, and evidence-receipt identifiers
+  in reader-facing prose while retaining them in the provenance package
+- Support reader-facing citations that remain traceable to immutable evidence
+  receipts
+- Route detailed schemas, validators, manifests, score equations, and evidence
+  notes into appendices when the book mode benefits from that separation
+- Preserve a change ledger for material merged, moved, compressed, or retained
+- Limit automatic synthesis to one manuscript pass, one independent evaluation,
+  and at most one final presentation pass
+- Do not let synthesis silently add research findings, user beliefs, or new
+  evidence
+- Preserve every finalized smoke-test book as an immutable edition rather than
+  overwriting it
+- Give later editions explicit lineage to the parent assembly and a human-
+  readable change summary
+- Distinguish immutable artifact status from internal, review-ready, and
+  published bookshelf status
+
+
+Deferred External-Reader and Claim-Frame Improvements
+
+Claim-frame productization:
+
+- Turn the claim frame into a reusable review schema that records the evidence
+  relationship, arguments, scope and conditions, attribution, and strength of
+  each material claim
+- Evaluate a claim-preservation linter and human-audit interface that report
+  field-level changes instead of reducing fidelity to one overall judgment
+- Explicitly detect changes to decision status, naming status, and the
+  relationship between a claim and its evidence source
+- Let an audit classify a field as preserved, clarified, weakened,
+  strengthened, removed, or meaning-changed, with blocking behavior governed
+  by the approved publication contract
+- Test the claim-frame method against a shortening-only control and across more
+  than one book before presenting it as a validated general mechanism
+
+External-reader editing:
+
+- Open a technical book with a concrete human-scale problem or before-and-after
+  claim transformation when that explains the stakes better than project
+  history or governance
+- Keep internal workflow, branch ownership, receipt identifiers, and routing
+  details in provenance views or appendices unless readers need them to
+  understand the argument
+- Consolidate repeated epistemic disclaimers into a compact status legend or
+  one authoritative boundary section while preserving the underlying limits
+- Move extended standards, legal, trademark, redistribution, and certification
+  analysis into a concise boundary section, appendix, or separate investigation
+  when it is context rather than the book's central contribution
+- Add deterministic presentation checks for chapter numbering, chapter titles,
+  table-of-contents alignment, and missing or duplicated structural labels
+- Evaluate whether each public book gives an external reader a direct path
+  through the problem, proposed idea, mechanism, measurements, limitations, and
+  falsification conditions
+
+Publication-readiness evaluation:
+
+- Keep technical validity, epistemic rigor, whole-book coherence, readability,
+  and external usefulness as separate review dimensions
+- Treat external review scores as feedback snapshots, not objective evidence or
+  automatic publication decisions
+- Require unresolved central naming, attribution, or evidence-relationship
+  findings to be settled by the authorized audit and human decision before
+  public publication
+- Preserve the external review's suggested compact five-part argument as an
+  editorial option, not a mandatory schema for every book
+
+
+Future Publication Profiles
+
+- Evaluate ASD-STE100 Simplified Technical English as an optional technical
+  publication profile after a manuscript is technically approved
+- Apply the profile primarily to claims, definitions, procedures, experiments,
+  and use cases; preserve curiosity, reflection, quotations, citations, code,
+  equations, and schemas when transformation would damage their function
+- Keep the technically approved candidate immutable and write the STE edition
+  and its audit as separate presentation artifacts
+- Maintain a project terminology profile for approved technical nouns and
+  verbs, definitions, forms, and prohibited synonyms
+- Audit semantic equivalence, evidence links, certainty, and possible meaning
+  changes instead of treating mechanical language checks as proof of
+  correctness
+- Require a final human editorial decision before publishing an STE edition
+- Test the workflow on one approved chapter before considering book-wide use
+- Do not copy or redistribute the ASD-STE100 specification, controlled
+  dictionary, rule text, or examples under the project's licenses; users should
+  obtain the official standard separately, and any open-source implementation
+  must respect its copyright and trademark terms
+- Treat literary or novel writing as a separate publication mode rather than
+  forcing it through an STE profile
+
+
+Post-V1 Convenience and Knowledge Views
+
+Guiding principle:
+
+- Borrow competing research tools' convenience without copying their identity
+- Preserve the Library's distinction as human-governed knowledge development
+- Make rigorous publishing an available depth, not the entrance fee for every
+  casual question
+- Keep one approved canonical knowledge object behind every derived view
+
+Immersive reader frontend direction:
+
+- Treat the reader as a quiet, tactile reading space rather than a generic
+  document dashboard: the approved book is the visual center, controls recede
+  while reading, and supporting evidence remains close without crowding the page
+- Use a responsive two-page spread on wide screens and a single-page flow on
+  narrow screens; never shrink body text merely to preserve the spread metaphor
+- Make page turns, chapter changes, and return-to-last-position behavior feel
+  deliberate, but keep reduced-motion and instant-navigation alternatives
+- Support keyboard, pointer, touch, and assistive-technology navigation with
+  visible focus states, semantic landmarks, selectable text, and stable URLs
+  for chapters, pages, claims, figures, notes, and citations
+- Use restrained material cues such as warm paper, subtle depth, edge wear,
+  diagrams, marginal marks, and chapter ornaments as optional presentation
+  layers; keep contrast, line length, type size, and text clarity authoritative
+- Let illustrations, diagrams, maps, tables, and facsimile-like research
+  artifacts occupy a page or spread when they genuinely improve understanding
+- Keep claims, citations, definitions, limitations, and provenance as structured
+  HTML rather than baking them into decorative images or canvas-only rendering
+- Allow a reader to open evidence, claim history, terminology, or technical
+  detail in a side panel or layered view without losing the current reading
+  position
+- Preserve one canonical approved text across immersive, standard, print, and
+  accessibility views; presentation controls may reveal or reorganize approved
+  supporting material but must not independently rewrite claims
+- Provide a plain-reader escape hatch with minimal styling, continuous scroll,
+  browser zoom, text selection, printing, and export
+- Save reading position and presentation preferences separately from immutable
+  book artifacts, and make all local reader state easy to clear
+- Test the experience with long chapters, dense citations, code, equations,
+  tables, footnotes, very short books, missing illustrations, and narrow screens
+- Treat visual polish as progressive enhancement: the complete book, citations,
+  and navigation must remain usable when animation, texture, or advanced effects
+  are unavailable
+- Separate the bookshelf from the reader: use the shelf as a spatial discovery
+  and selection surface, then transition into a quieter document-centered
+  reading surface instead of forcing long-form reading inside a 3D scene
+- Let shelf position, cover, spine, color, volume number, title, and status
+  communicate collection structure; show concise metadata and an explicit
+  inspect or open action for the selected volume
+- Consider a compact collection-position rail for moving through many books,
+  with exact counts and direct navigation rather than gesture-only browsing
+- Preserve the feeling of physical scale through covers, page blocks, shadows,
+  restrained perspective, and motion while avoiding interactions that obscure
+  which book is selected or how to open it
+
+Frontend reference material:
+
+- Skyrim-style book screens supplied by the user on 2026-07-29: open-book
+  composition, generous margins, page-scale illustrations, minimal controls,
+  visible page-turn affordance, and a strong sense that the text is a durable
+  object rather than a disposable chat response
+- https://x.com/carrabre/status/2081930429435875694
+- https://x.com/MengTo/status/2082265920173711530
+- https://x.com/thebuggeddev/status/2081059128626344201
+- https://play.mint.gg/complete-shelf
+- https://github.com/thebuggeddev/books
+- https://www.trevornoah.com/books
+- The Carrabre reference demonstrates an open-source Stripe Press-inspired shelf
+  with a selected volume, collection count, inspect action, directional
+  navigation, and a position rail
+- The Meng To reference suggests a useful prototyping method: give an
+  implementation agent the approved visual reference, functioning interaction,
+  and verified matching source, then use the result as an experiment rather
+  than assuming visual similarity proves implementation quality
+- The Bugged Dev reference proposes a mathematically constructed book scene
+  animated with Three.js and GSAP without modeled 3D book assets; evaluate this
+  as one optional rendering approach, not as an established project dependency
+- Use these references as interaction and atmosphere inspiration only; do not
+  copy proprietary game assets, typography, textures, icons, layouts, animation,
+  source code, or distinctive trade dress
+- Verify that a referenced repository actually corresponds to the inspected
+  deployment and contains the claimed mechanics before using it as an
+  implementation foundation; a visual demo, post, or repository name alone is
+  insufficient provenance
+- Before implementation, capture a small approved mood board and convert each
+  retained inspiration into a testable design principle, component behavior, or
+  accessibility requirement rather than an instruction to imitate a screenshot
+
+Smallest useful frontend slice:
+
+- Render one finalized local book from its immutable artifact and generated
+  navigation metadata
+- Provide a responsive spread/single-page reader, contents navigation, next and
+  previous controls, keyboard navigation, reading-position restore, and a plain
+  reading mode
+- Open one citation or claim in a non-destructive evidence panel and return to
+  the exact reading position
+- Prove that the displayed text and cited claim identifiers derive from the
+  approved book and provenance bundle without creating a second source of truth
+- Validate accessibility, narrow-screen behavior, long-content layout, print,
+  and no-animation behavior before adding page-turn spectacle or a 3D bookshelf
+- After the semantic reader passes, run a separate rendering spike comparing
+  CSS/DOM presentation with an isolated Three.js or canvas shelf enhancement;
+  measure startup time, frame stability, memory use, keyboard access, reduced
+  motion, low-power behavior, and fallback quality before choosing the stack
+- Keep animation state explicit and testable: selected volume, transition phase,
+  open or closed state, current page, interrupted transitions, resize behavior,
+  and restoration after navigation must not depend on hidden timing assumptions
+
+V1 candidates:
+
+- Add a frictionless source workspace for PDFs, webpages, audio, notes,
+  transcripts, and local folders
+- Let users inspect the source inventory and ask cited questions before
+  entering the governed book workflow
+- Separate Explore, Research, and Publish modes
+- Add an editable research-plan preview with questions, source types, expected
+  calls or cost, artifacts, stopping conditions, and approval points
+- Provide an immersive book.html view, concise research brief, evidence map,
+  experiment or action plan, and technical appendix from the same approved
+  claims
+- Make evidence discipline visible through structured source tables containing
+  claim relationships, quality, inclusion decisions, and reasons
+- Preserve a portable publication bundle and readable provenance view
+
+V1.5 candidates:
+
+- Add Guided, Standard, and Technical reading depths without creating
+  independently generated or conflicting editions
+- Add run status, estimated cost, and bounded progress reporting
+- Add an audio reading derived from the approved canonical edition
+- Add local-folder, GitHub, Zotero, and Obsidian imports
+- Normalize connectors through provider-neutral tools or MCP where practical
+
+V2 candidates:
+
+- Support independent human or agent reviewers, dissent, and dual approval
+- Add living-book alerts for retractions, important new evidence, challenged
+  claims, and unresolved branches
+- Never rewrite a finalized book silently; propose a new research cycle,
+  impact assessment, amendment, human review, and immutable edition
+- Add a cross-book terminology register and knowledge-to-reality action plans
+- Add collaboration and shared approval workflows only after the single-user
+  lifecycle is proven
+
+
+Deferred Inquiry Development and Execution
+
+- Add an inquiry-lineage view that connects the original question, initial
+  beliefs, evidence, reviewer challenges, rejected directions, unresolved
+  branches, human decisions, and published conclusions
+- Make changes in understanding directly inspectable: what changed, what caused
+  the change, what evidence supports it, and what remains uncertain
+- Let the user promote an approved question, branch, or book into a separate
+  learning track, experiment plan, or implementation track
+- Keep exploration and execution as distinct stages; beginning implementation
+  must remain an explicit human decision
+- Let an implementation track identify prerequisite lessons, acceptance
+  criteria, falsification conditions, reproducible experiments, prototype
+  boundaries, and evaluation measures before code generation
+- Link prototypes and experiment results back to the claims that motivated them
+  and return their results as new evidence for a later research cycle
+- Allow an approved body of knowledge to produce several linked outcomes, such
+  as a book, lesson plan, research proposal, implementation plan, or paper,
+  without treating independently generated prose as a new source of truth
+- Preserve user-selected branches as candidates for their own lesson or
+  research books instead of silently expanding the current book
+
+
+Deferred Grounded Discovery and Abductive Claims
+
+Guiding boundary:
+
+- Describe the Library as preserving and improving the conditions for human
+  invention, not as proof that text synthesis autonomously creates foundational
+  scientific discoveries
+- Never treat a coherent explanation, novel term, plausible experiment, or
+  disagreement between agents as independent evidence of discovery
+- Keep literature synthesis, deductive consequences, abductive hypotheses,
+  empirical observations, and validated discoveries as distinct epistemic
+  categories
+
+Abductive hypothesis records:
+
+- Mark a newly proposed premise as not entailed by the existing evidence
+- Record its explanatory target and whether its origin was the user, a model,
+  an observation, or a joint inference
+- Preserve serious competing hypotheses instead of optimizing immediately for
+  one polished explanation
+- Derive predictions and explicit falsification conditions
+- Require an experiment or external observation before promoting the premise
+  as knowledge
+- Preserve rejected and inconclusive tests as part of the hypothesis lineage
+
+Reality-feedback loop:
+
+- Extend the later knowledge-to-reality workflow in both directions:
+  knowledge to action to reality to surprising result to revised premise
+- Accept observations that can contradict the Library's current vocabulary,
+  ontology, or preferred explanation
+- Store executable experiment definitions, instrumentation, environmental
+  conditions, measurements, failed predictions, and reproducibility records
+- Distinguish results produced by external constraints from outcomes invented
+  or narrated by another language model
+- Link empirical results back to the exact claims and predictions they test
+
+Possible grounding work:
+
+- Evaluate deterministic simulations, physics engines, real code execution,
+  external datasets, sensors, robots, and human-participant environments as
+  sources of observations the model cannot rewrite
+- Treat multimodal and interactive world-model integration as a research
+  direction, not a proven requirement or guaranteed solution
+- Explore a later Agent Coliseum connection for interventions, persistent
+  consequences, counterfactuals, and behavioral evidence
+- Do not count a wholly LLM-described Coliseum as external grounding merely
+  because several agents participated
+
+Originality review:
+
+- Add a check for closed literature loops in which retrieval, synthesis,
+  criticism, and revision all operate on model-generated or already-symbolized
+  material
+- Flag new terminology presented as a new concept, recombination presented as
+  a new theory, an unrun experiment presented as an insight, or polished prose
+  presented as an advance in the world
+- Require public claims of novelty to identify the prior-art search boundary,
+  the genuinely new premise, its origin, its differentiated predictions, and
+  the external test
+- Keep unresolved anomalies and failed explanations visible because they may
+  support later human abductive reasoning
+
+Source context:
+
+- Revisit Tom Zahavy's position paper on scientific invention before designing
+  this layer
+- Treat its account of grounded abduction as a serious design challenge, not an
+  impossibility theorem about all future language-model systems
+- Reverify the primary paper and related evidence before turning the position
+  into a product requirement
+
+
+Deferred Behavioral Source and Reproducibility
+
+- Add a behavioral-source manifest for AI-assisted workflows that records the
+  versions or hashes of goals, instructions, skills, tool interfaces, memory
+  and retrieval policies, evaluation contracts, and orchestration rules
+- Distinguish behavior-defining artifacts from interaction artifacts so a new
+  terminal or graphical interface does not silently redefine the Library's
+  research behavior
+- Define the authoritative source for each component: deterministic code for
+  conventional tools, approved behavioral specifications for model-driven
+  behavior, and tests or evaluations for acceptance
+- Include the behavioral-source manifest in reproducibility and publication
+  provenance when it materially affected the generated knowledge
+- Support comparison of two workflow versions against the same bounded inquiry
+  so behavioral changes can be evaluated rather than inferred from model prose
+
+
+Do not prioritize yet:
+
+- Generic chatbot competition
+- Hundreds of integrations
+- Video or slide generation
+- Enterprise collaboration
+- Massive academic-paper indexing
+- Fully autonomous computer use
+- Unlimited hosted research
+
+
 Review Rule
 
 Do not implement this file as one large upgrade. Revisit the smallest relevant

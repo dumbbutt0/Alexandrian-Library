@@ -337,14 +337,45 @@ class ChapterWorkspaceTests(unittest.TestCase):
                 "The mechanism cannot be taught responsibly without evidence."
             ),
             "target_spine_sections": ["evidence_and_reasoning"],
-            "branch_ids": [],
-            "requirement_ids": [],
+            "branch_ids": ["BR1"],
+            "requirement_ids": ["REQ1"],
             "desired_evidence": ["Primary research or official documentation."],
         }
 
     def initialize(self) -> mcp_server.ChapterWorkspaceReceipt:
         return mcp_server.initialize_chapter_workspace(
             self.make_proposal()
+        )
+
+    def close_completion_contract(
+        self,
+        expected_version: int = 1,
+    ) -> mcp_server.ChapterWorkspaceReceipt:
+        _, _, document = chapter_workspace.load_current_workspace(
+            self.book_directory,
+            self.chapter_id,
+        )
+        proposal_data = document["workspace"]
+        for section in proposal_data["spine"].values():
+            section["status"] = "addressed"
+        proposal_data["branches"][0].update(
+            {
+                "status": "resolved",
+                "next_action": "explain",
+                "closure_reason": "evidence_sufficient",
+            }
+        )
+        proposal_data["development_requirements"][0].update(
+            {
+                "status": "satisfied",
+                "closure_reason": "evidence_sufficient",
+            }
+        )
+        return mcp_server.revise_chapter_workspace(
+            chapter_workspace.ChapterWorkspaceProposal.model_validate(
+                proposal_data
+            ),
+            expected_version,
         )
 
     def test_initializes_versioned_workspace_without_chapter_prose(
@@ -365,6 +396,16 @@ class ChapterWorkspaceTests(unittest.TestCase):
 
         self.assertEqual(receipt.workspace_version, 1)
         self.assertEqual(document["workspace"]["branches"][0]["branch_id"], "BR1")
+        self.assertEqual(
+            document["workspace"]["completion_contract"][
+                "blocking_branch_ids"
+            ],
+            ["BR1"],
+        )
+        self.assertEqual(
+            document["workspace"]["completion_contract"]["requirement_ids"],
+            ["REQ1"],
+        )
         self.assertIn("This artifact tracks chapter research state", markdown)
         self.assertFalse((self.book_directory / "chapters").exists())
 
@@ -374,6 +415,28 @@ class ChapterWorkspaceTests(unittest.TestCase):
                 self.make_proposal(unknown_claim=True)
             )
 
+        self.assertFalse(
+            (self.book_directory / "workspaces").exists()
+        )
+
+    def test_library_owns_the_completion_contract_policy(self) -> None:
+        proposal_data = self.make_proposal().model_dump(mode="json")
+        proposal_data["completion_contract"] = {
+            "frozen": True,
+            "frozen_at_version": 1,
+            "blocking_branch_ids": ["BR1"],
+            "requirement_ids": ["REQ1"],
+            "research_packet_limit_per_item": 5,
+        }
+        with self.assertRaisesRegex(
+            ToolError,
+            "derived by the Library",
+        ):
+            mcp_server.initialize_chapter_workspace(
+                chapter_workspace.ChapterWorkspaceProposal.model_validate(
+                    proposal_data
+                )
+            )
         self.assertFalse(
             (self.book_directory / "workspaces").exists()
         )
@@ -483,6 +546,168 @@ class ChapterWorkspaceTests(unittest.TestCase):
             ).exists()
         )
 
+    def test_completion_contract_cannot_gain_blockers_or_requirements(
+        self,
+    ) -> None:
+        self.initialize()
+        blocking_data = self.make_proposal().model_dump(mode="json")
+        blocking_data["branches"].append(
+            {
+                "branch_id": "BR2",
+                "origin": "idea",
+                "question": "Can a late question extend the chapter loop?",
+                "reason_required": "It was discovered after initialization.",
+                "question_kind": "design",
+                "importance": "blocking",
+                "status": "unexplored",
+                "next_action": "research",
+                "destination_type": "current_chapter",
+                "destination_id": None,
+                "closure_reason": None,
+                "claim_ids": [],
+                "evidence_receipt_ids": [],
+                "knowledge_node_ids": [],
+                "transcript_references": [],
+            }
+        )
+        with self.assertRaisesRegex(
+            ToolError,
+            "cannot expand",
+        ):
+            mcp_server.revise_chapter_workspace(
+                chapter_workspace.ChapterWorkspaceProposal.model_validate(
+                    blocking_data
+                ),
+                1,
+            )
+
+        requirement_data = self.make_proposal().model_dump(mode="json")
+        requirement_data["development_requirements"].append(
+            {
+                "requirement_id": "REQ2",
+                "category": "experiment",
+                "description": "Run a newly discovered experiment.",
+                "why_required": "It would extend the original checklist.",
+                "related_branch_ids": ["BR1"],
+                "status": "unaddressed",
+                "destination_id": None,
+                "closure_reason": None,
+                "claim_ids": [],
+                "evidence_receipt_ids": [],
+                "knowledge_node_ids": [],
+                "transcript_references": [],
+            }
+        )
+        with self.assertRaisesRegex(
+            ToolError,
+            "cannot expand",
+        ):
+            mcp_server.revise_chapter_workspace(
+                chapter_workspace.ChapterWorkspaceProposal.model_validate(
+                    requirement_data
+                ),
+                1,
+            )
+
+    def test_legacy_workspace_freezes_contract_on_next_revision(self) -> None:
+        self.initialize()
+        current_path = (
+            self.book_directory
+            / "workspaces"
+            / self.chapter_id
+            / "versions"
+            / "v001.json"
+        )
+        document = json.loads(current_path.read_text(encoding="utf-8"))
+        del document["workspace"]["completion_contract"]
+        document["workspace_sha256"] = (
+            chapter_workspace.workspace_document_sha256(document)
+        )
+        self.write_json(current_path, document)
+
+        expanded_data = self.make_proposal().model_dump(mode="json")
+        expanded_data["completion_contract"] = {
+            "frozen": True,
+            "frozen_at_version": 2,
+            "blocking_branch_ids": ["BR1"],
+            "requirement_ids": ["REQ1"],
+            "research_packet_limit_per_item": 5,
+        }
+        with self.assertRaisesRegex(
+            ToolError,
+            "derived by the Library",
+        ):
+            mcp_server.revise_chapter_workspace(
+                chapter_workspace.ChapterWorkspaceProposal.model_validate(
+                    expanded_data
+                ),
+                1,
+            )
+
+        receipt = mcp_server.revise_chapter_workspace(
+            self.make_proposal(),
+            1,
+        )
+        _, _, migrated = chapter_workspace.load_current_workspace(
+            self.book_directory,
+            self.chapter_id,
+        )
+
+        self.assertEqual(receipt.workspace_version, 2)
+        self.assertEqual(
+            migrated["workspace"]["completion_contract"],
+            {
+                "frozen": True,
+                "frozen_at_version": 2,
+                "blocking_branch_ids": ["BR1"],
+                "requirement_ids": ["REQ1"],
+                "research_packet_limit_per_item": 2,
+            },
+        )
+
+    def test_bounded_requirement_is_an_honest_terminal_state(self) -> None:
+        self.initialize()
+        _, _, document = chapter_workspace.load_current_workspace(
+            self.book_directory,
+            self.chapter_id,
+        )
+        proposal_data = document["workspace"]
+        for section in proposal_data["spine"].values():
+            section["status"] = "addressed"
+        proposal_data["branches"][0].update(
+            {
+                "status": "bounded_unresolved",
+                "next_action": "explain",
+                "closure_reason": "currently_unanswerable",
+            }
+        )
+        proposal_data["development_requirements"][0].update(
+            {
+                "status": "bounded_unresolved",
+                "closure_reason": "currently_unanswerable",
+            }
+        )
+        mcp_server.revise_chapter_workspace(
+            chapter_workspace.ChapterWorkspaceProposal.model_validate(
+                proposal_data
+            ),
+            1,
+        )
+        _, _, terminal_document = chapter_workspace.load_current_workspace(
+            self.book_directory,
+            self.chapter_id,
+        )
+        terminal_workspace = (
+            chapter_workspace.ChapterWorkspaceProposal.model_validate(
+                terminal_document["workspace"]
+            )
+        )
+
+        self.assertEqual(
+            chapter_workspace.completion_blockers(terminal_workspace),
+            [],
+        )
+
     def test_rejects_stale_revision_and_tampered_workspace(self) -> None:
         self.initialize()
         proposal = self.make_proposal()
@@ -530,13 +755,14 @@ class ChapterWorkspaceTests(unittest.TestCase):
         self.assertTrue(lock_path.exists())
 
     def test_draft_references_are_verified_and_immutable(self) -> None:
-        workspace_receipt = self.initialize()
+        self.initialize()
+        workspace_receipt = self.close_completion_contract()
         draft_receipt = mcp_server.save_chapter_draft(
             mcp_server.ChapterDraftSubmission(
                 book_id=self.book_id,
                 chapter_id=self.chapter_id,
                 context_sha256=self.context["context_sha256"],
-                expected_workspace_version=1,
+                expected_workspace_version=2,
                 expected_workspace_sha256=(
                     workspace_receipt.workspace_sha256
                 ),
@@ -544,7 +770,11 @@ class ChapterWorkspaceTests(unittest.TestCase):
             )
         )
         draft_path = self.project_path / draft_receipt.relative_path
-        proposal_data = self.make_proposal().model_dump(mode="json")
+        _, _, current_document = chapter_workspace.load_current_workspace(
+            self.book_directory,
+            self.chapter_id,
+        )
+        proposal_data = current_document["workspace"]
         proposal_data["draft_versions"] = [
             {
                 "draft_id": draft_receipt.draft_id,
@@ -571,7 +801,7 @@ class ChapterWorkspaceTests(unittest.TestCase):
                 proposal_data
             )
         )
-        mcp_server.revise_chapter_workspace(proposal, 1)
+        mcp_server.revise_chapter_workspace(proposal, 2)
         self.assertEqual(
             draft_path.read_text(encoding="utf-8"),
             "First bounded draft.\n",
@@ -593,16 +823,38 @@ class ChapterWorkspaceTests(unittest.TestCase):
                 chapter_workspace.ChapterWorkspaceProposal.model_validate(
                     mutated_data
                 ),
-                2,
+                3,
+            )
+
+    def test_draft_is_rejected_until_completion_contract_is_terminal(
+        self,
+    ) -> None:
+        workspace_receipt = self.initialize()
+        with self.assertRaisesRegex(
+            ToolError,
+            "completion blockers",
+        ):
+            mcp_server.save_chapter_draft(
+                mcp_server.ChapterDraftSubmission(
+                    book_id=self.book_id,
+                    chapter_id=self.chapter_id,
+                    context_sha256=self.context["context_sha256"],
+                    expected_workspace_version=1,
+                    expected_workspace_sha256=(
+                        workspace_receipt.workspace_sha256
+                    ),
+                    markdown="This draft is premature.",
+                )
             )
 
     def test_unregistered_draft_blocks_another_draft(self) -> None:
-        workspace_receipt = self.initialize()
+        self.initialize()
+        workspace_receipt = self.close_completion_contract()
         stale_submission = mcp_server.ChapterDraftSubmission(
             book_id=self.book_id,
             chapter_id=self.chapter_id,
             context_sha256=self.context["context_sha256"],
-            expected_workspace_version=1,
+            expected_workspace_version=2,
             expected_workspace_sha256="f" * 64,
             markdown="This stale draft must not be saved.",
         )
@@ -613,7 +865,7 @@ class ChapterWorkspaceTests(unittest.TestCase):
             book_id=self.book_id,
             chapter_id=self.chapter_id,
             context_sha256=self.context["context_sha256"],
-            expected_workspace_version=1,
+            expected_workspace_version=2,
             expected_workspace_sha256=workspace_receipt.workspace_sha256,
             markdown="A draft awaiting workspace registration.",
         )
@@ -695,6 +947,86 @@ class ChapterWorkspaceTests(unittest.TestCase):
                 **invalid_other_outcome,
             )
 
+        invalid_workspace_revision = {
+            **common,
+            "draft_id": "D1",
+            "outcome": "revise_workspace",
+        }
+        with self.assertRaises(ValueError):
+            mcp_server.ChapterAssessmentSubmission(
+                **invalid_workspace_revision,
+            )
+
+    def test_ready_to_draft_requires_terminal_contract(self) -> None:
+        workspace_receipt = self.initialize()
+        criteria = self.make_assessment_criteria("satisfied")
+        submission = mcp_server.ChapterAssessmentSubmission(
+            book_id=self.book_id,
+            chapter_id=self.chapter_id,
+            context_sha256=self.context["context_sha256"],
+            workspace_version=workspace_receipt.workspace_version,
+            workspace_sha256=workspace_receipt.workspace_sha256,
+            draft_id=None,
+            criteria=criteria,
+            outcome="ready_to_draft",
+            most_important_gap="The first draft remains to be written.",
+            required_next_actions=["Create the first rough draft."],
+            human_input_requests=[],
+        )
+        with self.assertRaisesRegex(ToolError, "completion blockers"):
+            mcp_server.submit_chapter_assessment(submission)
+
+        terminal_receipt = self.close_completion_contract()
+        accepted = mcp_server.submit_chapter_assessment(
+            submission.model_copy(
+                update={
+                    "workspace_version": terminal_receipt.workspace_version,
+                    "workspace_sha256": terminal_receipt.workspace_sha256,
+                }
+            )
+        )
+        self.assertEqual(accepted.outcome.value, "ready_to_draft")
+
+    def test_continue_research_obeys_per_item_packet_limit(self) -> None:
+        workspace_receipt = self.initialize()
+        request = self.make_research_request()
+        submission = mcp_server.ChapterAssessmentSubmission(
+            book_id=self.book_id,
+            chapter_id=self.chapter_id,
+            context_sha256=self.context["context_sha256"],
+            workspace_version=workspace_receipt.workspace_version,
+            workspace_sha256=workspace_receipt.workspace_sha256,
+            draft_id=None,
+            criteria=self.make_assessment_criteria(),
+            outcome="continue_research",
+            most_important_gap=request["why_required"],
+            required_next_actions=["Research the contracted mechanism."],
+            human_input_requests=[],
+            research_request=request,
+        )
+        packets = [
+            {
+                "research": {
+                    "research_request": request,
+                }
+            },
+            {
+                "research": {
+                    "research_request": request,
+                }
+            },
+        ]
+        with patch.object(
+            mcp_server,
+            "load_chapter_research_packets",
+            side_effect=[[], packets],
+        ):
+            with self.assertRaisesRegex(
+                ToolError,
+                "Research packet limit",
+            ):
+                mcp_server.submit_chapter_assessment(submission)
+
     def test_packet_admits_supplemental_evidence_without_context_mutation(
         self,
     ) -> None:
@@ -735,26 +1067,26 @@ class ChapterWorkspaceTests(unittest.TestCase):
         source_content = (
             "The controlled result constrains the proposed mechanism."
         )
-        mcp_server.CHAPTER_SOURCE_RECEIPTS[raw_receipt_id] = (
-            mcp_server.ChapterSourceReceipt(
-                receipt_id=raw_receipt_id,
-                book_id=self.book_id,
-                chapter_id=self.chapter_id,
-                assessment_id=assessment_receipt.assessment_id,
-                requested_url="https://example.com/study",
-                final_url="https://example.com/study",
-                domain="example.com",
-                title="Controlled Study",
-                content_type="text/html",
-                retrieved_at="2026-07-26T00:00:00+00:00",
-                content_sha256=hashlib.sha256(
-                    source_content.encode("utf-8")
-                ).hexdigest(),
-                research_question=request["research_question"],
-                content=source_content,
-                content_truncated=False,
-            )
+        source_receipt = mcp_server.ChapterSourceReceipt(
+            receipt_id=raw_receipt_id,
+            book_id=self.book_id,
+            chapter_id=self.chapter_id,
+            assessment_id=assessment_receipt.assessment_id,
+            requested_url="https://example.com/study",
+            final_url="https://example.com/study",
+            domain="example.com",
+            title="Controlled Study",
+            content_type="text/html",
+            retrieved_at="2026-07-26T00:00:00+00:00",
+            content_sha256=hashlib.sha256(
+                source_content.encode("utf-8")
+            ).hexdigest(),
+            research_question=request["research_question"],
+            content=source_content,
+            content_truncated=False,
         )
+        mcp_server.write_chapter_source_receipt(source_receipt)
+        mcp_server.CHAPTER_SOURCE_RECEIPTS.clear()
         research_submission = mcp_server.ChapterResearchSubmission(
             book_id=self.book_id,
             chapter_id=self.chapter_id,
@@ -803,9 +1135,15 @@ class ChapterWorkspaceTests(unittest.TestCase):
                 "Qualify the mechanism and preserve the alternative."
             ],
         )
-        packet_receipt = mcp_server.submit_chapter_research_packet(
-            research_submission
-        )
+        with patch.object(
+            mcp_server,
+            "validate_research_packet_budget",
+            wraps=mcp_server.validate_research_packet_budget,
+        ) as budget_validator:
+            packet_receipt = mcp_server.submit_chapter_research_packet(
+                research_submission
+            )
+        budget_validator.assert_called_once()
         self.assertEqual(packet_receipt.research_packet_id, "R1")
         packet_path = self.project_path / packet_receipt.json_path
         packet_document = json.loads(
@@ -856,6 +1194,177 @@ class ChapterWorkspaceTests(unittest.TestCase):
                 self.book_id,
                 self.chapter_id,
             )
+
+    def test_research_packet_preserves_frozen_contract_after_new_side_branch(
+        self,
+    ) -> None:
+        self.initialize()
+        _, _, workspace_document = (
+            chapter_workspace.load_current_workspace(
+                self.book_directory,
+                self.chapter_id,
+            )
+        )
+        proposal_data = workspace_document["workspace"]
+        proposal_data["branches"].append(
+            {
+                "branch_id": "BR2",
+                "origin": "idea",
+                "question": "What adjacent implementation might follow?",
+                "reason_required": "Preserve it without expanding the lesson.",
+                "question_kind": "design",
+                "importance": "nonblocking",
+                "status": "routed",
+                "next_action": "route",
+                "destination_type": "separate_book",
+                "destination_id": "future-implementation",
+                "closure_reason": "moved_to_other_artifact",
+                "claim_ids": [],
+                "evidence_receipt_ids": [],
+                "knowledge_node_ids": [],
+                "transcript_references": [],
+            }
+        )
+        revised = mcp_server.revise_chapter_workspace(
+            chapter_workspace.ChapterWorkspaceProposal.model_validate(
+                proposal_data
+            ),
+            1,
+        )
+        request = self.make_research_request()
+        assessment = mcp_server.submit_chapter_assessment(
+            mcp_server.ChapterAssessmentSubmission(
+                book_id=self.book_id,
+                chapter_id=self.chapter_id,
+                context_sha256=self.context["context_sha256"],
+                workspace_version=revised.workspace_version,
+                workspace_sha256=revised.workspace_sha256,
+                draft_id=None,
+                criteria=self.make_assessment_criteria(),
+                outcome="continue_research",
+                most_important_gap=request["why_required"],
+                required_next_actions=["Bound the unavailable evidence."],
+                human_input_requests=[],
+                research_request=request,
+            )
+        )
+        packet = mcp_server.submit_chapter_research_packet(
+            mcp_server.ChapterResearchSubmission(
+                book_id=self.book_id,
+                chapter_id=self.chapter_id,
+                assessment_id=assessment.assessment_id,
+                assessment_sha256=assessment.assessment_sha256,
+                context_sha256=self.context["context_sha256"],
+                workspace_version=revised.workspace_version,
+                workspace_sha256=revised.workspace_sha256,
+                research_request=request,
+                outcome="no_admissible_evidence",
+                checked_sources=[],
+                research_trail=[
+                    {
+                        "candidate_source_url": (
+                            "https://example.com/unavailable"
+                        ),
+                        "decision": "unavailable",
+                        "reason": "The bounded candidate was inaccessible.",
+                    }
+                ],
+                synthesis=(
+                    "The bounded candidate did not yield admissible evidence."
+                ),
+                remaining_uncertainty=(
+                    "The proposed mechanism remains unverified."
+                ),
+                developer_guidance=[
+                    "Record the mechanism as bounded unresolved."
+                ],
+            )
+        )
+        self.assertEqual(packet.outcome.value, "no_admissible_evidence")
+
+    def test_excluded_durable_receipt_remains_in_research_trail(self) -> None:
+        workspace_receipt = self.initialize()
+        request = self.make_research_request()
+        assessment = mcp_server.submit_chapter_assessment(
+            mcp_server.ChapterAssessmentSubmission(
+                book_id=self.book_id,
+                chapter_id=self.chapter_id,
+                context_sha256=self.context["context_sha256"],
+                workspace_version=workspace_receipt.workspace_version,
+                workspace_sha256=workspace_receipt.workspace_sha256,
+                draft_id=None,
+                criteria=self.make_assessment_criteria(),
+                outcome="continue_research",
+                most_important_gap=request["why_required"],
+                required_next_actions=["Bound the unsuitable source."],
+                human_input_requests=[],
+                research_request=request,
+            )
+        )
+        content = "This source does not answer the contracted question."
+        receipt_id = "chapter-source-excluded"
+        mcp_server.write_chapter_source_receipt(
+            mcp_server.ChapterSourceReceipt(
+                receipt_id=receipt_id,
+                book_id=self.book_id,
+                chapter_id=self.chapter_id,
+                assessment_id=assessment.assessment_id,
+                requested_url="https://example.com/adjacent",
+                final_url="https://example.com/adjacent",
+                domain="example.com",
+                title="Adjacent Source",
+                content_type="text/html",
+                retrieved_at="2026-07-28T00:00:00+00:00",
+                content_sha256=hashlib.sha256(
+                    content.encode("utf-8")
+                ).hexdigest(),
+                research_question=request["research_question"],
+                content=content,
+                content_truncated=False,
+            )
+        )
+        packet = mcp_server.submit_chapter_research_packet(
+            mcp_server.ChapterResearchSubmission(
+                book_id=self.book_id,
+                chapter_id=self.chapter_id,
+                assessment_id=assessment.assessment_id,
+                assessment_sha256=assessment.assessment_sha256,
+                context_sha256=self.context["context_sha256"],
+                workspace_version=workspace_receipt.workspace_version,
+                workspace_sha256=workspace_receipt.workspace_sha256,
+                research_request=request,
+                outcome="no_admissible_evidence",
+                checked_sources=[],
+                research_trail=[
+                    {
+                        "candidate_source_url": (
+                            "https://example.com/adjacent"
+                        ),
+                        "decision": "excluded",
+                        "reason": (
+                            "The durable source is relevant context but does "
+                            "not answer the contracted question."
+                        ),
+                        "receipt_id": receipt_id,
+                    }
+                ],
+                synthesis=(
+                    "The checked candidate did not yield admissible evidence."
+                ),
+                remaining_uncertainty="The mechanism remains unverified.",
+                developer_guidance=[
+                    "Record the mechanism as bounded unresolved."
+                ],
+            )
+        )
+        document = json.loads(
+            (self.project_path / packet.json_path).read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            document["research"]["research_trail"][0]["receipt_id"],
+            receipt_id,
+        )
+        self.assertEqual(document["sources"], [])
 
     def test_chapter_fetch_uses_its_own_safe_mode_source_session(
         self,
@@ -939,22 +1448,192 @@ class ChapterWorkspaceTests(unittest.TestCase):
             fetched.receipt_id,
             mcp_server.CHAPTER_SOURCE_RECEIPTS,
         )
+        durable_path = (
+            mcp_server.chapter_source_receipt_directory(
+                self.book_id,
+                self.chapter_id,
+                assessment_receipt.assessment_id,
+            )
+            / f"{fetched.receipt_id}.json"
+        )
+        self.assertTrue(durable_path.is_file())
+        session = json.loads(session_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            session["fetched_sources"][0]["receipt_id"],
+            fetched.receipt_id,
+        )
+
+        mcp_server.CHAPTER_SOURCE_RECEIPTS.clear()
+        with patch.object(
+            mcp_server,
+            "fetch_source_content",
+            side_effect=AssertionError("network fetch should not repeat"),
+        ):
+            restored = mcp_server.fetch_chapter_research_source(
+                self.book_id,
+                self.chapter_id,
+                assessment_receipt.assessment_id,
+                "https://example.com/study",
+                request["research_question"],
+                "Restore the already fetched primary result.",
+            )
+        self.assertEqual(restored.receipt_id, fetched.receipt_id)
+        self.assertEqual(restored.content, source_text)
+
+    def test_source_plan_batches_permissions_and_blocks_unplanned_urls(
+        self,
+    ) -> None:
+        workspace_receipt = self.initialize()
+        request = self.make_research_request()
+        assessment_receipt = mcp_server.submit_chapter_assessment(
+            mcp_server.ChapterAssessmentSubmission(
+                book_id=self.book_id,
+                chapter_id=self.chapter_id,
+                context_sha256=self.context["context_sha256"],
+                workspace_version=workspace_receipt.workspace_version,
+                workspace_sha256=workspace_receipt.workspace_sha256,
+                draft_id=None,
+                criteria=self.make_assessment_criteria(),
+                outcome="continue_research",
+                most_important_gap=request["why_required"],
+                required_next_actions=["Research the request."],
+                human_input_requests=[],
+                research_request=request,
+            )
+        )
+        session_path = mcp_server.chapter_research_session_path(
+            self.book_id,
+            self.chapter_id,
+            assessment_receipt.assessment_id,
+        )
+        self.write_json(
+            session_path,
+            {
+                "book_id": self.book_id,
+                "chapter_id": self.chapter_id,
+                "assessment_id": assessment_receipt.assessment_id,
+                "created_at": "2026-07-26T00:00:00+00:00",
+                "research_mode": "safe",
+                "source_protocol": "batch_v1",
+                "pending_requests": [],
+                "decisions": [],
+                "fetched_sources": [],
+            },
+        )
+        submission = mcp_server.ChapterResearchSourcePlanSubmission(
+            book_id=self.book_id,
+            chapter_id=self.chapter_id,
+            assessment_id=assessment_receipt.assessment_id,
+            assessment_sha256=assessment_receipt.assessment_sha256,
+            context_sha256=self.context["context_sha256"],
+            workspace_version=workspace_receipt.workspace_version,
+            workspace_sha256=workspace_receipt.workspace_sha256,
+            research_request=request,
+            candidates=[
+                {
+                    "candidate_id": "S1",
+                    "url": "https://example.com/primary",
+                    "evidence_target": "Primary evidence.",
+                    "reason_for_source": "Check the primary result.",
+                },
+                {
+                    "candidate_id": "S2",
+                    "url": "https://docs.example.org/alternate",
+                    "evidence_target": "Primary evidence fallback.",
+                    "reason_for_source": "Use only if S1 is unavailable.",
+                    "alternate_for_candidate_id": "S1",
+                },
+            ],
+        )
+        receipt = mcp_server.submit_chapter_research_source_plan(
+            submission
+        )
+
+        self.assertEqual(receipt.candidate_count, 2)
+        self.assertEqual(receipt.pending_decision_count, 2)
+        self.assertTrue((self.project_path / receipt.json_path).is_file())
+        session = json.loads(session_path.read_text(encoding="utf-8"))
+        self.assertEqual(len(session["pending_requests"]), 2)
+        with self.assertRaisesRegex(ToolError, "outside"):
+            mcp_server.fetch_chapter_research_source(
+                self.book_id,
+                self.chapter_id,
+                assessment_receipt.assessment_id,
+                "https://unplanned.example.net/study",
+                request["research_question"],
+                "This URL was not planned.",
+            )
+        with self.assertRaisesRegex(ToolError, "already"):
+            mcp_server.submit_chapter_research_source_plan(submission)
+
+    def test_recovery_authorization_blocks_new_chapter_fetches(self) -> None:
+        workspace_receipt = self.initialize()
+        request = self.make_research_request()
+        assessment_receipt = mcp_server.submit_chapter_assessment(
+            mcp_server.ChapterAssessmentSubmission(
+                book_id=self.book_id,
+                chapter_id=self.chapter_id,
+                context_sha256=self.context["context_sha256"],
+                workspace_version=workspace_receipt.workspace_version,
+                workspace_sha256=workspace_receipt.workspace_sha256,
+                draft_id=None,
+                criteria=self.make_assessment_criteria(),
+                outcome="continue_research",
+                most_important_gap=request["why_required"],
+                required_next_actions=["Research the request."],
+                human_input_requests=[],
+                research_request=request,
+            )
+        )
+        recovery = {
+            "schema_version": "1.0",
+            "book_id": self.book_id,
+            "chapter_id": self.chapter_id,
+            "assessment_id": assessment_receipt.assessment_id,
+            "no_new_source_fetches": True,
+        }
+        recovery["recovery_authorization_sha256"] = (
+            mcp_server.canonical_document_sha256(
+                recovery,
+                "recovery_authorization_sha256",
+            )
+        )
+        self.write_json(
+            self.book_directory
+            / "runs"
+            / f"{self.chapter_id}.recovery.json",
+            recovery,
+        )
+        with self.assertRaisesRegex(ToolError, "forbids"):
+            mcp_server.fetch_chapter_research_source(
+                self.book_id,
+                self.chapter_id,
+                assessment_receipt.assessment_id,
+                "https://example.com/study",
+                request["research_question"],
+                "No retrieval is allowed during recovery.",
+            )
 
     def test_completion_requires_a_newer_final_pass_draft(self) -> None:
-        workspace_receipt = self.initialize()
+        self.initialize()
+        workspace_receipt = self.close_completion_contract()
         draft_receipt = mcp_server.save_chapter_draft(
             mcp_server.ChapterDraftSubmission(
                 book_id=self.book_id,
                 chapter_id=self.chapter_id,
                 context_sha256=self.context["context_sha256"],
-                expected_workspace_version=1,
+                expected_workspace_version=2,
                 expected_workspace_sha256=(
                     workspace_receipt.workspace_sha256
                 ),
                 markdown="A rough draft that has not received a final pass.",
             )
         )
-        proposal_data = self.make_proposal().model_dump(mode="json")
+        _, _, current_document = chapter_workspace.load_current_workspace(
+            self.book_directory,
+            self.chapter_id,
+        )
+        proposal_data = current_document["workspace"]
         proposal_data["draft_versions"] = [
             {
                 "draft_id": draft_receipt.draft_id,
@@ -969,7 +1648,7 @@ class ChapterWorkspaceTests(unittest.TestCase):
             chapter_workspace.ChapterWorkspaceProposal.model_validate(
                 proposal_data
             ),
-            1,
+            2,
         )
         self.write_json(
             self.book_directory / "runs" / "CH1.json",
@@ -1006,7 +1685,7 @@ class ChapterWorkspaceTests(unittest.TestCase):
                 book_id=self.book_id,
                 chapter_id=self.chapter_id,
                 context_sha256=self.context["context_sha256"],
-                expected_workspace_version=2,
+                expected_workspace_version=3,
                 expected_workspace_sha256=revised.workspace_sha256,
                 markdown="A newer draft produced for the final pass.",
             )
@@ -1017,7 +1696,7 @@ class ChapterWorkspaceTests(unittest.TestCase):
                 / "workspaces"
                 / "CH1"
                 / "versions"
-                / "v002.json"
+                / "v003.json"
             ).read_text(encoding="utf-8")
         )["workspace"]
         current_workspace["draft_versions"].append(
@@ -1034,7 +1713,7 @@ class ChapterWorkspaceTests(unittest.TestCase):
             chapter_workspace.ChapterWorkspaceProposal.model_validate(
                 current_workspace
             ),
-            2,
+            3,
         )
         final_criteria = self.make_assessment_criteria("satisfied")
         for finding in final_criteria.values():

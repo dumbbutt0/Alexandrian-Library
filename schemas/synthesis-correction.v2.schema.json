@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://alexandrian-library.local/schemas/synthesis-correction.v2.schema.json",
+  "title": "Alexandrian exact synthesis correction contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "book_id",
+    "first_audit_sha256",
+    "unit_ids",
+    "claim_targets",
+    "global_targets",
+    "maximum_additional_attempts",
+    "correction_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "2.0"},
+    "book_id": {
+      "type": "string",
+      "pattern": "^book-[A-Za-z0-9._-]+$"
+    },
+    "first_audit_sha256": {"$ref": "#/$defs/sha256"},
+    "unit_ids": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^CH[1-9][0-9]*$"
+      }
+    },
+    "claim_targets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "target_id",
+          "claim_id",
+          "unit_id",
+          "status",
+          "failed_dimensions",
+          "authority_source",
+          "authority_ref",
+          "authoritative_excerpt",
+          "offending_excerpt",
+          "required_outcome",
+          "required_exact_excerpt",
+          "allowed_unit_ids",
+          "protected_semantics"
+        ]
+      }
+    },
+    "global_targets": {"type": "object"},
+    "maximum_additional_attempts": {"const": 1},
+    "correction_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

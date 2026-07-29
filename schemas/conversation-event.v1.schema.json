@@ -1,0 +1,510 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://alexandrian-library.local/schemas/conversation-event.v1.schema.json",
+  "title": "Alexandrian Library conversation event",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "conversation_id",
+    "event_id",
+    "sequence",
+    "type",
+    "created_at",
+    "turn_id",
+    "payload"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^1\\.[0-9]+$"
+    },
+    "conversation_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
+    "event_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "type": {
+      "enum": [
+        "conversation_started",
+        "backend_selected",
+        "message",
+        "external_activity",
+        "backend_error",
+        "conversation_finished"
+      ]
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "turn_id": {
+      "oneOf": [
+        {
+          "type": "string",
+          "format": "uuid"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "payload": {
+      "type": "object"
+    },
+    "extensions": {
+      "type": "object"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "conversation_started"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "turn_id": {
+            "type": "null"
+          },
+          "payload": {
+            "$ref": "#/$defs/conversationStarted"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "backend_selected"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "turn_id": {
+            "type": "null"
+          },
+          "payload": {
+            "$ref": "#/$defs/backendSelected"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "message"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "turn_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "payload": {
+            "$ref": "#/$defs/message"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "external_activity"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "turn_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "payload": {
+            "$ref": "#/$defs/externalActivity"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "backend_error"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "turn_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "payload": {
+            "$ref": "#/$defs/backendError"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "conversation_finished"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "turn_id": {
+            "type": "null"
+          },
+          "payload": {
+            "$ref": "#/$defs/conversationFinished"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "nullableString": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "portablePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\).+$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "artifactRef": {
+      "type": "object",
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/portablePath"
+        },
+        "media_type": {
+          "type": "string"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "contentBlock": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "text"
+          ],
+          "properties": {
+            "type": {
+              "const": "text"
+            },
+            "text": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "path",
+            "media_type",
+            "sha256"
+          ],
+          "properties": {
+            "type": {
+              "const": "artifact_ref"
+            },
+            "path": {
+              "$ref": "#/$defs/portablePath"
+            },
+            "media_type": {
+              "type": "string"
+            },
+            "sha256": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        }
+      ]
+    },
+    "instructionSnapshot": {
+      "type": "object",
+      "required": [
+        "name",
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path": {
+          "$ref": "#/$defs/portablePath"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "conversationStarted": {
+      "type": "object",
+      "required": [
+        "application",
+        "research_mode",
+        "continuation",
+        "instruction_snapshots"
+      ],
+      "properties": {
+        "application": {
+          "type": "string",
+          "minLength": 1
+        },
+        "research_mode": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "continuation": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "instruction_snapshots": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/instructionSnapshot"
+          }
+        }
+      }
+    },
+    "backendIdentity": {
+      "type": "object",
+      "required": [
+        "name",
+        "version"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "version": {
+          "$ref": "#/$defs/nullableString"
+        }
+      }
+    },
+    "modelIdentity": {
+      "type": "object",
+      "required": [
+        "provider",
+        "name",
+        "version"
+      ],
+      "properties": {
+        "provider": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "name": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "version": {
+          "$ref": "#/$defs/nullableString"
+        }
+      }
+    },
+    "backendSelected": {
+      "type": "object",
+      "required": [
+        "agent_host",
+        "model"
+      ],
+      "properties": {
+        "agent_host": {
+          "$ref": "#/$defs/backendIdentity"
+        },
+        "model": {
+          "$ref": "#/$defs/modelIdentity"
+        }
+      }
+    },
+    "messageContext": {
+      "type": "object",
+      "required": [
+        "through_sequence",
+        "context_sha256"
+      ],
+      "properties": {
+        "through_sequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "context_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "message": {
+      "type": "object",
+      "required": [
+        "role",
+        "content"
+      ],
+      "properties": {
+        "role": {
+          "enum": [
+            "user",
+            "assistant"
+          ]
+        },
+        "agent_host": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "model_provider": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "model": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "content": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/contentBlock"
+          }
+        },
+        "context": {
+          "$ref": "#/$defs/messageContext"
+        }
+      }
+    },
+    "externalActivity": {
+      "type": "object",
+      "required": [
+        "activity_type",
+        "status",
+        "purpose",
+        "target",
+        "result_summary",
+        "artifact_refs"
+      ],
+      "properties": {
+        "activity_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "type": "string",
+          "minLength": 1
+        },
+        "purpose": {
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "result_summary": {
+          "type": "string"
+        },
+        "artifact_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/artifactRef"
+          }
+        }
+      }
+    },
+    "backendError": {
+      "type": "object",
+      "required": [
+        "agent_host",
+        "category",
+        "message",
+        "retryable",
+        "raw_details_ref"
+      ],
+      "properties": {
+        "agent_host": {
+          "type": "string",
+          "minLength": 1
+        },
+        "category": {
+          "type": "string",
+          "minLength": 1
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "raw_details_ref": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/artifactRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "conversationFinished": {
+      "type": "object",
+      "required": [
+        "status",
+        "reason",
+        "research_mode",
+        "message_count"
+      ],
+      "properties": {
+        "status": {
+          "const": "ready_for_review"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "research_mode": {
+          "type": "string",
+          "minLength": 1
+        },
+        "message_count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from email.message import Message
@@ -7,6 +8,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
 import backend_selector
+import conversation_store
 import mcp_server
 from mcp.server.fastmcp.exceptions import ToolError
 
@@ -18,6 +20,9 @@ class ResearchReviewTests(unittest.TestCase):
         self.conversations_path = self.project_path / "data" / "conversations"
         self.reviews_path = self.project_path / "data" / "reviews"
         self.evidence_path = self.project_path / "data" / "evidence"
+        self.research_sources_path = (
+            self.project_path / "data" / "research_sources"
+        )
         self.review_sessions_path = self.project_path / "data" / "review_sessions"
         self.review_decisions_path = self.project_path / "data" / "review_decisions"
         self.source_policy_path = self.project_path / "config" / "source_policy.json"
@@ -30,6 +35,7 @@ class ResearchReviewTests(unittest.TestCase):
         mcp_server.CONVERSATIONS_PATH = self.conversations_path
         mcp_server.REVIEWS_PATH = self.reviews_path
         mcp_server.EVIDENCE_PATH = self.evidence_path
+        mcp_server.RESEARCH_SOURCES_PATH = self.research_sources_path
         mcp_server.REVIEW_SESSIONS_PATH = self.review_sessions_path
         mcp_server.SOURCE_POLICY_PATH = self.source_policy_path
         backend_selector.SETTINGS_PATH = self.settings_path
@@ -133,7 +139,10 @@ class ResearchReviewTests(unittest.TestCase):
         )
 
     def test_numbered_transcript_matches_visible_messages(self) -> None:
-        events = [
+        conversation_path = (
+            self.conversations_path / "numbered-transcript.jsonl"
+        )
+        legacy_events = [
             {"type": "conversation_started"},
             {
                 "type": "message",
@@ -149,14 +158,48 @@ class ResearchReviewTests(unittest.TestCase):
                 "content": "Answer",
             },
         ]
+        conversation_path.write_text(
+            "".join(json.dumps(event) + "\n" for event in legacy_events),
+            encoding="utf-8",
+        )
+        events = conversation_store.load_events(conversation_path)
 
         transcript = backend_selector.build_numbered_transcript(events)
+        v1_path = conversation_store.create_conversation(
+            self.conversations_path,
+            "safe",
+            conversation_id="numbered-transcript-v1",
+        )
+        user_event = conversation_store.append_message(
+            v1_path,
+            role="user",
+            content="Question",
+        )
+        conversation_store.append_external_activity(
+            v1_path,
+            turn_id=user_event["turn_id"],
+            activity_type="legacy_tool_result",
+            status="recorded",
+            purpose="Hidden result",
+            result_summary="Hidden result",
+        )
+        conversation_store.append_message(
+            v1_path,
+            role="assistant",
+            content="Answer",
+            turn_id=user_event["turn_id"],
+            agent_host="claude",
+        )
+        v1_transcript = backend_selector.build_numbered_transcript(
+            conversation_store.load_events(v1_path)
+        )
 
         self.assertEqual(
             [item["transcript_reference"] for item in transcript],
             ["T1", "T2"],
         )
         self.assertEqual(transcript[1]["agent_host"], "claude")
+        self.assertEqual(transcript, v1_transcript)
 
     def test_multiline_paste_enables_readline_bracketed_paste(self) -> None:
         mock_readline = Mock()
@@ -191,6 +234,19 @@ class ResearchReviewTests(unittest.TestCase):
             "auto_approve",
         )
 
+    def test_public_backend_menu_rejects_deferred_ollama_option(self) -> None:
+        with patch(
+            "builtins.input",
+            side_effect=["3", "2"],
+        ):
+            selected_backend = backend_selector.select_backend()
+
+        self.assertEqual(selected_backend, "claude")
+        self.assertEqual(
+            set(backend_selector.BACKENDS.values()),
+            {"codex", "claude"},
+        )
+
     def test_review_research_mode_snapshot_does_not_follow_later_changes(
         self,
     ) -> None:
@@ -216,10 +272,17 @@ class ResearchReviewTests(unittest.TestCase):
         self.assertEqual(session["research_mode"], "auto_approve")
 
     def test_finish_event_records_snapshotted_research_mode(self) -> None:
-        with patch.object(
-            backend_selector,
-            "CONVERSATIONS_PATH",
-            self.conversations_path,
+        with (
+            patch.object(
+                backend_selector,
+                "PROJECT_PATH",
+                self.project_path,
+            ),
+            patch.object(
+                backend_selector,
+                "CONVERSATIONS_PATH",
+                self.conversations_path,
+            ),
         ):
             conversation_path = backend_selector.create_conversation()
             backend_selector.finish_conversation(
@@ -234,9 +297,220 @@ class ResearchReviewTests(unittest.TestCase):
             ).splitlines()
         ]
         self.assertEqual(
-            events[-1]["research_mode"],
+            events[-1]["payload"]["research_mode"],
             "auto_approve",
         )
+        self.assertTrue(
+            conversation_store.receipt_path_for(conversation_path).is_file()
+        )
+
+    def test_terminal_capture_writes_v1_and_preserves_provider_switch(
+        self,
+    ) -> None:
+        prompts = []
+
+        def capture(
+            backend: str,
+            _program_path: str,
+            prompt: str,
+        ) -> tuple[list[dict], str]:
+            prompts.append((backend, prompt))
+            return [], f"Response from {backend}."
+
+        common_patches = (
+            patch.object(backend_selector, "PROJECT_PATH", self.project_path),
+            patch.object(
+                backend_selector,
+                "CONVERSATIONS_PATH",
+                self.conversations_path,
+            ),
+            patch.object(
+                backend_selector,
+                "load_skill_instructions",
+                return_value="Librarian instructions",
+            ),
+            patch.object(
+                backend_selector,
+                "capture_backend_response",
+                side_effect=capture,
+            ),
+        )
+
+        with common_patches[0], common_patches[1], common_patches[2], common_patches[3]:
+            with patch(
+                "builtins.input",
+                side_effect=["First question", "/bye"],
+            ):
+                conversation_path = backend_selector.run_capture_prompt_loop(
+                    "codex",
+                    "/usr/bin/codex",
+                    None,
+                )
+            with patch(
+                "builtins.input",
+                side_effect=["Second question", "/bye"],
+            ):
+                conversation_path = backend_selector.run_capture_prompt_loop(
+                    "claude",
+                    "/usr/bin/claude",
+                    conversation_path,
+                )
+
+        events = conversation_store.load_events(conversation_path)
+        selected_hosts = [
+            event["payload"]["agent_host"]["name"]
+            for event in events
+            if event["type"] == "backend_selected"
+        ]
+        turns = conversation_store.group_turns(events)
+
+        self.assertEqual(
+            selected_hosts,
+            ["codex", "claude"],
+        )
+        self.assertEqual([len(turn["events"]) for turn in turns], [2, 2])
+        self.assertIn("First question", prompts[1][1])
+        self.assertIn("Response from codex.", prompts[1][1])
+
+    def test_terminal_backend_failure_records_bounded_turn_error(self) -> None:
+        with (
+            patch.object(
+                backend_selector,
+                "PROJECT_PATH",
+                self.project_path,
+            ),
+            patch.object(
+                backend_selector,
+                "CONVERSATIONS_PATH",
+                self.conversations_path,
+            ),
+            patch.object(
+                backend_selector,
+                "load_skill_instructions",
+                return_value="Librarian instructions",
+            ),
+            patch.object(
+                backend_selector,
+                "capture_backend_response",
+                side_effect=RuntimeError(
+                    "private provider stderr at /home/example"
+                ),
+            ),
+            patch("builtins.input", return_value="Question"),
+        ):
+            with self.assertRaises(SystemExit):
+                backend_selector.run_capture_prompt_loop(
+                    "codex",
+                    "/usr/bin/codex",
+                    None,
+                )
+
+        conversation_path = next(self.conversations_path.glob("*.jsonl"))
+        events = conversation_store.load_events(conversation_path)
+        user_event = next(
+            event
+            for event in events
+            if event["type"] == "message"
+        )
+        error_event = next(
+            event
+            for event in events
+            if event["type"] == "backend_error"
+        )
+
+        self.assertEqual(user_event["turn_id"], error_event["turn_id"])
+        self.assertNotIn(
+            "/home/example",
+            error_event["payload"]["message"],
+        )
+
+    def test_terminal_finish_writes_receipt_before_book_workflow(self) -> None:
+        observed_receipt = []
+
+        def continue_workflow(
+            _backend: str,
+            _program_path: str,
+            conversation_path: Path,
+        ) -> dict:
+            observed_receipt.append(
+                conversation_store.verify_receipt(
+                    conversation_path,
+                    project_root=self.project_path,
+                )
+            )
+            return {"status": "review_held"}
+
+        with (
+            patch.object(
+                backend_selector,
+                "PROJECT_PATH",
+                self.project_path,
+            ),
+            patch.object(
+                backend_selector,
+                "CONVERSATIONS_PATH",
+                self.conversations_path,
+            ),
+            patch.object(
+                backend_selector,
+                "load_skill_instructions",
+                return_value="Librarian instructions",
+            ),
+            patch.object(
+                backend_selector,
+                "capture_backend_response",
+                return_value=([], "Answer"),
+            ),
+            patch.object(
+                backend_selector,
+                "continue_book_workflow",
+                side_effect=continue_workflow,
+            ),
+            patch(
+                "builtins.input",
+                side_effect=["Question", "/finish"],
+            ),
+        ):
+            result = backend_selector.run_capture_prompt_loop(
+                "codex",
+                "/usr/bin/codex",
+                None,
+            )
+
+        self.assertIsNone(result)
+        self.assertEqual(len(observed_receipt), 1)
+
+    def test_mcp_rejects_tampered_v1_conversation(self) -> None:
+        conversation_path = conversation_store.create_conversation(
+            self.conversations_path,
+            "safe",
+            conversation_id="tampered-v1",
+        )
+        conversation_store.finish_conversation(
+            conversation_path,
+            project_root=self.project_path,
+            research_mode="safe",
+        )
+        events = [
+            json.loads(line)
+            for line in conversation_path.read_text(
+                encoding="utf-8"
+            ).splitlines()
+        ]
+        events[0]["payload"]["application"] = "tampered-application"
+        conversation_path.write_text(
+            "".join(
+                json.dumps(event, ensure_ascii=False) + "\n"
+                for event in events
+            ),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(
+            ToolError,
+            "receipt verification",
+        ):
+            mcp_server.resolve_finished_conversation("tampered-v1")
 
     def test_terminal_research_command_updates_persistent_mode(self) -> None:
         responses = iter(["/research auto", "/bye"])
@@ -325,6 +599,18 @@ class ResearchReviewTests(unittest.TestCase):
             "research prompt",
             backend_selector.CHAPTER_RESEARCH_CALL,
         )
+        claude_synthesis_command = backend_selector.build_capture_command(
+            "claude",
+            "/usr/bin/claude",
+            "synthesis prompt",
+            backend_selector.BOOK_SYNTHESIS_CALL,
+        )
+        claude_audit_command = backend_selector.build_capture_command(
+            "claude",
+            "/usr/bin/claude",
+            "audit prompt",
+            backend_selector.SYNTHESIS_AUDIT_CALL,
+        )
 
         self.assertIn("dontAsk", claude_command)
         self.assertIn(backend_selector.CLAUDE_REVIEW_TOOLS, claude_command)
@@ -372,6 +658,39 @@ class ResearchReviewTests(unittest.TestCase):
         self.assertNotIn(
             "mcp__alexandrian-library__save_chapter_draft",
             backend_selector.CLAUDE_CHAPTER_RESEARCH_TOOLS,
+        )
+        self.assertIn(
+            (
+                "mcp__alexandrian-library__"
+                "read_staged_synthesis_plan_shard_input"
+            ),
+            backend_selector.CLAUDE_BOOK_SYNTHESIS_TOOLS,
+        )
+        self.assertIn(
+            (
+                "mcp__alexandrian-library__"
+                "submit_staged_synthesis_plan_shard"
+            ),
+            backend_selector.CLAUDE_BOOK_SYNTHESIS_TOOLS,
+        )
+        self.assertIn(
+            (
+                "mcp__alexandrian-library__"
+                "submit_staged_synthesis_global_plan_audit"
+            ),
+            backend_selector.CLAUDE_SYNTHESIS_AUDIT_TOOLS,
+        )
+        self.assertIn(
+            backend_selector.CLAUDE_BOOK_SYNTHESIS_TOOLS,
+            claude_synthesis_command,
+        )
+        self.assertIn(
+            backend_selector.CLAUDE_SYNTHESIS_AUDIT_TOOLS,
+            claude_audit_command,
+        )
+        self.assertEqual(
+            claude_synthesis_command.count("--permission-mode"),
+            1,
         )
         self.assertEqual(
             codex_command,
@@ -430,10 +749,121 @@ class ResearchReviewTests(unittest.TestCase):
             ],
         )
 
+    def test_staged_failure_diagnostic_keeps_safe_tool_evidence(self) -> None:
+        project = self.project_path
+        book_id = "book-diagnostic-test"
+        book = project / "data" / "books" / book_id
+        target = (
+            book
+            / "synthesis_cycles"
+            / "cycle-003_staging"
+            / "plan_shards"
+            / "CH1.json"
+        )
+        events = [
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": (
+                                "mcp__alexandrian-library__"
+                                "submit_staged_synthesis_plan_shard"
+                            ),
+                        }
+                    ]
+                },
+            },
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "is_error": True,
+                            "content": "Permission denied by dontAsk mode.",
+                        }
+                    ]
+                },
+            },
+        ]
+        with (
+            patch.object(backend_selector, "PROJECT_PATH", project),
+            patch.object(
+                backend_selector,
+                "BOOKS_PATH",
+                project / "data" / "books",
+            ),
+            patch.object(
+                backend_selector,
+                "capture_backend_response",
+                return_value=(events, "Submission was denied."),
+            ),
+            self.assertRaisesRegex(
+                RuntimeError,
+                "did not produce its exact durable artifact",
+            ),
+        ):
+            backend_selector.run_staged_provider_action(
+                "claude",
+                "/usr/bin/claude",
+                book_id,
+                "plan-shard-CH1",
+                target,
+                "bounded prompt",
+                backend_selector.BOOK_SYNTHESIS_CALL,
+                maximum_stage_calls=2,
+            )
+
+        diagnostic_paths = list(
+            (
+                book
+                / "runs"
+                / "synthesis_diagnostics"
+            ).glob("*/D01-claude.json")
+        )
+        self.assertEqual(len(diagnostic_paths), 1)
+        diagnostic = json.loads(
+            diagnostic_paths[0].read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            diagnostic["classification"],
+            "tool_permission_denied",
+        )
+        self.assertFalse(diagnostic["raw_events_stored"])
+        self.assertFalse(diagnostic["hidden_reasoning_stored"])
+        self.assertNotIn("events", diagnostic)
+        self.assertEqual(
+            diagnostic["tool_calls"][0]["tool_name"],
+            (
+                "mcp__alexandrian-library__"
+                "submit_staged_synthesis_plan_shard"
+            ),
+        )
+        ledger = [
+            json.loads(line)
+            for line in (
+                book / "runs" / "synthesis.controller.jsonl"
+            ).read_text(encoding="utf-8").splitlines()
+        ]
+        failure = ledger[-1]
+        self.assertEqual(
+            failure["failure_classification"],
+            "tool_permission_denied",
+        )
+        self.assertEqual(
+            failure["diagnostic_sha256"],
+            diagnostic["diagnostic_sha256"],
+        )
+
     def test_captured_backend_does_not_inherit_terminal_input(self) -> None:
-        completed = Mock(
+        process = Mock(
+            pid=123,
             returncode=0,
-            stdout=json.dumps(
+        )
+        process.communicate.return_value = (
+            json.dumps(
                 {
                     "type": "item.completed",
                     "item": {
@@ -442,14 +872,14 @@ class ResearchReviewTests(unittest.TestCase):
                     },
                 }
             ),
-            stderr="",
+            "",
         )
 
         with patch.object(
             backend_selector.subprocess,
-            "run",
-            return_value=completed,
-        ) as run:
+            "Popen",
+            return_value=process,
+        ) as popen:
             _, response = backend_selector.capture_backend_response(
                 "codex",
                 "/usr/bin/codex",
@@ -459,9 +889,81 @@ class ResearchReviewTests(unittest.TestCase):
 
         self.assertEqual(response, "Captured response.")
         self.assertIs(
-            run.call_args.kwargs["stdin"],
+            popen.call_args.kwargs["stdin"],
             backend_selector.subprocess.DEVNULL,
         )
+        self.assertTrue(popen.call_args.kwargs["start_new_session"])
+        self.assertEqual(
+            process.communicate.call_args.kwargs["timeout"],
+            backend_selector.AUTONOMOUS_CALL_TIMEOUT_SECONDS,
+        )
+
+    def test_autonomous_backend_timeout_is_bounded_and_sanitized(self) -> None:
+        private_prompt = "private planning prompt"
+        process = Mock(pid=123, returncode=-9)
+        process.communicate.side_effect = [
+            subprocess.TimeoutExpired(
+                cmd=["/usr/bin/codex", private_prompt],
+                timeout=backend_selector.AUTONOMOUS_CALL_TIMEOUT_SECONDS,
+            ),
+            ("", ""),
+        ]
+
+        with (
+            patch.object(
+                backend_selector.subprocess,
+                "Popen",
+                return_value=process,
+            ),
+            patch.object(backend_selector.os, "killpg") as killpg,
+            self.assertRaisesRegex(
+                RuntimeError,
+                (
+                    "codex book_plan timed out after 600 seconds.*"
+                    "Resume will derive the next stage from canonical artifacts"
+                ),
+            ) as raised,
+        ):
+            backend_selector.capture_backend_response(
+                "codex",
+                "/usr/bin/codex",
+                private_prompt,
+                backend_selector.BOOK_PLAN_CALL,
+            )
+
+        killpg.assert_called_once_with(123, backend_selector.signal.SIGKILL)
+        self.assertNotIn(private_prompt, str(raised.exception))
+
+    def test_conversation_backend_call_has_no_timeout(self) -> None:
+        process = Mock(
+            pid=123,
+            returncode=0,
+        )
+        process.communicate.return_value = (
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "agent_message",
+                        "text": "Conversation response.",
+                    },
+                }
+            ),
+            "",
+        )
+
+        with patch.object(
+            backend_selector.subprocess,
+            "Popen",
+            return_value=process,
+        ):
+            backend_selector.capture_backend_response(
+                "codex",
+                "/usr/bin/codex",
+                "Conversation prompt",
+            )
+
+        self.assertIsNone(process.communicate.call_args.kwargs["timeout"])
 
     def test_review_restarts_after_wrapper_resolves_unknown_source(self) -> None:
         conversation_id = "provider-neutral-loop"
@@ -532,6 +1034,35 @@ class ResearchReviewTests(unittest.TestCase):
         self.assertEqual(len(call_prompts), 2)
         self.assertIn('"decision": "reject"', call_prompts[1])
         self.assertIn("<trusted_source_decisions>", call_prompts[1])
+
+    def test_incomplete_review_reports_bounded_provider_explanation(self) -> None:
+        conversation_id = "reviewer-explanation"
+        self.write_finished_conversation(conversation_id)
+        conversation_path = self.conversations_path / f"{conversation_id}.jsonl"
+        provider_response = "The Alexandrian MCP server is not connected."
+
+        with (
+            patch.object(backend_selector, "REVIEWS_PATH", self.reviews_path),
+            patch.object(
+                backend_selector,
+                "REVIEW_SESSIONS_PATH",
+                self.review_sessions_path,
+            ),
+            patch.object(
+                backend_selector,
+                "capture_backend_response",
+                return_value=([], provider_response),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "Alexandrian MCP server is not connected",
+            ):
+                backend_selector.review_finished_conversation(
+                    "claude",
+                    "/usr/bin/claude",
+                    conversation_path,
+                )
 
     def test_unapproved_source_stages_decision_before_network_access(self) -> None:
         conversation_id = "unapproved-source"
@@ -961,6 +1492,20 @@ class ResearchReviewTests(unittest.TestCase):
             packet["evidence_excerpt"],
             "The measured result supports the narrow claim.",
         )
+        staged_path = (
+            self.research_sources_path
+            / conversation_id
+            / f"{source_result.receipt_id}.json"
+        )
+        staged = json.loads(staged_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            packet["source_receipt_path"],
+            str(staged_path.relative_to(self.project_path)),
+        )
+        self.assertEqual(
+            packet["source_receipt_record_sha256"],
+            staged["receipt_record_sha256"],
+        )
         self.assertEqual(
             packet["evidence_excerpt_sha256"],
             mcp_server.hashlib.sha256(
@@ -982,6 +1527,205 @@ class ResearchReviewTests(unittest.TestCase):
         self.assertIn("## Scope and Working Definitions", saved_markdown)
         self.assertIn("### Research Trail", saved_markdown)
         self.assertIn("Evidence location: Results section", saved_markdown)
+
+    def test_one_time_fetch_is_reused_after_mcp_memory_restart(self) -> None:
+        conversation_id = "durable-allow-once"
+        claim = "The exact composite claim"
+        url = "https://example.com/research"
+        self.write_finished_conversation(conversation_id)
+        session = mcp_server.load_review_session(conversation_id)
+        session["decisions"].append(
+            {
+                "request_id": "source-request-durable",
+                "url": url,
+                "domain": "example.com",
+                "claim_under_review": claim,
+                "reason_for_source": "Check the exact claim.",
+                "requested_at": "2026-01-01T00:00:00+00:00",
+                "decision": "allow_once",
+                "decided_at": "2026-01-01T00:01:00+00:00",
+            }
+        )
+        mcp_server.write_review_session(conversation_id, session)
+        response = MagicMock()
+        headers = Message()
+        headers["Content-Type"] = "text/plain; charset=utf-8"
+        response.headers = headers
+        response.geturl.return_value = url
+        response.read.return_value = b"The source qualifies the composite claim."
+        opener = MagicMock()
+        opener.open.return_value.__enter__.return_value = response
+
+        with patch.object(
+            mcp_server.urllib_request,
+            "build_opener",
+            return_value=opener,
+        ):
+            first = mcp_server.fetch_research_source(
+                conversation_id,
+                url,
+                claim,
+                "Check the exact claim.",
+            )
+
+        staged_path = (
+            self.research_sources_path
+            / conversation_id
+            / f"{first.receipt_id}.json"
+        )
+        staged = json.loads(staged_path.read_text(encoding="utf-8"))
+        self.assertEqual(staged["lifecycle_status"], "fetched_unassessed")
+        self.assertIn("untrusted research data", staged["security_notice"])
+        saved_session = mcp_server.load_review_session(conversation_id)
+        self.assertEqual(
+            saved_session["decisions"][0]["receipt_id"],
+            first.receipt_id,
+        )
+        self.assertIn("consumed_at", saved_session["decisions"][0])
+
+        saved_session["fetched_sources"] = []
+        saved_session["decisions"][0].pop("receipt_id")
+        saved_session["decisions"][0].pop("consumed_at")
+        mcp_server.write_review_session(conversation_id, saved_session)
+        mcp_server.SOURCE_RECEIPTS.clear()
+        with patch.object(
+            mcp_server,
+            "fetch_source_content",
+            side_effect=AssertionError("source was fetched twice"),
+        ):
+            restored = mcp_server.fetch_research_source(
+                conversation_id,
+                url,
+                claim,
+                "Retry the same assessment.",
+            )
+
+        self.assertEqual(restored.receipt_id, first.receipt_id)
+        self.assertEqual(restored.content_sha256, first.content_sha256)
+        repaired_session = mcp_server.load_review_session(conversation_id)
+        self.assertEqual(
+            repaired_session["decisions"][0]["receipt_id"],
+            first.receipt_id,
+        )
+        self.assertIn("consumed_at", repaired_session["decisions"][0])
+        self.assertEqual(
+            repaired_session["fetched_sources"][0]["receipt_id"],
+            first.receipt_id,
+        )
+
+    def test_failed_review_keeps_source_for_corrected_submission(self) -> None:
+        conversation_id = "durable-review-correction"
+        checked_claim = "The composite claim is only partly established."
+        narrower_claim = "One component is established."
+        url = "https://example.com/research"
+        self.write_finished_conversation(conversation_id)
+        self.write_source_policy(["example.com"])
+        response = MagicMock()
+        headers = Message()
+        headers["Content-Type"] = "text/plain; charset=utf-8"
+        response.headers = headers
+        response.geturl.return_value = url
+        response.read.return_value = (
+            b"The source supports one component but not the complete claim."
+        )
+        opener = MagicMock()
+        opener.open.return_value.__enter__.return_value = response
+        with patch.object(
+            mcp_server.urllib_request,
+            "build_opener",
+            return_value=opener,
+        ):
+            fetched = mcp_server.fetch_research_source(
+                conversation_id,
+                url,
+                checked_claim,
+            )
+
+        review_data = self.make_review(conversation_id).model_dump(mode="json")
+        review_data["claims"] = [
+            {
+                "claim": narrower_claim,
+                "origin": "assistant",
+                "status": "supported_by_checked_source",
+                "transcript_references": ["T2"],
+                "source_receipt_ids": [fetched.receipt_id],
+                "next_verification": "Fetch this narrower claim separately.",
+            }
+        ]
+        review_data["checked_sources"] = [
+            {
+                "receipt_id": fetched.receipt_id,
+                "claim_checked": checked_claim,
+                "finding": "qualifies",
+                "assessment": "Only one component is supported.",
+                "author_or_organization": "Example Research Group",
+                "publication_date": "2026-01-01",
+                "publisher_or_journal": "Example Journal",
+                "doi": None,
+                "evidence_location": "Main result",
+                "evidence_excerpt": (
+                    "The source supports one component but not the complete "
+                    "claim."
+                ),
+                "evidence_summary": "The compound claim requires qualification.",
+                "limitations": "The source does not establish every component.",
+                "counterevidence_or_alternative_explanation": (
+                    "The unsupported components may be false."
+                ),
+                "transcript_references": ["T2"],
+            }
+        ]
+        review_data["research_trail"] = [
+            {
+                "query_or_question": "Does the source establish the claim?",
+                "candidate_source_url": url,
+                "decision": "included",
+                "reason": "It directly addresses part of the claim.",
+                "receipt_id": fetched.receipt_id,
+                "transcript_references": ["T2"],
+            }
+        ]
+        mismatched_review = mcp_server.ResearchReview.model_validate(
+            review_data
+        )
+        with self.assertRaisesRegex(
+            ToolError,
+            "requires a supports source assessment",
+        ):
+            mcp_server.submit_research_review(mismatched_review)
+
+        staged_path = (
+            self.research_sources_path
+            / conversation_id
+            / f"{fetched.receipt_id}.json"
+        )
+        self.assertTrue(staged_path.is_file())
+        self.assertFalse(
+            (self.reviews_path / f"{conversation_id}.json").exists()
+        )
+
+        mcp_server.SOURCE_RECEIPTS.clear()
+        review_data["claims"][0] = {
+            "claim": checked_claim,
+            "origin": "assistant",
+            "status": "qualified_by_checked_source",
+            "transcript_references": ["T2"],
+            "source_receipt_ids": [fetched.receipt_id],
+            "next_verification": "Check each unresolved component separately.",
+        }
+        receipt = mcp_server.submit_research_review(
+            mcp_server.ResearchReview.model_validate(review_data)
+        )
+
+        self.assertEqual(receipt.research_route.value, "research_seed")
+        self.assertTrue(
+            (
+                self.evidence_path
+                / conversation_id
+                / f"{fetched.receipt_id}.json"
+            ).is_file()
+        )
+        self.assertTrue(staged_path.is_file())
 
     def test_fabricated_evidence_excerpt_writes_nothing(self) -> None:
         conversation_id = "fabricated-excerpt"
@@ -1093,7 +1837,7 @@ class ResearchReviewTests(unittest.TestCase):
         saved_markdown = markdown_path.read_text(encoding="utf-8")
 
         self.assertEqual(receipt.research_route.value, "research_seed")
-        self.assertEqual(saved_json["review_schema_version"], "1.3")
+        self.assertEqual(saved_json["review_schema_version"], "1.4")
         self.assertEqual(saved_json["reviewer_host"], "test-host")
         self.assertEqual(
             saved_json["review"]["core_question"]["transcript_references"],
@@ -1106,6 +1850,21 @@ class ResearchReviewTests(unittest.TestCase):
             "#### Source Permissions and Automatic Authorizations",
             saved_markdown,
         )
+        self.assertIn(
+            "**requires_user_decision; book-blocking:**",
+            saved_markdown,
+        )
+
+    def test_ready_route_rejects_a_book_blocking_evidence_gap(self) -> None:
+        conversation_id = "blocking-gap"
+        review_data = self.make_review(conversation_id).model_dump(mode="json")
+        review_data["research_route"] = "ready_for_book_consideration"
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "evidence gap remains book-blocking",
+        ):
+            mcp_server.ResearchReview.model_validate(review_data)
 
     def test_human_checkpoint_is_stored_separately_from_review(self) -> None:
         conversation_id = "human-checkpoint"
@@ -1138,7 +1897,7 @@ class ResearchReviewTests(unittest.TestCase):
         decision = json.loads(decision_path.read_text(encoding="utf-8"))
         self.assertEqual(
             decision["decision"],
-            "approved_for_book_planning",
+            "accepted_research_route",
         )
         self.assertEqual(
             decision["accepted_belief_revisions"],
@@ -1148,6 +1907,29 @@ class ResearchReviewTests(unittest.TestCase):
         self.assertEqual(
             review_path.read_text(encoding="utf-8"),
             original_review,
+        )
+
+    def test_human_checkpoint_can_pause_without_a_decision(self) -> None:
+        conversation_id = "paused-checkpoint"
+        self.write_finished_conversation(conversation_id)
+        mcp_server.submit_research_review(self.make_review(conversation_id))
+        review_path = self.reviews_path / f"{conversation_id}.json"
+
+        with (
+            patch.object(
+                backend_selector,
+                "REVIEW_DECISIONS_PATH",
+                self.review_decisions_path,
+            ),
+            patch("builtins.input", return_value="0"),
+        ):
+            decision_path = backend_selector.record_human_review_checkpoint(
+                review_path
+            )
+
+        self.assertIsNone(decision_path)
+        self.assertFalse(
+            (self.review_decisions_path / f"{conversation_id}.json").exists()
         )
 
     def test_curiosity_signature_rejects_assistant_provenance(self) -> None:
@@ -1199,6 +1981,7 @@ class ResearchReviewTests(unittest.TestCase):
         self.write_finished_conversation(conversation_id)
         review_data = self.make_review(conversation_id).model_dump(mode="json")
         review_data["research_route"] = "ready_for_book_consideration"
+        review_data["evidence_gaps"] = []
         mcp_server.submit_research_review(
             mcp_server.ResearchReview.model_validate(review_data)
         )
@@ -1233,6 +2016,7 @@ class ResearchReviewTests(unittest.TestCase):
         self.write_finished_conversation(conversation_id)
         review_data = self.make_review(conversation_id).model_dump(mode="json")
         review_data["research_route"] = "ready_for_book_consideration"
+        review_data["evidence_gaps"] = []
         mcp_server.submit_research_review(
             mcp_server.ResearchReview.model_validate(review_data)
         )

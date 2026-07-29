@@ -1,0 +1,15 @@
+# Copy this file to .codex/config.toml and replace both placeholder paths with
+# the absolute path to your Alexandrian Library clone.
+
+[mcp_servers.alexandrian_library]
+command = "uv"
+args = [
+  "run",
+  "mcp_server.py"
+]
+cwd = "/absolute/path/to/Alexandrian-Library"
+required = true
+env = {
+  ALEXANDRIAN_AGENT_HOST = "codex",
+  ALEXANDRIAN_PROJECT_PATH = "/absolute/path/to/Alexandrian-Library"
+}

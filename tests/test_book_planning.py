@@ -17,6 +17,9 @@ class BookPlanningTests(unittest.TestCase):
         self.conversations_path = self.project_path / "data" / "conversations"
         self.reviews_path = self.project_path / "data" / "reviews"
         self.evidence_path = self.project_path / "data" / "evidence"
+        self.research_sources_path = (
+            self.project_path / "data" / "research_sources"
+        )
         self.review_sessions_path = (
             self.project_path / "data" / "review_sessions"
         )
@@ -47,6 +50,7 @@ class BookPlanningTests(unittest.TestCase):
         mcp_server.CONVERSATIONS_PATH = self.conversations_path
         mcp_server.REVIEWS_PATH = self.reviews_path
         mcp_server.EVIDENCE_PATH = self.evidence_path
+        mcp_server.RESEARCH_SOURCES_PATH = self.research_sources_path
         mcp_server.REVIEW_SESSIONS_PATH = self.review_sessions_path
         mcp_server.REVIEW_DECISIONS_PATH = self.review_decisions_path
         mcp_server.BOOKS_PATH = self.books_path
@@ -134,7 +138,22 @@ class BookPlanningTests(unittest.TestCase):
                 "mentioned_sources": [],
                 "checked_sources": [],
                 "research_trail": [],
-                "evidence_gaps": [core_question] if evidence_gap else [],
+                "evidence_gaps": (
+                    [
+                        {
+                            **core_question,
+                            "disposition": "routed_to_later",
+                            "book_blocking": False,
+                            "closure_reason": (
+                                "This validation belongs to a later "
+                                "implementation study."
+                            ),
+                            "destination": "future implementation research",
+                        }
+                    ]
+                    if evidence_gap
+                    else []
+                ),
                 "connected_ideas": [],
                 "separate_branches": [],
                 "thought_questions": [core_question],
@@ -205,7 +224,7 @@ class BookPlanningTests(unittest.TestCase):
         receipt_id = f"source-{conversation_id}"
         claim = "Checked provenance supports safe reuse."
         excerpt = "Stable source links preserve the checked result."
-        mcp_server.SOURCE_RECEIPTS[receipt_id] = mcp_server.SourceReceipt(
+        source_receipt = mcp_server.SourceReceipt(
             receipt_id=receipt_id,
             conversation_id=conversation_id,
             requested_url="https://example.com/provenance",
@@ -219,6 +238,7 @@ class BookPlanningTests(unittest.TestCase):
             content=f"{excerpt} Additional unselected source material.",
             content_truncated=False,
         )
+        mcp_server.write_source_receipt(source_receipt)
         review_data = self.make_ready_review(
             conversation_id
         ).model_dump(mode="json")
@@ -404,7 +424,7 @@ class BookPlanningTests(unittest.TestCase):
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         outline = outline_path.read_text(encoding="utf-8")
 
-        self.assertEqual(manifest["schema_version"], "1.1")
+        self.assertEqual(manifest["schema_version"], "1.2")
         self.assertEqual(manifest["lifecycle_status"], "planning")
         self.assertEqual(
             manifest["approval_status"],
@@ -500,6 +520,47 @@ class BookPlanningTests(unittest.TestCase):
             (self.books_path / book_id / "contexts").exists()
         )
 
+    def test_book_preflight_rejects_missing_source_receipt_lineage(
+        self,
+    ) -> None:
+        conversation_id = "missing-source-lineage"
+        _, _, receipt_id = self.create_evidence_book(conversation_id)
+        packet_path = (
+            self.evidence_path / conversation_id / f"{receipt_id}.json"
+        )
+        packet = json.loads(packet_path.read_text(encoding="utf-8"))
+        packet["source_receipt_path"] = None
+        packet["source_receipt_record_sha256"] = None
+        packet_path.write_text(json.dumps(packet), encoding="utf-8")
+
+        with self.assertRaisesRegex(
+            ToolError,
+            "predates durable source-receipt lineage",
+        ):
+            mcp_server.resolve_eligible_review(
+                f"review-{conversation_id}"
+            )
+
+    def test_book_preflight_rejects_tampered_staged_source(self) -> None:
+        conversation_id = "tampered-staged-source"
+        _, _, receipt_id = self.create_evidence_book(conversation_id)
+        source_path = (
+            self.research_sources_path
+            / conversation_id
+            / f"{receipt_id}.json"
+        )
+        source_document = json.loads(source_path.read_text(encoding="utf-8"))
+        source_document["receipt"]["title"] = "Changed after review"
+        source_path.write_text(json.dumps(source_document), encoding="utf-8")
+
+        with self.assertRaisesRegex(
+            ToolError,
+            "source-receipt lineage is invalid",
+        ):
+            mcp_server.resolve_eligible_review(
+                f"review-{conversation_id}"
+            )
+
     def test_ready_chapter_cannot_omit_checked_evidence(self) -> None:
         with self.assertRaises(ToolError):
             self.create_evidence_book(
@@ -560,9 +621,189 @@ class BookPlanningTests(unittest.TestCase):
             [backend_selector.BOOK_PLAN_CALL],
         )
 
+    def test_planner_prompt_bounds_belief_revision_references(self) -> None:
+        review_document = {
+            "review": {
+                "belief_revisions": [
+                    {
+                        "original_belief": {
+                            "text": "An initial belief",
+                            "transcript_references": ["T1"],
+                        },
+                        "assistant_challenge": {
+                            "text": "A challenge",
+                            "transcript_references": ["T2"],
+                        },
+                        "user_response": None,
+                    }
+                ]
+            }
+        }
+
+        prompt = backend_selector.build_book_planner_prompt(
+            "Planner instructions",
+            review_document,
+            {"book_planning_gate": "ready"},
+        )
+
+        self.assertIn(
+            '"allowed_belief_revision_transcript_references": [\n'
+            '    "T1",\n'
+            '    "T2"\n'
+            "  ]",
+            prompt,
+        )
+        self.assertIn(
+            "is not a general provenance field",
+            prompt,
+        )
+
+    def test_general_transcript_reference_is_not_a_belief_revision(self) -> None:
+        conversation_id = "bounded-belief-revision-reference"
+        review_id = self.create_eligible_review(conversation_id)
+        proposal_data = self.make_proposal(
+            review_id,
+            [f"{review_id}:C1"],
+        ).model_dump(mode="json")
+        proposal_data["chapter_plan"][0][
+            "belief_revision_transcript_references"
+        ] = ["T1"]
+
+        with self.assertRaisesRegex(
+            ToolError,
+            "unknown belief-revision transcript turns: T1",
+        ):
+            mcp_server.submit_book_manifest(
+                mcp_server.BookManifestProposal.model_validate(proposal_data)
+            )
+
+    def test_incomplete_planner_reports_bounded_provider_response(self) -> None:
+        conversation_id = "incomplete-wrapper-book-plan"
+        self.create_eligible_review(conversation_id)
+        review_path = self.reviews_path / f"{conversation_id}.json"
+        decision_path = (
+            self.review_decisions_path / f"{conversation_id}.json"
+        )
+        provider_response = "planner schema rejection " + ("x" * 2_000)
+
+        with (
+            patch.object(backend_selector, "BOOKS_PATH", self.books_path),
+            patch.object(
+                backend_selector,
+                "capture_backend_response",
+                return_value=([], provider_response),
+            ),
+            self.assertRaisesRegex(
+                RuntimeError,
+                "Planner response:\\nplanner schema rejection",
+            ) as raised,
+        ):
+            backend_selector.plan_book_from_review(
+                "codex",
+                "/usr/bin/codex",
+                review_path,
+                decision_path,
+            )
+
+        self.assertLess(len(str(raised.exception)), 1_700)
+        self.assertFalse(
+            (self.books_path / f"book-{conversation_id}").exists()
+        )
+
+    def test_timed_out_planner_remains_resumable_at_book_plan(self) -> None:
+        conversation_id = "timed-out-wrapper-book-plan"
+        review_id = self.create_eligible_review(conversation_id)
+        review_path = self.reviews_path / f"{conversation_id}.json"
+        decision_path = (
+            self.review_decisions_path / f"{conversation_id}.json"
+        )
+        (self.knowledge_path / "nodes" / review_id).mkdir(parents=True)
+        timeout_error = RuntimeError(
+            "codex book_plan timed out after 600 seconds."
+        )
+
+        with (
+            patch.object(backend_selector, "PROJECT_PATH", self.project_path),
+            patch.object(
+                backend_selector,
+                "REVIEWS_PATH",
+                self.reviews_path,
+            ),
+            patch.object(
+                backend_selector,
+                "REVIEW_DECISIONS_PATH",
+                self.review_decisions_path,
+            ),
+            patch.object(
+                backend_selector,
+                "KNOWLEDGE_PATH",
+                self.knowledge_path,
+            ),
+            patch.object(backend_selector, "BOOKS_PATH", self.books_path),
+            patch.object(
+                backend_selector,
+                "capture_backend_response",
+                side_effect=timeout_error,
+            ),
+            self.assertRaisesRegex(RuntimeError, "timed out"),
+        ):
+            backend_selector.plan_book_from_review(
+                "codex",
+                "/usr/bin/codex",
+                review_path,
+                decision_path,
+            )
+
+        conversation_path = (
+            self.conversations_path / f"{conversation_id}.jsonl"
+        )
+        with (
+            patch.object(backend_selector, "PROJECT_PATH", self.project_path),
+            patch.object(
+                backend_selector,
+                "REVIEWS_PATH",
+                self.reviews_path,
+            ),
+            patch.object(
+                backend_selector,
+                "REVIEW_DECISIONS_PATH",
+                self.review_decisions_path,
+            ),
+            patch.object(
+                backend_selector,
+                "KNOWLEDGE_PATH",
+                self.knowledge_path,
+            ),
+            patch.object(backend_selector, "BOOKS_PATH", self.books_path),
+        ):
+            self.assertEqual(
+                backend_selector.workflow_stage(conversation_path),
+                "book_plan",
+            )
+
+        self.assertFalse(
+            (self.books_path / f"book-{conversation_id}").exists()
+        )
+
     def test_wrapper_runs_one_new_chapter_development_pass(self) -> None:
         book_id, _, _ = self.create_evidence_book(
             "wrapper-chapter-development"
+        )
+        manifest_path = self.books_path / book_id / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["chapter_plan"][0]["readiness"] = "experiment_required"
+        manifest["chapter_plan"][0]["draft_gate"] = "ready"
+        manifest["chapter_plan"][0]["open_requirements"] = [
+            {
+                "kind": "experiment",
+                "description": "Run the validation after this draft.",
+                "disposition": "routed_to_later",
+                "required_before": "later_work",
+            }
+        ]
+        manifest_path.write_text(
+            json.dumps(manifest),
+            encoding="utf-8",
         )
         captured_call_purposes = []
 
@@ -712,8 +953,6 @@ class BookPlanningTests(unittest.TestCase):
         proposal_data = self.make_proposal(
             review_id,
             [f"{review_id}:C1"],
-            readiness="research_required",
-            missing_work=["Resolve the transcript evidence gap."],
             research_gaps=[
                 {
                     "description": (
@@ -721,7 +960,7 @@ class BookPlanningTests(unittest.TestCase):
                     ),
                     "source_review_id": review_id,
                     "transcript_references": ["T1"],
-                    "blocking_chapter_ids": ["CH1"],
+                    "blocking_chapter_ids": [],
                 }
             ],
         ).model_dump(mode="json")
@@ -746,6 +985,91 @@ class BookPlanningTests(unittest.TestCase):
 
         with self.assertRaises(ToolError):
             mcp_server.submit_book_manifest(proposal)
+
+    def test_two_gate_plan_can_route_experiment_after_drafting(self) -> None:
+        conversation_id = "routed-experiment-after-drafting"
+        review_id = self.create_eligible_review(conversation_id)
+        proposal_data = self.make_proposal(
+            review_id,
+            [f"{review_id}:C1"],
+            readiness="experiment_required",
+            missing_work=["Run the controlled experiment later."],
+        ).model_dump(mode="json")
+        chapter = proposal_data["chapter_plan"][0]
+        chapter["draft_gate"] = "ready"
+        chapter["open_requirements"] = [
+            {
+                "kind": "experiment",
+                "description": "Run the controlled experiment later.",
+                "disposition": "routed_to_later",
+                "required_before": "later_work",
+            }
+        ]
+
+        receipt = mcp_server.submit_book_manifest(
+            mcp_server.BookManifestProposal.model_validate(proposal_data)
+        )
+        manifest = json.loads(
+            (self.project_path / receipt.manifest_path).read_text(
+                encoding="utf-8"
+            )
+        )
+
+        self.assertEqual(
+            manifest["chapter_plan"][0]["readiness"],
+            "experiment_required",
+        )
+        self.assertEqual(
+            manifest["chapter_plan"][0]["draft_gate"],
+            "ready",
+        )
+
+    def test_two_gate_plan_blocks_unresolved_drafting_requirement(self) -> None:
+        conversation_id = "unresolved-before-drafting"
+        review_id = self.create_eligible_review(conversation_id)
+        proposal_data = self.make_proposal(
+            review_id,
+            [f"{review_id}:C1"],
+            readiness="research_required",
+            missing_work=["Verify a required factual claim."],
+        ).model_dump(mode="json")
+        chapter = proposal_data["chapter_plan"][0]
+        chapter["draft_gate"] = "ready"
+        chapter["open_requirements"] = [
+            {
+                "kind": "research",
+                "description": "Verify a required factual claim.",
+                "disposition": "bounded_unresolved",
+                "required_before": "drafting",
+            }
+        ]
+
+        with self.assertRaisesRegex(
+            ToolError,
+            "drafting requirements remain unresolved",
+        ):
+            mcp_server.submit_book_manifest(
+                mcp_server.BookManifestProposal.model_validate(proposal_data)
+            )
+
+    def test_two_gate_block_requires_named_drafting_requirement(self) -> None:
+        conversation_id = "unexplained-draft-block"
+        review_id = self.create_eligible_review(conversation_id)
+        proposal_data = self.make_proposal(
+            review_id,
+            [f"{review_id}:C1"],
+        ).model_dump(mode="json")
+        chapter = proposal_data["chapter_plan"][0]
+        chapter["draft_gate"] = "blocked"
+        chapter["open_requirements"] = []
+
+        with self.assertRaisesRegex(
+            ToolError,
+            "draft-blocked without an unresolved drafting requirement",
+        ):
+            mcp_server.submit_book_manifest(
+                mcp_server.BookManifestProposal.model_validate(proposal_data)
+            )
 
     def test_blocked_human_gate_rejects_book_planning(self) -> None:
         conversation_id = "blocked-gate"
@@ -781,6 +1105,69 @@ class BookPlanningTests(unittest.TestCase):
             manifest_path.read_text(encoding="utf-8"),
             original_manifest,
         )
+
+    def test_returned_plan_is_archived_before_one_revision(self) -> None:
+        conversation_id = "book-plan-revision"
+        review_id = self.create_eligible_review(conversation_id)
+        first_receipt = mcp_server.submit_book_manifest(
+            self.make_proposal(review_id, [f"{review_id}:C1"])
+        )
+        manifest_path = self.project_path / first_receipt.manifest_path
+        first_manifest = manifest_path.read_bytes()
+        responses = iter(
+            [
+                "2",
+                (
+                    "Keep outcome claims excluded while making the "
+                    "design explanation draftable."
+                ),
+            ]
+        )
+
+        with (
+            patch.object(
+                backend_selector,
+                "PROJECT_PATH",
+                self.project_path,
+            ),
+            patch.object(
+                backend_selector,
+                "BOOKS_PATH",
+                self.books_path,
+            ),
+            patch("builtins.input", side_effect=lambda _prompt: next(responses)),
+        ):
+            backend_selector.record_book_plan_checkpoint(manifest_path)
+            archived_path = backend_selector.archive_book_plan_for_revision(
+                manifest_path.parent
+            )
+            revision_context = (
+                backend_selector.load_latest_book_plan_revision(
+                    manifest_path.parent
+                )
+            )
+
+        self.assertFalse(manifest_path.exists())
+        self.assertEqual(
+            (archived_path / "manifest.json").read_bytes(),
+            first_manifest,
+        )
+        self.assertEqual(
+            revision_context["human_revision_request"]["decision"],
+            "needs_plan_revision",
+        )
+        self.assertIn(
+            "making the design explanation draftable",
+            revision_context["human_revision_request"]["notes"][0],
+        )
+
+        revised_receipt = mcp_server.submit_book_manifest(
+            self.make_proposal(review_id, [f"{review_id}:C1"])
+        )
+
+        self.assertEqual(revised_receipt.book_id, first_receipt.book_id)
+        self.assertTrue(manifest_path.is_file())
+        self.assertTrue((archived_path / "outline.md").is_file())
 
 
 if __name__ == "__main__":

@@ -1,7 +1,5 @@
 {
-  "approved_domains": [
-    "arxiv.org"
-  ],
+  "approved_domains": [],
   "allow_subdomains": false,
   "max_response_bytes": 500000,
   "max_text_characters": 30000,

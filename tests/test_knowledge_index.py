@@ -16,6 +16,9 @@ class KnowledgeIndexTests(unittest.TestCase):
         self.conversations_path = self.project_path / "data" / "conversations"
         self.reviews_path = self.project_path / "data" / "reviews"
         self.evidence_path = self.project_path / "data" / "evidence"
+        self.research_sources_path = (
+            self.project_path / "data" / "research_sources"
+        )
         self.review_sessions_path = (
             self.project_path / "data" / "review_sessions"
         )
@@ -46,6 +49,7 @@ class KnowledgeIndexTests(unittest.TestCase):
         mcp_server.CONVERSATIONS_PATH = self.conversations_path
         mcp_server.REVIEWS_PATH = self.reviews_path
         mcp_server.EVIDENCE_PATH = self.evidence_path
+        mcp_server.RESEARCH_SOURCES_PATH = self.research_sources_path
         mcp_server.REVIEW_SESSIONS_PATH = self.review_sessions_path
         mcp_server.REVIEW_DECISIONS_PATH = self.review_decisions_path
         mcp_server.BOOKS_PATH = self.books_path
@@ -193,6 +197,13 @@ class KnowledgeIndexTests(unittest.TestCase):
                     {
                         "text": "Cross-review deduplication remains untested.",
                         "transcript_references": ["T1"],
+                        "disposition": "routed_to_later",
+                        "book_blocking": False,
+                        "closure_reason": (
+                            "Deduplication is not required to demonstrate "
+                            "single-review indexing."
+                        ),
+                        "destination": "cross-review indexing research",
                     }
                 ],
                 "connected_ideas": [
@@ -249,7 +260,7 @@ class KnowledgeIndexTests(unittest.TestCase):
         self.write_finished_conversation(conversation_id)
         receipt_id = "source-index-test"
         claim = "Stable provenance lets knowledge be reused safely."
-        mcp_server.SOURCE_RECEIPTS[receipt_id] = mcp_server.SourceReceipt(
+        source_receipt = mcp_server.SourceReceipt(
             receipt_id=receipt_id,
             conversation_id=conversation_id,
             requested_url="https://example.com/research",
@@ -266,6 +277,7 @@ class KnowledgeIndexTests(unittest.TestCase):
             ),
             content_truncated=False,
         )
+        mcp_server.write_source_receipt(source_receipt)
         receipt = mcp_server.submit_research_review(
             self.make_review(conversation_id, receipt_id)
         )

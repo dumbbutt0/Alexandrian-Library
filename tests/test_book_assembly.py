@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 import book_assembler
+import book_synthesis
 
 
 class BookAssemblyTests(unittest.TestCase):
@@ -18,6 +19,17 @@ class BookAssemblyTests(unittest.TestCase):
             self.project_path / "data" / "books" / self.book_id
         )
         self.book_directory.mkdir(parents=True)
+        self.synthesizer_skill_path = (
+            self.project_path
+            / "skills"
+            / "alexandrian-book-synthesizer"
+            / "SKILL.md"
+        )
+        self.synthesizer_skill_path.parent.mkdir(parents=True)
+        self.synthesizer_skill_path.write_text(
+            "# Test synthesis profile\n",
+            encoding="utf-8",
+        )
         self.write_json(
             self.book_directory / "manifest.json",
             {
@@ -63,6 +75,14 @@ class BookAssemblyTests(unittest.TestCase):
             {
                 "review_id": self.review_id,
                 "conversation_id": self.conversation_id,
+                "claim_index": [
+                    {
+                        "claim_id": f"{self.review_id}:C1",
+                        "claim": "Exact first chapter evidence is preserved.",
+                        "status": "supported_by_checked_source",
+                        "source_receipt_ids": ["SRC1"],
+                    }
+                ],
                 "source_receipts": [
                     {
                         "receipt_id": "SRC1",
@@ -113,12 +133,22 @@ class BookAssemblyTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
 
+    def test_explicit_draft_gate_overrides_open_research_state(self) -> None:
+        chapter = self.chapter_plan("CH1", "First Chapter")
+        chapter["readiness"] = "experiment_required"
+        chapter["draft_gate"] = "ready"
+
+        self.assertTrue(book_assembler.chapter_is_draft_ready(chapter))
+
     def chapter_plan(self, chapter_id: str, title: str) -> dict:
         return {
             "chapter_id": chapter_id,
             "working_title": title,
             "readiness": "ready_to_draft",
             "material_disposition": "include",
+            "claim_ids": (
+                [f"{self.review_id}:C1"] if chapter_id == "CH1" else []
+            ),
         }
 
     def write_json(self, path: Path, value: dict) -> None:
@@ -246,12 +276,12 @@ class BookAssemblyTests(unittest.TestCase):
         )
 
     def test_assembles_exact_chapters_and_end_material(self) -> None:
-        receipt = book_assembler.assemble_book(
+        receipt = book_assembler.assemble_candidate_book(
             self.project_path,
             self.book_id,
         )
 
-        book_path = self.project_path / receipt["book_path"]
+        book_path = self.project_path / receipt["candidate_path"]
         body = book_path.read_text(encoding="utf-8")
         self.assertLess(
             body.index("# First Chapter"),
@@ -265,6 +295,7 @@ class BookAssemblyTests(unittest.TestCase):
         self.assertIn("https://example.com/study", body)
         self.assertEqual(receipt["chapter_count"], 2)
         self.assertEqual(receipt["source_receipt_ids"], ["SRC1"])
+        self.assertFalse((self.book_directory / "book.md").exists())
 
     def test_rejects_incomplete_chapter(self) -> None:
         run_path = self.book_directory / "runs" / "CH2.json"
@@ -273,12 +304,12 @@ class BookAssemblyTests(unittest.TestCase):
         self.write_json(run_path, run)
 
         with self.assertRaises(book_assembler.BookAssemblyError):
-            book_assembler.assemble_book(
+            book_assembler.assemble_candidate_book(
                 self.project_path,
                 self.book_id,
             )
 
-        self.assertFalse((self.book_directory / "book.md").exists())
+        self.assertFalse((self.book_directory / "candidate.md").exists())
 
     def test_rejects_tampered_final_draft(self) -> None:
         (
@@ -286,17 +317,17 @@ class BookAssemblyTests(unittest.TestCase):
         ).write_text("Changed after evaluation.\n", encoding="utf-8")
 
         with self.assertRaises(book_assembler.BookAssemblyError):
-            book_assembler.assemble_book(
+            book_assembler.assemble_candidate_book(
                 self.project_path,
                 self.book_id,
             )
 
     def test_existing_assembly_is_idempotent_and_detects_drift(self) -> None:
-        first = book_assembler.assemble_book(
+        first = book_assembler.assemble_candidate_book(
             self.project_path,
             self.book_id,
         )
-        second = book_assembler.assemble_book(
+        second = book_assembler.assemble_candidate_book(
             self.project_path,
             self.book_id,
         )
@@ -308,10 +339,256 @@ class BookAssemblyTests(unittest.TestCase):
         self.write_json(manifest_path, manifest)
 
         with self.assertRaises(book_assembler.BookAssemblyError):
-            book_assembler.assemble_book(
+            book_assembler.assemble_candidate_book(
                 self.project_path,
                 self.book_id,
             )
+
+    def write_editorial_review(
+        self,
+        candidate: dict,
+        decision: str,
+        chapter_revisions: list[dict] | None = None,
+    ) -> Path:
+        path = self.book_directory / "editorial_review.json"
+        synthesis_receipt_path = (
+            self.book_directory / "synthesis" / "receipt.json"
+        )
+        synthesis_receipt = json.loads(
+            synthesis_receipt_path.read_text(encoding="utf-8")
+        )
+        self.write_json(
+            path,
+            {
+                "schema_version": "1.0",
+                "book_id": self.book_id,
+                "candidate_sha256": candidate["candidate_sha256"],
+                "candidate_assembly_sha256": hashlib.sha256(
+                    (
+                        self.book_directory / "candidate_assembly.json"
+                    ).read_bytes()
+                ).hexdigest(),
+                "synthesis_receipt_path": str(
+                    synthesis_receipt_path.relative_to(self.project_path)
+                ),
+                "synthesis_receipt_sha256": hashlib.sha256(
+                    synthesis_receipt_path.read_bytes()
+                ).hexdigest(),
+                "edition_path": synthesis_receipt["book_path"],
+                "edition_sha256": synthesis_receipt["book_sha256"],
+                "synthesis_attempt": synthesis_receipt["selected_attempt"],
+                "decision": decision,
+                "notes": ["Preserve the evidence boundaries."],
+                "chapter_revisions": chapter_revisions or [],
+                "decided_at": "2026-01-02T00:00:00+00:00",
+            },
+        )
+        return path
+
+    def create_passing_synthesis(
+        self,
+        candidate: dict,
+        edition: str | None = None,
+    ) -> dict:
+        context = book_synthesis.build_context(
+            self.project_path,
+            self.book_id,
+            candidate,
+            self.synthesizer_skill_path,
+        )
+        candidate_body = (
+            self.book_directory / "candidate.md"
+        ).read_text(encoding="utf-8")
+        canonical_excerpt = "Exact first chapter."
+        inventory = {
+            "book_id": self.book_id,
+            "context_sha256": context["context_sha256"],
+            "candidate_sha256": context["candidate_sha256"],
+            "central_question": context["central_question"],
+            "curiosity_signature": context["curiosity_signature"],
+            "claims": [
+                {
+                    "claim_id": f"{self.review_id}:C1",
+                    "source_kind": "canonical",
+                    "statement": "Exact first chapter evidence is preserved.",
+                    "candidate_excerpt": canonical_excerpt,
+                    "candidate_location": "First chapter",
+                    "certainty": "supported",
+                    "scope_and_conditions": "This assembled book only.",
+                    "evidence_receipt_ids": ["SRC1"],
+                    "required_in_edition": True,
+                    "importance_reason": "The manifest requires this claim.",
+                }
+            ],
+            "definitions": [],
+            "contradictions": [],
+            "limitations": [],
+            "unresolved_questions": [],
+        }
+        plan = {
+            "book_id": self.book_id,
+            "context_sha256": context["context_sha256"],
+            "candidate_sha256": context["candidate_sha256"],
+            "profile": context["profile"],
+            "central_answer": "Hashes preserve assembly lineage.",
+            "chapter_jobs": [],
+            "operations": [],
+            "terminology": [],
+            "protected_claim_ids": [f"{self.review_id}:C1"],
+        }
+        book_synthesis.initialize_synthesis(
+            self.project_path,
+            context,
+            inventory,
+            plan,
+        )
+        context, inventory, plan = book_synthesis.load_initialized_synthesis(
+            self.project_path,
+            self.book_id,
+        )
+        edition = edition or candidate_body
+        submission = book_synthesis.save_attempt(
+            self.project_path,
+            {
+                "book_id": self.book_id,
+                "attempt": 1,
+                "context_sha256": context["context_sha256"],
+                "inventory_sha256": inventory["inventory_sha256"],
+                "plan_sha256": plan["plan_sha256"],
+                "correction_audit_sha256": None,
+                "claim_mappings": [
+                    {
+                        "claim_id": f"{self.review_id}:C1",
+                        "edition_excerpt": canonical_excerpt,
+                        "edition_location": "First chapter",
+                    }
+                ],
+                "change_summary": ["Improved whole-book flow."],
+            },
+            edition,
+        )
+        return book_synthesis.submit_audit(
+            self.project_path,
+            {
+                "book_id": self.book_id,
+                "attempt": 1,
+                "context_sha256": context["context_sha256"],
+                "inventory_sha256": inventory["inventory_sha256"],
+                "plan_sha256": plan["plan_sha256"],
+                "submission_sha256": submission["submission_sha256"],
+                "book_sha256": submission["book_sha256"],
+                "claim_results": [
+                    {
+                        "claim_id": f"{self.review_id}:C1",
+                        "status": "preserved",
+                        "candidate_excerpt": canonical_excerpt,
+                        "edition_excerpt": canonical_excerpt,
+                        "explanation": "Meaning and evidence remain unchanged.",
+                        "justification": None,
+                        "certainty_changed": False,
+                        "scope_changed": False,
+                        "evidence_relationship_changed": False,
+                    }
+                ],
+                "unmapped_candidate_claims": [],
+                "novel_edition_claims": [],
+                "lost_limitations": [],
+                "terminology_drift": [],
+                "central_question_preserved": True,
+                "curiosity_preservation": {
+                    "status": "preserved",
+                    "explanation": "The curiosity signature remains.",
+                },
+                "overall_status": "pass",
+                "blocking_reasons": [],
+            },
+        )
+
+    def test_finalization_requires_hash_bound_human_approval(self) -> None:
+        candidate = book_assembler.assemble_candidate_book(
+            self.project_path,
+            self.book_id,
+        )
+        with self.assertRaises(book_assembler.BookAssemblyError):
+            book_assembler.finalize_book(
+                self.project_path,
+                self.book_id,
+            )
+
+        synthesized_body = (
+            self.book_directory / "candidate.md"
+        ).read_text(encoding="utf-8") + "\nSynthesized transition.\n"
+        synthesis_receipt = self.create_passing_synthesis(
+            candidate,
+            synthesized_body,
+        )
+        with self.assertRaises(book_assembler.BookAssemblyError):
+            book_assembler.finalize_book(
+                self.project_path,
+                self.book_id,
+            )
+        self.write_editorial_review(
+            candidate,
+            "approved_for_finalization",
+        )
+        final = book_assembler.finalize_book(
+            self.project_path,
+            self.book_id,
+        )
+
+        self.assertEqual(final["lifecycle_status"], "final")
+        self.assertEqual(
+            (self.book_directory / "book.md").read_bytes(),
+            (
+                self.project_path / synthesis_receipt["book_path"]
+            ).read_bytes(),
+        )
+        self.assertNotEqual(
+            (self.book_directory / "book.md").read_bytes(),
+            (self.book_directory / "candidate.md").read_bytes(),
+        )
+        self.assertEqual(
+            book_assembler.verify_existing_assembly(
+                self.project_path,
+                self.book_directory,
+                self.book_id,
+            ),
+            final,
+        )
+
+    def test_revision_archives_candidate_and_human_decision(self) -> None:
+        candidate = book_assembler.assemble_candidate_book(
+            self.project_path,
+            self.book_id,
+        )
+        self.create_passing_synthesis(candidate)
+        self.write_editorial_review(
+            candidate,
+            "needs_chapter_revision",
+            [
+                {
+                    "chapter_id": "CH1",
+                    "instructions": ["Clarify the first mechanism."],
+                }
+            ],
+        )
+
+        archived, decision = (
+            book_assembler.archive_candidate_for_revision(
+                self.project_path,
+                self.book_id,
+            )
+        )
+
+        self.assertEqual(decision["decision"], "needs_chapter_revision")
+        self.assertTrue((archived / "candidate.md").is_file())
+        self.assertTrue((archived / "candidate_assembly.json").is_file())
+        self.assertTrue((archived / "synthesis").is_dir())
+        self.assertTrue((archived / "editorial_review.json").is_file())
+        self.assertFalse((self.book_directory / "candidate.md").exists())
+        self.assertFalse(
+            (self.book_directory / "editorial_review.json").exists()
+        )
 
 
 if __name__ == "__main__":

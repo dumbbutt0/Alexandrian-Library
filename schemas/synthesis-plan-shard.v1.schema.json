@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://alexandrian-library.local/schemas/synthesis-plan-shard.v1.schema.json",
+  "title": "Alexandrian chapter plan shard",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "book_id",
+    "shard_id",
+    "chapter_id",
+    "input_hash",
+    "chapter_job",
+    "operations",
+    "claim_dispositions",
+    "terminology",
+    "unresolved_decisions",
+    "cross_chapter_dependencies"
+  ],
+  "properties": {
+    "book_id": {
+      "type": "string",
+      "pattern": "^book-[A-Za-z0-9._-]+$"
+    },
+    "shard_id": {"type": "string", "minLength": 1},
+    "chapter_id": {"type": "string", "minLength": 1},
+    "input_hash": {"$ref": "#/$defs/sha256"},
+    "chapter_job": {"type": "string", "minLength": 1},
+    "operations": {
+      "type": "array",
+      "description": "Every authority_refs list uses the authority_type namespace: assigned CO/SC IDs for candidate authority, supplied decision IDs for human authority, and no references for editorial mechanics."
+    },
+    "claim_dispositions": {
+      "type": "array",
+      "minItems": 1,
+      "description": "One ordered disposition per assigned occurrence. Evidence receipts, review IDs, prose locations, and JSON paths are not authority references."
+    },
+    "terminology": {
+      "type": "array",
+      "description": "Chapter-local terminology with authority references from the same typed namespace."
+    },
+    "unresolved_decisions": {"type": "array"},
+    "cross_chapter_dependencies": {"type": "array"}
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://alexandrian-library.local/schemas/conversation-receipt.v1.schema.json",
+  "title": "Alexandrian Library conversation receipt",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "conversation_id",
+    "status",
+    "event_count",
+    "final_sequence",
+    "transcript_path",
+    "transcript_sha256",
+    "finished_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^1\\.[0-9]+$"
+    },
+    "conversation_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
+    "status": {
+      "const": "final"
+    },
+    "event_count": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "final_sequence": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "transcript_path": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\).+$"
+    },
+    "transcript_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "finished_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    }
+  }
+}

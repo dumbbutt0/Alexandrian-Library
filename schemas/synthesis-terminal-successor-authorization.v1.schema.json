@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://alexandrian-library.local/schemas/synthesis-terminal-successor-authorization.v1.schema.json",
+  "title": "Alexandrian fresh successor after terminal synthesis hold",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "book_id",
+    "cycle_id",
+    "protocol_version",
+    "transition_kind",
+    "inventory_policy",
+    "candidate_path",
+    "candidate_sha256",
+    "prior_cycle_id",
+    "prior_cycle_authorization_path",
+    "prior_cycle_authorization_sha256",
+    "prior_index_path",
+    "prior_index_sha256",
+    "prior_terminal_receipt_path",
+    "prior_terminal_receipt_sha256",
+    "prior_context_path",
+    "prior_context_sha256",
+    "prior_staged_index_path",
+    "prior_staged_index_sha256",
+    "prior_inventory_path",
+    "prior_inventory_sha256",
+    "prior_inventory_content_sha256",
+    "prior_controller_path",
+    "prior_controller_sha256",
+    "reason",
+    "human_decision_artifacts",
+    "planning_shard_count",
+    "maximum_provider_calls_per_stage",
+    "maximum_synthesis_attempts",
+    "authorized_at",
+    "authorization_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "4.0"},
+    "book_id": {
+      "type": "string",
+      "pattern": "^book-[A-Za-z0-9._-]+$"
+    },
+    "cycle_id": {
+      "type": "string",
+      "pattern": "^cycle-[0-9]{3,}$"
+    },
+    "protocol_version": {"const": "chapter-sharded-plan-v1"},
+    "transition_kind": {"const": "fresh_after_terminal_hold"},
+    "inventory_policy": {"const": "regenerate_required"},
+    "candidate_path": {"type": "string", "minLength": 1},
+    "candidate_sha256": {"$ref": "#/$defs/sha256"},
+    "prior_cycle_id": {
+      "type": "string",
+      "pattern": "^cycle-[0-9]{3,}$"
+    },
+    "prior_cycle_authorization_path": {"type": "string", "minLength": 1},
+    "prior_cycle_authorization_sha256": {"$ref": "#/$defs/sha256"},
+    "prior_index_path": {"type": "string", "minLength": 1},
+    "prior_index_sha256": {"$ref": "#/$defs/sha256"},
+    "prior_terminal_receipt_path": {"type": "string", "minLength": 1},
+    "prior_terminal_receipt_sha256": {"$ref": "#/$defs/sha256"},
+    "prior_context_path": {"type": "string", "minLength": 1},
+    "prior_context_sha256": {"$ref": "#/$defs/sha256"},
+    "prior_staged_index_path": {"type": "string", "minLength": 1},
+    "prior_staged_index_sha256": {"$ref": "#/$defs/sha256"},
+    "prior_inventory_path": {"type": "string", "minLength": 1},
+    "prior_inventory_sha256": {"$ref": "#/$defs/sha256"},
+    "prior_inventory_content_sha256": {"$ref": "#/$defs/sha256"},
+    "prior_controller_path": {"type": "string", "minLength": 1},
+    "prior_controller_sha256": {"$ref": "#/$defs/sha256"},
+    "reason": {"type": "string", "minLength": 1},
+    "human_decision_artifacts": {"type": "array"},
+    "planning_shard_count": {"type": "integer", "minimum": 1},
+    "maximum_provider_calls_per_stage": {"const": 2},
+    "maximum_synthesis_attempts": {"const": 2},
+    "authorized_at": {"type": "string", "minLength": 1},
+    "authorization_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

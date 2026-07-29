@@ -38,6 +38,14 @@ Do not invent missing beliefs, sources, conclusions, knowledge levels, or
 transcript references. A source being named or described does not mean it has
 been verified.
 
+When `research_continuation_context` is present, treat its parent review and
+human checkpoint as hash-bound prior research data. Use them to preserve the
+question, identify the fixed continuation targets, and explain what changed.
+Do not cite parent transcript references as if they belonged to the current
+transcript. Parent source receipts are contextual history, not valid receipts
+for the current review. If a current claim must depend on the same source,
+fetch that source under the current conversation ID and assess the new receipt.
+
 ## Review Process
 
 ### 1. Isolate the intellectual center
@@ -120,6 +128,21 @@ the fetched content, a concise evidence summary, limitations, and
 counterevidence or a serious alternative explanation. Do not invent missing
 authors, dates, publishers, journals, or identifiers.
 
+Keep each receipt bound to the exact `claim_checked` used when the source was
+fetched. The checked-source finding and any claim status that cites that receipt
+must describe the same claim at the same scope:
+
+- `supports` maps to `supported_by_checked_source`
+- `contradicts` maps to `contradicted_by_checked_source`
+- `qualifies` maps to `qualified_by_checked_source`
+
+Do not use a receipt whose composite claim was qualified to mark one extracted
+subclaim as independently supported or contradicted. Either preserve the
+composite claim with its qualified status, leave the subclaim without a
+checked-source status, or fetch a separate receipt using that exact narrower
+subclaim. Do not weaken this boundary merely because the source passage appears
+to address one component.
+
 If the fetch fails or no appropriate source is available, preserve the claim as
 an evidence gap. Do not bypass the source policy with generic WebFetch, shell
 commands, another network tool, or a guessed receipt.
@@ -128,6 +151,29 @@ Keep sources merely mentioned in the transcript separate from sources checked
 by the reviewer. Record the actual research question or query, candidate source,
 inclusion or exclusion decision, and reason in the research trail. State the
 next verification needed for each important claim.
+
+### 6a. Close the bounded research pass
+
+Do not use "more research is needed" as an unbounded outcome. Give every
+evidence gap exactly one disposition:
+
+- `resolved`: The gap was answered within the checked evidence and no longer
+  blocks this book.
+- `bounded_unresolved`: The pass established a precise present limit. State
+  whether that limit still blocks this book and why.
+- `routed_to_later`: The gap belongs to a named later book, experiment,
+  implementation, or research thread and does not block this book.
+- `requires_user_decision`: Evidence cannot choose a personal, editorial, or
+  scope decision for the user. Keep this book-blocking.
+
+Give resolved, bounded, and routed gaps a concrete closure reason. Give routed
+gaps a concrete destination.
+
+For a research continuation, treat the parent review's named gaps and human
+checkpoint requests as the fixed target list. Newly discovered adjacent
+questions must be nonblocking and routed rather than silently expanding that
+list. Do not refetch a failed or rejected source without a changed,
+claim-relevant reason.
 
 ### 7. Connect and separate research
 
@@ -165,6 +211,16 @@ Ground the routing reason in transcript references. This decision is about the
 next research state, not a declaration that an idea is true, novel, or ready
 for publication.
 
+Choose `ready_for_book_consideration` only when no evidence gap remains
+book-blocking. The planned book may preserve bounded uncertainty, but every
+remaining limit must be explicit, nonblocking for the proposed scope, and
+either bounded or routed. The next planner must be able to design included
+chapters without silently requiring another pre-book research pass.
+
+If a gap requires a user decision, choose another research route and return to
+the human checkpoint. Do not use source volume, prose polish, or reviewer
+confidence as a readiness substitute.
+
 ## Submission Protocol
 
 Analyze the complete transcript before submitting anything.
@@ -178,6 +234,8 @@ Then call `submit_research_review` exactly once with:
 - Valid `T` references for every grounded item
 - Every checked-source assessment and its real source receipt ID
 - Receipt IDs on claims whose status depends on checked sources
+- A terminal disposition, book-blocking flag, and closure information for
+  every evidence gap
 - Scope boundaries and definition status
 - The actual research trail, including excluded or unavailable sources
 - Citation and evidence details for every checked source
@@ -204,3 +262,5 @@ Do not call any other write tool for the review.
 - Keep the review inspectable while preserving important nuance
 - Keep final book prose, exhaustive book research, and project implementation
   outside this bounded double-check review
+- Do not continue source discovery after every targeted gap is resolved,
+  honestly bounded, routed, or waiting on the user

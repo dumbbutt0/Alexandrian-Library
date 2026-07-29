@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://alexandrian-library.local/schemas/synthesis-inventory-claim-frame.v1.schema.json",
+  "title": "Alexandrian synthesis inventory authority frame",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "authority_source",
+    "authority_ref",
+    "authoritative_text",
+    "normalized_summary",
+    "protected_semantics"
+  ],
+  "properties": {
+    "authority_source": {
+      "enum": ["canonical_claim", "candidate_excerpt"]
+    },
+    "authority_ref": {
+      "type": "string",
+      "minLength": 1
+    },
+    "authoritative_text": {
+      "type": "string",
+      "minLength": 1
+    },
+    "normalized_summary": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Derived index material. It is not an authority."
+    },
+    "protected_semantics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "claim_role",
+        "normative_force",
+        "normative_polarity",
+        "normative_surface_form",
+        "certainty",
+        "scope_and_conditions",
+        "attribution",
+        "evidence_relationship",
+        "resolution_status"
+      ],
+      "properties": {
+        "claim_role": {
+          "enum": [
+            "research_claim",
+            "observation",
+            "hypothesis",
+            "prediction",
+            "project_choice",
+            "definition",
+            "question",
+            "other"
+          ]
+        },
+        "normative_force": {
+          "enum": [
+            "none",
+            "permission",
+            "recommendation",
+            "requirement"
+          ]
+        },
+        "normative_polarity": {
+          "enum": ["not_applicable", "positive", "negative"]
+        },
+        "normative_surface_form": {
+          "type": ["string", "null"]
+        },
+        "certainty": {"type": "string", "minLength": 1},
+        "scope_and_conditions": {"type": "string", "minLength": 1},
+        "attribution": {"type": "string", "minLength": 1},
+        "evidence_relationship": {"type": "string", "minLength": 1},
+        "resolution_status": {
+          "enum": [
+            "established",
+            "qualified",
+            "project_choice",
+            "open",
+            "routed",
+            "unresolved",
+            "contradicted"
+          ]
+        }
+      }
+    }
+  }
+}

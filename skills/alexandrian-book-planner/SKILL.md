@@ -95,6 +95,35 @@ Give every chapter:
 
 Use sequential chapter IDs beginning with `CH1`.
 
+Treat research state and drafting permission as separate decisions.
+
+Set `readiness` to describe the chapter's present research, reflection,
+experiment, or contradiction state. Set `draft_gate` to `ready` when the
+chapter can already explain that state honestly without inventing a conclusion.
+Set it to `blocked` only when an unresolved requirement is necessary before
+honest drafting can begin.
+
+Classify every open chapter requirement with:
+
+- `kind`: `research`, `experiment`, `human_decision`, or `contradiction`
+- `disposition`: `completed`, `bounded_unresolved`, `routed_to_later`, or
+  `requires_user_decision`
+- `required_before`: `drafting`, `finalization`, or `later_work`
+
+A requirement routed to later must use `required_before: later_work`.
+Unperformed validation experiments normally belong to later work when the
+chapter's present purpose is to explain their protocol and nonresults.
+Human approval of naming, personal meaning, or final interpretation may be
+required before finalization without blocking an honest non-first-person draft.
+Do not use this separation to draft a factual claim whose necessary evidence is
+still missing.
+
+Use `belief_revision_transcript_references` only to map a chapter to transcript
+turns that belong to the review's canonical belief revisions. This is not a
+general claim-provenance field. Copy values only from
+`allowed_belief_revision_transcript_references` in the planning data, and leave
+the field empty when the chapter does not use a recorded belief revision.
+
 Explain the overall narrative or argument arc. A chapter must exist because it
 advances the reader's understanding, not merely because source material exists.
 
@@ -129,6 +158,12 @@ Call `submit_book_manifest` exactly once with the complete proposal. Use the
 exact review, claim, receipt, transcript, and chapter identifiers supplied or
 required by the contract. Copy the human-approved curiosity signature exactly;
 the tool rejects planner-authored substitutions.
+
+When revising a previously approved plan, preserve its central question,
+curiosity signature, scope, exclusions, chapter structure, dependencies, claim
+mappings, and intellectual progression unless the human revision request
+explicitly asks for one of those to change. A readiness-only revision must not
+quietly rewrite the approved book.
 
 The MCP tool validates provenance and writes:
 

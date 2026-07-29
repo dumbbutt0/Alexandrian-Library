@@ -1,24 +1,14 @@
-# Captured chats may contain private information and should stay local.
-data/conversations/*.jsonl
+# Conversations, receipts, research, books, settings, and approvals are private
+# runtime state. Public examples belong under a separately reviewed examples/
+# directory, never under data/.
+data/
 
-# Pre-book reviews may contain private conversation material.
-data/reviews/*.md
-data/reviews/*.json
+# Host-specific Codex configuration contains local executable and clone paths.
+.codex/config.toml
 
-# Bounded source excerpts remain local research evidence.
-data/evidence/
-
-# Source approvals and human book-planning decisions are local review state.
-data/review_sessions/*.json
-data/review_decisions/*.json
-
-# Book plans and approvals may contain private research material.
-data/books/
-
-# Promoted knowledge may contain private conversations and research.
-data/knowledge/
-
-# Backend selection is local runtime state.
-data/settings.json
+# Learning Time is an optional sibling development project, not a Library
+# runtime dependency.
+.agents/skills/learning-time
 
 __pycache__/
+.venv/

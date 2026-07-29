@@ -6,6 +6,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+import book_synthesis
+
 
 class BookAssemblyError(RuntimeError):
     """Reject an incomplete, changed, or internally inconsistent book."""
@@ -80,6 +82,19 @@ def numeric_record_paths(directory: Path, prefix: str) -> list[Path]:
     return sorted(paths, key=lambda item: int(item.stem[len(prefix) :]))
 
 
+def chapter_is_draft_ready(chapter: dict) -> bool:
+    """Apply an explicit V1.2 draft gate or legacy readiness."""
+    draft_gate = chapter.get("draft_gate")
+    if draft_gate is not None:
+        if draft_gate not in {"ready", "blocked"}:
+            raise BookAssemblyError(
+                f"{chapter.get('chapter_id', 'Unknown chapter')} has an "
+                "invalid draft gate."
+            )
+        return draft_gate == "ready"
+    return chapter.get("readiness") == "ready_to_draft"
+
+
 def required_chapters(manifest: dict) -> list[dict]:
     """Select included chapters and reject unresolved planned material."""
     chapter_plan = manifest.get("chapter_plan")
@@ -93,7 +108,7 @@ def required_chapters(manifest: dict) -> list[dict]:
         disposition = chapter.get("material_disposition")
         if disposition not in {"include", "appendix"}:
             continue
-        if chapter.get("readiness") != "ready_to_draft":
+        if not chapter_is_draft_ready(chapter):
             raise BookAssemblyError(
                 f"{chapter.get('chapter_id', 'Unknown chapter')} is included "
                 "but is not ready to draft."
@@ -552,49 +567,50 @@ def render_book(
     return "\n".join(lines).rstrip() + "\n"
 
 
-def verify_existing_assembly(
+def verify_existing_candidate(
     project_path: Path,
     book_directory: Path,
     book_id: str,
 ) -> dict | None:
-    """Return an unchanged valid assembly, or reject partial/stale output."""
-    book_path = book_directory / "book.md"
-    receipt_path = book_directory / "assembly.json"
-    if not book_path.exists() and not receipt_path.exists():
+    """Return an unchanged candidate, or reject partial or stale output."""
+    candidate_path = book_directory / "candidate.md"
+    receipt_path = book_directory / "candidate_assembly.json"
+    if not candidate_path.exists() and not receipt_path.exists():
         return None
-    if not book_path.is_file() or not receipt_path.is_file():
-        raise BookAssemblyError("Existing book assembly is incomplete.")
-    receipt = read_json_object(receipt_path, "Book assembly receipt")
+    if not candidate_path.is_file() or not receipt_path.is_file():
+        raise BookAssemblyError("Existing candidate assembly is incomplete.")
+    receipt = read_json_object(receipt_path, "Candidate assembly receipt")
     if (
         receipt.get("book_id") != book_id
-        or receipt.get("book_sha256") != file_sha256(book_path)
+        or receipt.get("lifecycle_status") != "candidate"
+        or receipt.get("candidate_sha256") != file_sha256(candidate_path)
         or not isinstance(receipt.get("inputs"), list)
     ):
-        raise BookAssemblyError("Existing book assembly receipt is invalid.")
+        raise BookAssemblyError("Existing candidate assembly receipt is invalid.")
     for record in receipt["inputs"]:
         if not isinstance(record, dict):
-            raise BookAssemblyError("Existing assembly input record is invalid.")
+            raise BookAssemblyError("Existing candidate input record is invalid.")
         path = resolve_project_file(
             project_path,
             record.get("path"),
             project_path,
-            "Existing assembly input",
+            "Existing candidate input",
         )
         if file_sha256(path) != record.get("sha256"):
             raise BookAssemblyError(
-                "A canonical input changed after the book was assembled."
+                "A canonical input changed after the candidate was assembled."
             )
     return receipt
 
 
-def assemble_book(project_path: Path, book_id: str) -> dict:
-    """Create one immutable, deterministic book from completed chapters."""
+def assemble_candidate_book(project_path: Path, book_id: str) -> dict:
+    """Create one immutable, deterministic candidate from completed chapters."""
     project_path = project_path.resolve()
     book_directory = project_path / "data" / "books" / book_id
     if not book_directory.is_dir():
         raise BookAssemblyError(f"Book does not exist: {book_id}")
 
-    existing = verify_existing_assembly(
+    existing = verify_existing_candidate(
         project_path,
         book_directory,
         book_id,
@@ -719,14 +735,14 @@ def assemble_book(project_path: Path, book_id: str) -> dict:
     assembled_at = current_utc_time()
     receipt = {
         "schema_version": "1.0",
-        "assembly_id": f"assembly-{book_id}",
+        "assembly_id": f"candidate-{book_id}",
         "book_id": book_id,
         "assembled_at": assembled_at,
-        "lifecycle_status": "assembled",
-        "book_path": str(
-            (book_directory / "book.md").relative_to(project_path)
+        "lifecycle_status": "candidate",
+        "candidate_path": str(
+            (book_directory / "candidate.md").relative_to(project_path)
         ),
-        "book_sha256": book_sha256,
+        "candidate_sha256": book_sha256,
         "chapter_count": len(chapters),
         "chapters": [
             {
@@ -750,14 +766,388 @@ def assemble_book(project_path: Path, book_id: str) -> dict:
         "inputs": inputs,
     }
 
+    candidate_path = book_directory / "candidate.md"
+    receipt_path = book_directory / "candidate_assembly.json"
+    suffix = f".tmp-{uuid.uuid4().hex}"
+    temporary_book = candidate_path.with_name(candidate_path.name + suffix)
+    temporary_receipt = receipt_path.with_name(receipt_path.name + suffix)
+    installed_book = False
+    try:
+        temporary_book.write_text(markdown, encoding="utf-8")
+        temporary_receipt.write_text(
+            json.dumps(receipt, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary_book, candidate_path)
+        installed_book = True
+        os.replace(temporary_receipt, receipt_path)
+    except OSError as error:
+        temporary_book.unlink(missing_ok=True)
+        temporary_receipt.unlink(missing_ok=True)
+        if installed_book:
+            candidate_path.unlink(missing_ok=True)
+        raise BookAssemblyError("Candidate book could not be saved.") from error
+
+    return receipt
+
+
+def load_editorial_decision(
+    book_directory: Path,
+    book_id: str,
+    candidate_sha256: str,
+    synthesis_receipt: dict | None = None,
+) -> tuple[Path, dict]:
+    """Load the decision bound to the current candidate and audited edition."""
+    decision_path = book_directory / "editorial_review.json"
+    decision = read_json_object(decision_path, "Editorial review decision")
+    if (
+        decision.get("schema_version") != "1.0"
+        or decision.get("book_id") != book_id
+        or decision.get("candidate_sha256") != candidate_sha256
+        or decision.get("candidate_assembly_sha256")
+        != file_sha256(book_directory / "candidate_assembly.json")
+        or decision.get("decision")
+        not in {
+            "approved_for_finalization",
+            "needs_chapter_revision",
+            "hold",
+        }
+        or not isinstance(decision.get("notes"), list)
+        or not isinstance(decision.get("chapter_revisions"), list)
+        or not isinstance(decision.get("decided_at"), str)
+        or any(
+            not isinstance(note, str) or not note.strip()
+            for note in decision.get("notes", [])
+        )
+    ):
+        raise BookAssemblyError(
+            "Editorial review does not match the current candidate."
+        )
+    if synthesis_receipt is not None and (
+        synthesis_receipt.get("book_id") != book_id
+        or synthesis_receipt.get("candidate_sha256") != candidate_sha256
+        or synthesis_receipt.get("lifecycle_status") != "ready_for_editorial"
+        or decision.get("synthesis_receipt_path")
+        != str(
+            (
+                book_directory / "synthesis" / "receipt.json"
+            ).relative_to(book_directory.parents[2])
+        )
+        or decision.get("synthesis_receipt_sha256")
+        != file_sha256(book_directory / "synthesis" / "receipt.json")
+        or decision.get("edition_path") != synthesis_receipt.get("book_path")
+        or decision.get("edition_sha256") != synthesis_receipt.get("book_sha256")
+        or decision.get("synthesis_attempt")
+        != synthesis_receipt.get("selected_attempt")
+    ):
+        raise BookAssemblyError(
+            "Editorial review does not match the audited synthesized edition."
+        )
+    revisions = decision["chapter_revisions"]
+    revision_ids = []
+    for revision in revisions:
+        if (
+            not isinstance(revision, dict)
+            or not isinstance(revision.get("chapter_id"), str)
+            or not isinstance(revision.get("instructions"), list)
+            or not revision["instructions"]
+            or any(
+                not isinstance(instruction, str) or not instruction.strip()
+                for instruction in revision["instructions"]
+            )
+        ):
+            raise BookAssemblyError(
+                "Editorial chapter revision request is invalid."
+            )
+        revision_ids.append(revision["chapter_id"])
+    if len(revision_ids) != len(set(revision_ids)):
+        raise BookAssemblyError(
+            "Editorial review repeats a chapter revision target."
+        )
+    if (
+        decision["decision"] == "needs_chapter_revision"
+        and not revisions
+    ):
+        raise BookAssemblyError(
+            "Editorial revision requires at least one chapter target."
+        )
+    if (
+        decision["decision"] != "needs_chapter_revision"
+        and revisions
+    ):
+        raise BookAssemblyError(
+            "Only a revision decision may contain chapter revisions."
+        )
+    return decision_path, decision
+
+
+def editorial_history_directories(book_directory: Path) -> list[Path]:
+    """Return preserved candidate review cycles in numeric order."""
+    history_directory = book_directory / "editorial_history"
+    versions = []
+    for path in history_directory.glob("v[0-9][0-9][0-9]"):
+        if path.is_dir():
+            versions.append(path)
+    return sorted(versions)
+
+
+def archive_candidate_for_revision(
+    project_path: Path,
+    book_id: str,
+) -> tuple[Path, dict]:
+    """Archive one rejected candidate and its human review atomically."""
+    project_path = project_path.resolve()
+    book_directory = project_path / "data" / "books" / book_id
+    candidate = verify_existing_candidate(
+        project_path,
+        book_directory,
+        book_id,
+    )
+    if candidate is None:
+        raise BookAssemblyError("No candidate exists for editorial revision.")
+    try:
+        synthesis_receipt = book_synthesis.verify_receipt(
+            project_path,
+            book_id,
+            candidate["candidate_sha256"],
+        )
+    except book_synthesis.BookSynthesisError as error:
+        raise BookAssemblyError(str(error)) from error
+    _, decision = load_editorial_decision(
+        book_directory,
+        book_id,
+        candidate["candidate_sha256"],
+        synthesis_receipt,
+    )
+    if decision["decision"] != "needs_chapter_revision":
+        raise BookAssemblyError(
+            "Candidate was not returned for chapter revision."
+        )
+    candidate_chapter_ids = {
+        chapter.get("chapter_id")
+        for chapter in candidate.get("chapters", [])
+        if isinstance(chapter, dict)
+    }
+    requested_chapter_ids = {
+        revision["chapter_id"]
+        for revision in decision["chapter_revisions"]
+    }
+    if not requested_chapter_ids.issubset(candidate_chapter_ids):
+        raise BookAssemblyError(
+            "Editorial review targets a chapter outside the candidate."
+        )
+
+    history_directory = book_directory / "editorial_history"
+    history_directory.mkdir(parents=True, exist_ok=True)
+    version = len(editorial_history_directories(book_directory)) + 1
+    destination = history_directory / f"v{version:03d}"
+    if destination.exists():
+        raise BookAssemblyError("Editorial history version already exists.")
+    staging = history_directory / f".tmp-{uuid.uuid4().hex}"
+    staging.mkdir()
+    sources = (
+        book_directory / "candidate.md",
+        book_directory / "candidate_assembly.json",
+        book_directory / "synthesis",
+        book_directory / "editorial_review.json",
+    )
+    moved = []
+    try:
+        for source in sources:
+            target = staging / source.name
+            os.replace(source, target)
+            moved.append((source, target))
+        os.replace(staging, destination)
+    except OSError as error:
+        for source, target in reversed(moved):
+            if target.exists() and not source.exists():
+                os.replace(target, source)
+        try:
+            staging.rmdir()
+        except OSError:
+            pass
+        raise BookAssemblyError(
+            "Candidate editorial cycle could not be archived."
+        ) from error
+    return destination, decision
+
+
+def verify_existing_assembly(
+    project_path: Path,
+    book_directory: Path,
+    book_id: str,
+) -> dict | None:
+    """Return an unchanged human-approved final book."""
     book_path = book_directory / "book.md"
     receipt_path = book_directory / "assembly.json"
+    if not book_path.exists() and not receipt_path.exists():
+        return None
+    if not book_path.is_file() or not receipt_path.is_file():
+        raise BookAssemblyError("Existing final assembly is incomplete.")
+    receipt = read_json_object(receipt_path, "Final assembly receipt")
+    candidate = verify_existing_candidate(
+        project_path,
+        book_directory,
+        book_id,
+    )
+    if candidate is None:
+        raise BookAssemblyError("Final book has no preserved candidate.")
+    if receipt.get("schema_version") == "1.0":
+        decision_path, decision = load_editorial_decision(
+            book_directory,
+            book_id,
+            candidate["candidate_sha256"],
+        )
+        if (
+            decision.get("decision") != "approved_for_finalization"
+            or receipt.get("book_id") != book_id
+            or receipt.get("lifecycle_status") != "final"
+            or receipt.get("book_sha256") != file_sha256(book_path)
+            or receipt.get("book_sha256") != candidate["candidate_sha256"]
+            or receipt.get("candidate_sha256")
+            != candidate["candidate_sha256"]
+            or receipt.get("editorial_review_sha256")
+            != file_sha256(decision_path)
+        ):
+            raise BookAssemblyError(
+                "Existing legacy final assembly receipt is invalid."
+            )
+        return receipt
+
+    try:
+        synthesis_receipt = book_synthesis.verify_receipt(
+            project_path,
+            book_id,
+            candidate["candidate_sha256"],
+        )
+    except book_synthesis.BookSynthesisError as error:
+        raise BookAssemblyError(str(error)) from error
+    decision_path, decision = load_editorial_decision(
+        book_directory,
+        book_id,
+        candidate["candidate_sha256"],
+        synthesis_receipt,
+    )
+    synthesis_receipt_path = book_directory / "synthesis" / "receipt.json"
+    if (
+        receipt.get("schema_version") != "1.1"
+        or decision.get("decision") != "approved_for_finalization"
+        or receipt.get("book_id") != book_id
+        or receipt.get("lifecycle_status") != "final"
+        or receipt.get("book_sha256") != file_sha256(book_path)
+        or receipt.get("book_sha256") != synthesis_receipt["book_sha256"]
+        or receipt.get("candidate_sha256") != candidate["candidate_sha256"]
+        or receipt.get("synthesis_receipt_file_sha256")
+        != file_sha256(synthesis_receipt_path)
+        or receipt.get("synthesis_receipt_sha256")
+        != synthesis_receipt["receipt_sha256"]
+        or receipt.get("synthesis_attempt")
+        != synthesis_receipt["selected_attempt"]
+        or receipt.get("editorial_review_sha256")
+        != file_sha256(decision_path)
+    ):
+        raise BookAssemblyError("Existing final assembly receipt is invalid.")
+    return receipt
+
+
+def finalize_book(project_path: Path, book_id: str) -> dict:
+    """Promote one approved candidate into the immutable final book."""
+    project_path = project_path.resolve()
+    book_directory = project_path / "data" / "books" / book_id
+    if not book_directory.is_dir():
+        raise BookAssemblyError(f"Book does not exist: {book_id}")
+    existing = verify_existing_assembly(
+        project_path,
+        book_directory,
+        book_id,
+    )
+    if existing is not None:
+        return existing
+
+    candidate = verify_existing_candidate(
+        project_path,
+        book_directory,
+        book_id,
+    )
+    if candidate is None:
+        raise BookAssemblyError("No candidate book exists for finalization.")
+    try:
+        synthesis_receipt = book_synthesis.verify_receipt(
+            project_path,
+            book_id,
+            candidate["candidate_sha256"],
+        )
+    except book_synthesis.BookSynthesisError as error:
+        raise BookAssemblyError(str(error)) from error
+    if synthesis_receipt["lifecycle_status"] != "ready_for_editorial":
+        raise BookAssemblyError(
+            "Book synthesis has not passed its independent audit."
+        )
+    decision_path, decision = load_editorial_decision(
+        book_directory,
+        book_id,
+        candidate["candidate_sha256"],
+        synthesis_receipt,
+    )
+    if decision.get("decision") != "approved_for_finalization":
+        raise BookAssemblyError(
+            "Candidate book has not received final human approval."
+        )
+
+    candidate_path = book_directory / "candidate.md"
+    candidate_receipt_path = book_directory / "candidate_assembly.json"
+    synthesis_receipt_path = book_directory / "synthesis" / "receipt.json"
+    synthesized_book_path = resolve_project_file(
+        project_path,
+        synthesis_receipt["book_path"],
+        book_directory / "synthesis",
+        "Synthesized edition",
+    )
+    book_path = book_directory / "book.md"
+    receipt_path = book_directory / "assembly.json"
+    receipt = {
+        "schema_version": "1.1",
+        "assembly_id": f"assembly-{book_id}",
+        "book_id": book_id,
+        "assembled_at": current_utc_time(),
+        "lifecycle_status": "final",
+        "book_path": str(book_path.relative_to(project_path)),
+        "book_sha256": synthesis_receipt["book_sha256"],
+        "candidate_path": str(candidate_path.relative_to(project_path)),
+        "candidate_sha256": candidate["candidate_sha256"],
+        "candidate_assembly_path": str(
+            candidate_receipt_path.relative_to(project_path)
+        ),
+        "candidate_assembly_sha256": file_sha256(candidate_receipt_path),
+        "synthesis_receipt_path": str(
+            synthesis_receipt_path.relative_to(project_path)
+        ),
+        "synthesis_receipt_file_sha256": file_sha256(
+            synthesis_receipt_path
+        ),
+        "synthesis_receipt_sha256": synthesis_receipt["receipt_sha256"],
+        "synthesis_attempt": synthesis_receipt["selected_attempt"],
+        "synthesis_context_sha256": synthesis_receipt["context_sha256"],
+        "synthesis_inventory_sha256": synthesis_receipt["inventory_sha256"],
+        "synthesis_plan_sha256": synthesis_receipt["plan_sha256"],
+        "synthesis_audit_sha256": synthesis_receipt["audit_sha256"],
+        "publication_profile": synthesis_receipt["profile"],
+        "editorial_review_path": str(
+            decision_path.relative_to(project_path)
+        ),
+        "editorial_review_sha256": file_sha256(decision_path),
+        "chapter_count": candidate["chapter_count"],
+        "chapters": candidate["chapters"],
+        "source_count": candidate["source_count"],
+        "source_receipt_ids": candidate["source_receipt_ids"],
+    }
+
     suffix = f".tmp-{uuid.uuid4().hex}"
     temporary_book = book_path.with_name(book_path.name + suffix)
     temporary_receipt = receipt_path.with_name(receipt_path.name + suffix)
     installed_book = False
     try:
-        temporary_book.write_text(markdown, encoding="utf-8")
+        temporary_book.write_bytes(synthesized_book_path.read_bytes())
         temporary_receipt.write_text(
             json.dumps(receipt, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
@@ -771,5 +1161,4 @@ def assemble_book(project_path: Path, book_id: str) -> dict:
         if installed_book:
             book_path.unlink(missing_ok=True)
         raise BookAssemblyError("Final book could not be saved.") from error
-
     return receipt

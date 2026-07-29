@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://alexandrian-library.local/schemas/synthesis-global-plan-audit.v1.schema.json",
+  "title": "Alexandrian sharded global plan audit",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "book_id",
+    "context_sha256",
+    "inventory_sha256",
+    "merged_plan_sha256",
+    "findings",
+    "verdict"
+  ],
+  "properties": {
+    "book_id": {
+      "type": "string",
+      "pattern": "^book-[A-Za-z0-9._-]+$"
+    },
+    "context_sha256": {"$ref": "#/$defs/sha256"},
+    "inventory_sha256": {"$ref": "#/$defs/sha256"},
+    "merged_plan_sha256": {"$ref": "#/$defs/sha256"},
+    "findings": {
+      "type": "array",
+      "minItems": 7,
+      "maxItems": 7,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["question_id", "status", "explanation"],
+        "properties": {
+          "question_id": {"type": "string", "minLength": 1},
+          "status": {"type": "string", "enum": ["pass", "fail"]},
+          "explanation": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "verdict": {"type": "string", "enum": ["approve", "reject"]}
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

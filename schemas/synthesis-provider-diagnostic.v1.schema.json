@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://alexandrian-library.local/schemas/synthesis-provider-diagnostic.v1.schema.json",
+  "title": "Alexandrian staged provider diagnostic",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "book_id",
+    "cycle_id",
+    "action_id",
+    "stage",
+    "backend",
+    "provider_call_number",
+    "classification",
+    "target_path",
+    "target_created",
+    "assistant_message",
+    "assistant_message_truncated",
+    "assistant_message_sha256",
+    "provider_error",
+    "tool_calls",
+    "tool_errors",
+    "raw_events_stored",
+    "hidden_reasoning_stored",
+    "recorded_at",
+    "diagnostic_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "book_id": {
+      "type": "string",
+      "pattern": "^book-[A-Za-z0-9._-]+$"
+    },
+    "cycle_id": {
+      "type": "string",
+      "pattern": "^cycle-[0-9]{3,}$"
+    },
+    "action_id": {"type": "string", "minLength": 1},
+    "stage": {"type": "string", "minLength": 1},
+    "backend": {"enum": ["codex", "claude"]},
+    "provider_call_number": {"type": "integer", "minimum": 1},
+    "classification": {
+      "enum": [
+        "tool_permission_denied",
+        "tool_validation_rejected",
+        "provider_timeout",
+        "provider_returned_without_submission",
+        "artifact_reconciliation_failed",
+        "provider_returned_without_artifact"
+      ]
+    },
+    "target_path": {"type": "string", "minLength": 1},
+    "target_created": {"type": "boolean"},
+    "assistant_message": {"type": "string", "maxLength": 4000},
+    "assistant_message_truncated": {"type": "boolean"},
+    "assistant_message_sha256": {"$ref": "#/$defs/sha256"},
+    "provider_error": {
+      "type": ["string", "null"],
+      "maxLength": 2000
+    },
+    "tool_calls": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["tool_name", "status"],
+        "properties": {
+          "tool_name": {"type": "string", "minLength": 1},
+          "status": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "tool_errors": {
+      "type": "array",
+      "items": {"type": "string", "maxLength": 2000}
+    },
+    "raw_events_stored": {"const": false},
+    "hidden_reasoning_stored": {"const": false},
+    "recorded_at": {"type": "string", "minLength": 1},
+    "diagnostic_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}
