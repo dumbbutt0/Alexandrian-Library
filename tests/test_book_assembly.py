@@ -6,6 +6,7 @@ from pathlib import Path
 
 import book_assembler
 import book_synthesis
+import bookshelf
 
 
 class BookAssemblyTests(unittest.TestCase):
@@ -556,6 +557,109 @@ class BookAssemblyTests(unittest.TestCase):
             ),
             final,
         )
+
+        knowledge_path = self.project_path / "data" / "knowledge"
+        self.write_json(
+            knowledge_path / "graph.json",
+            {
+                "schema_version": "1.0",
+                "generated_at": "2026-01-02T00:00:00+00:00",
+                "nodes": [
+                    {
+                        "id": "ki-assembly-test-question",
+                        "type": "core_question",
+                        "title": "Can completed research remain verifiable?",
+                        "summary": "Preserve the final synthesis lineage.",
+                        "status": "active",
+                        "path": (
+                            "nodes/review-assembly-test/"
+                            "ki-assembly-test-question.md"
+                        ),
+                        "source_review_ids": [self.review_id],
+                        "claim_ids": [],
+                        "source_receipt_ids": ["SRC1"],
+                        "transcript_references": [],
+                    }
+                ],
+                "edges": [],
+            },
+        )
+        shelf = bookshelf.build_bookshelf(
+            self.project_path,
+            knowledge_path=knowledge_path,
+        )
+        catalog = json.loads(
+            shelf["catalog_path"].read_text(encoding="utf-8")
+        )
+        self.assertEqual(catalog["book_count"], 1)
+        self.assertEqual(
+            catalog["books"][0]["book_sha256"],
+            synthesis_receipt["book_sha256"],
+        )
+        self.assertNotEqual(
+            catalog["books"][0]["book_sha256"],
+            candidate["candidate_sha256"],
+        )
+
+        assembly_path = self.book_directory / "assembly.json"
+        editorial_path = self.book_directory / "editorial_review.json"
+        approved_assembly = assembly_path.read_bytes()
+        approved_editorial = editorial_path.read_bytes()
+        editorial = json.loads(approved_editorial)
+        editorial["edition_sha256"] = candidate["candidate_sha256"]
+        self.write_json(editorial_path, editorial)
+        assembly = json.loads(approved_assembly)
+        assembly["editorial_review_sha256"] = hashlib.sha256(
+            editorial_path.read_bytes()
+        ).hexdigest()
+        self.write_json(assembly_path, assembly)
+        with self.assertRaisesRegex(
+            bookshelf.BookshelfError,
+            "Human approval does not match the final edition",
+        ):
+            bookshelf.build_bookshelf(
+                self.project_path,
+                knowledge_path=knowledge_path,
+            )
+        editorial_path.write_bytes(approved_editorial)
+        assembly_path.write_bytes(approved_assembly)
+
+        assembly = json.loads(approved_assembly)
+        assembly["synthesis_receipt_sha256"] = "0" * 64
+        self.write_json(assembly_path, assembly)
+        with self.assertRaisesRegex(
+            bookshelf.BookshelfError,
+            "Final assembly does not match its audited synthesis",
+        ):
+            bookshelf.build_bookshelf(
+                self.project_path,
+                knowledge_path=knowledge_path,
+            )
+        assembly_path.write_bytes(approved_assembly)
+
+        final_book_path = self.book_directory / "book.md"
+        approved_final = final_book_path.read_bytes()
+        final_book_path.write_text("# Tampered final edition\n", encoding="utf-8")
+        with self.assertRaisesRegex(
+            bookshelf.BookshelfError,
+            "Final book hash does not match",
+        ):
+            bookshelf.build_bookshelf(
+                self.project_path,
+                knowledge_path=knowledge_path,
+            )
+        final_book_path.write_bytes(approved_final)
+
+        candidate_path = self.book_directory / "candidate.md"
+        candidate_path.write_text("# Tampered candidate\n", encoding="utf-8")
+        with self.assertRaisesRegex(
+            bookshelf.BookshelfError,
+            "Candidate book hash does not match",
+        ):
+            bookshelf.build_bookshelf(
+                self.project_path,
+                knowledge_path=knowledge_path,
+            )
 
     def test_revision_archives_candidate_and_human_decision(self) -> None:
         candidate = book_assembler.assemble_candidate_book(

@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import book_synthesis
+
 
 class BookshelfError(RuntimeError):
     """Reject a corrupt final book or an invalid bookshelf projection."""
@@ -172,6 +174,66 @@ def validate_chapters(assembly: dict) -> list[dict]:
     return projected
 
 
+def verify_synthesized_final(
+    project_path: Path,
+    book_directory: Path,
+    assembly: dict,
+    candidate_assembly: dict,
+) -> dict:
+    """Verify a schema 1.1 final against its canonical synthesis chain."""
+    book_id = assembly["book_id"]
+    receipt_path = resolve_recorded_file(
+        project_path,
+        assembly.get("synthesis_receipt_path"),
+        book_directory / "synthesis",
+        "Synthesis receipt",
+    )
+    expected_receipt_path = book_directory / "synthesis" / "receipt.json"
+    if receipt_path != expected_receipt_path.resolve():
+        raise BookshelfError(
+            f"Synthesis receipt is not canonical for {book_id}."
+        )
+    verify_recorded_hash(
+        receipt_path,
+        assembly.get("synthesis_receipt_file_sha256"),
+        "Synthesis receipt",
+    )
+    try:
+        receipt = book_synthesis.verify_receipt(
+            project_path,
+            book_id,
+            candidate_assembly["candidate_sha256"],
+        )
+    except book_synthesis.BookSynthesisError as error:
+        raise BookshelfError(
+            f"Synthesis receipt is invalid for {book_id}: {error}"
+        ) from error
+
+    expected_bindings = {
+        "book_id": receipt.get("book_id"),
+        "book_sha256": receipt.get("book_sha256"),
+        "candidate_sha256": receipt.get("candidate_sha256"),
+        "synthesis_receipt_sha256": receipt.get("receipt_sha256"),
+        "synthesis_attempt": receipt.get("selected_attempt"),
+        "synthesis_context_sha256": receipt.get("context_sha256"),
+        "synthesis_inventory_sha256": receipt.get("inventory_sha256"),
+        "synthesis_plan_sha256": receipt.get("plan_sha256"),
+        "synthesis_audit_sha256": receipt.get("audit_sha256"),
+        "publication_profile": receipt.get("profile"),
+    }
+    if (
+        receipt.get("lifecycle_status") != "ready_for_editorial"
+        or any(
+            assembly.get(field) != expected
+            for field, expected in expected_bindings.items()
+        )
+    ):
+        raise BookshelfError(
+            f"Final assembly does not match its audited synthesis for {book_id}."
+        )
+    return receipt
+
+
 def project_final_book(
     project_path: Path,
     books_path: Path,
@@ -246,14 +308,32 @@ def project_final_book(
         candidate_assembly.get("candidate_sha256"),
         "Candidate book",
     )
-    if (
-        assembly.get("candidate_path")
-        != candidate_assembly.get("candidate_path")
-        or assembly.get("book_sha256")
-        != candidate_assembly.get("candidate_sha256")
+    if assembly.get("candidate_path") != candidate_assembly.get(
+        "candidate_path"
     ):
         raise BookshelfError(
-            f"Final book does not match its approved candidate for {book_id}."
+            f"Final assembly does not preserve its candidate for {book_id}."
+        )
+    schema_version = assembly.get("schema_version")
+    synthesis_receipt = None
+    if schema_version == "1.0":
+        if (
+            assembly.get("book_sha256")
+            != candidate_assembly.get("candidate_sha256")
+        ):
+            raise BookshelfError(
+                f"Final book does not match its approved candidate for {book_id}."
+            )
+    elif schema_version == "1.1":
+        synthesis_receipt = verify_synthesized_final(
+            project_path,
+            book_directory,
+            assembly,
+            candidate_assembly,
+        )
+    else:
+        raise BookshelfError(
+            f"Final assembly schema is unsupported for {book_id}."
         )
 
     editorial_path = resolve_recorded_file(
@@ -277,6 +357,19 @@ def project_final_book(
     ):
         raise BookshelfError(
             f"Final assembly lacks matching human approval for {book_id}."
+        )
+    if synthesis_receipt is not None and (
+        editorial.get("synthesis_receipt_path")
+        != assembly.get("synthesis_receipt_path")
+        or editorial.get("synthesis_receipt_sha256")
+        != assembly.get("synthesis_receipt_file_sha256")
+        or editorial.get("edition_path") != synthesis_receipt.get("book_path")
+        or editorial.get("edition_sha256") != assembly.get("book_sha256")
+        or editorial.get("synthesis_attempt")
+        != assembly.get("synthesis_attempt")
+    ):
+        raise BookshelfError(
+            f"Human approval does not match the final edition for {book_id}."
         )
 
     manifest_record = manifest_input(candidate_assembly)
