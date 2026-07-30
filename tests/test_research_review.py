@@ -1147,6 +1147,132 @@ class ResearchReviewTests(unittest.TestCase):
             {backend_selector.CHAPTER_DEVELOPMENT_CALL: 1},
         )
 
+    def test_chapter_attempt_is_committed_before_process_dispatch(
+        self,
+    ) -> None:
+        ledger = chapter_controller.ChapterEventLedger(
+            self.project_path / "CH1-write-ahead.controller.jsonl"
+        )
+        snapshot = chapter_controller.ChapterSnapshot(
+            book_id="book-test",
+            chapter_id="CH1",
+            legacy_status="active",
+            developer_calls=0,
+            evaluator_calls=0,
+            researcher_calls=0,
+            call_limit=2,
+            workspace_exists=False,
+            matching_assessment_exists=False,
+            assessment_outcome=None,
+            human_input_exists=False,
+            closeout_authorized=False,
+            recovery_kind=None,
+            final_closeout_pending=False,
+            source_requests_pending=False,
+        )
+        decision = chapter_controller.decide_next_action(snapshot)
+        contract = ledger.open_contract(snapshot, decision)
+        ledger.mark_started(contract["contract_id"])
+        process = Mock(pid=123, returncode=0)
+        process.communicate.return_value = (
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "agent_message",
+                        "text": "Chapter response.",
+                    },
+                }
+            ),
+            "",
+        )
+
+        def observe_dispatch(*_args, **_kwargs):
+            self.assertEqual(
+                ledger.provider_call_counts(contract["contract_id"]),
+                {backend_selector.CHAPTER_DEVELOPMENT_CALL: 1},
+            )
+            return process
+
+        token = backend_selector.ACTIVE_CHAPTER_CONTRACT.set(
+            (ledger.path, contract["contract_id"])
+        )
+        try:
+            with patch.object(
+                backend_selector.subprocess,
+                "Popen",
+                side_effect=observe_dispatch,
+            ):
+                backend_selector.capture_backend_response(
+                    "codex",
+                    "/usr/bin/codex",
+                    "Chapter prompt",
+                    backend_selector.CHAPTER_DEVELOPMENT_CALL,
+                )
+        finally:
+            backend_selector.ACTIVE_CHAPTER_CONTRACT.reset(token)
+
+        self.assertEqual(
+            ledger.provider_call_counts(contract["contract_id"]),
+            {backend_selector.CHAPTER_DEVELOPMENT_CALL: 1},
+        )
+
+    def test_chapter_process_launch_failure_keeps_attempt_consumed(
+        self,
+    ) -> None:
+        ledger = chapter_controller.ChapterEventLedger(
+            self.project_path / "CH1-launch-failure.controller.jsonl"
+        )
+        snapshot = chapter_controller.ChapterSnapshot(
+            book_id="book-test",
+            chapter_id="CH1",
+            legacy_status="active",
+            developer_calls=0,
+            evaluator_calls=0,
+            researcher_calls=0,
+            call_limit=2,
+            workspace_exists=False,
+            matching_assessment_exists=False,
+            assessment_outcome=None,
+            human_input_exists=False,
+            closeout_authorized=False,
+            recovery_kind=None,
+            final_closeout_pending=False,
+            source_requests_pending=False,
+        )
+        decision = chapter_controller.decide_next_action(snapshot)
+        contract = ledger.open_contract(snapshot, decision)
+        ledger.mark_started(contract["contract_id"])
+        token = backend_selector.ACTIVE_CHAPTER_CONTRACT.set(
+            (ledger.path, contract["contract_id"])
+        )
+        try:
+            with (
+                patch.object(
+                    backend_selector.subprocess,
+                    "Popen",
+                    side_effect=OSError("process launch failed"),
+                ),
+                self.assertRaisesRegex(OSError, "process launch failed"),
+            ):
+                backend_selector.capture_backend_response(
+                    "claude",
+                    "/usr/bin/claude",
+                    "Chapter prompt",
+                    backend_selector.CHAPTER_DEVELOPMENT_CALL,
+                )
+        finally:
+            backend_selector.ACTIVE_CHAPTER_CONTRACT.reset(token)
+
+        self.assertEqual(
+            ledger.provider_call_counts(contract["contract_id"]),
+            {backend_selector.CHAPTER_DEVELOPMENT_CALL: 1},
+        )
+        self.assertEqual(
+            ledger.interrupted_contract_id(),
+            contract["contract_id"],
+        )
+
     def test_conversation_backend_call_has_no_timeout(self) -> None:
         process = Mock(
             pid=123,

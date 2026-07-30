@@ -516,6 +516,7 @@ class ChapterEventLedger:
         contract_id: str,
         call_kind: str,
     ) -> dict:
+        """Commit one provider attempt before the process is dispatched."""
         events = self.read()
         contract = self._require_active_started(contract_id, events)
         used = sum(

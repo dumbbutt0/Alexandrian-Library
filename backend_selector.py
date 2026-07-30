@@ -1876,16 +1876,6 @@ def capture_backend_response(
         process_environment = os.environ.copy()
         if environment_overrides:
             process_environment.update(environment_overrides)
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            stdin=subprocess.DEVNULL,
-            text=True,
-            cwd=PROJECT_PATH,
-            start_new_session=True,
-            env=process_environment,
-        )
         active_ledger = active_chapter_ledger()
         if (
             active_ledger is not None
@@ -1897,18 +1887,20 @@ def capture_backend_response(
             }
         ):
             ledger, contract_id = active_ledger
-            try:
-                ledger.acknowledge_provider_call(
-                    contract_id,
-                    call_purpose,
-                )
-            except Exception:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                process.communicate()
-                raise
+            ledger.acknowledge_provider_call(
+                contract_id,
+                call_purpose,
+            )
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            cwd=PROJECT_PATH,
+            start_new_session=True,
+            env=process_environment,
+        )
         stdout, stderr = process.communicate(timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
         if process is not None:
