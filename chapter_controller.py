@@ -522,6 +522,63 @@ class ChapterEventLedger:
             },
         )
 
+    def record_provider_error_recovered(
+        self,
+        contract_id: str,
+        call_kind: str,
+        failure_kind: str,
+        message: str,
+    ) -> dict:
+        """Record a provider failure whose exact artifact result was accepted."""
+        events = self.read()
+        self._require_active_started(contract_id, events)
+        return self.append(
+            "provider_error_recovered",
+            {
+                "contract_id": contract_id,
+                "call_kind": call_kind,
+                "failure_kind": failure_kind,
+                "message": message,
+            },
+        )
+
+    def require_artifact_review(
+        self,
+        contract_id: str,
+        call_kind: str,
+        failure_kind: str,
+        message: str,
+    ) -> dict:
+        """Hold an active contract after an unproven artifact transition."""
+        events = self.read()
+        self._require_active_started(contract_id, events)
+        return self.append(
+            "artifact_review_required",
+            {
+                "contract_id": contract_id,
+                "call_kind": call_kind,
+                "failure_kind": failure_kind,
+                "message": message,
+            },
+        )
+
+    def artifact_review_requirement(
+        self,
+        contract_id: str,
+    ) -> dict | None:
+        """Return the newest durable review hold for one active contract."""
+        return next(
+            (
+                event["payload"]
+                for event in reversed(self.read())
+                if event.get("event_type")
+                == "artifact_review_required"
+                and event.get("payload", {}).get("contract_id")
+                == contract_id
+            ),
+            None,
+        )
+
     def complete(
         self,
         contract_id: str,

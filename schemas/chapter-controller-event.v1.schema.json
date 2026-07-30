@@ -32,6 +32,8 @@
         "contract_opened",
         "contract_started",
         "provider_call_acknowledged",
+        "provider_error_recovered",
+        "artifact_review_required",
         "contract_completed",
         "contract_failed",
         "contract_reconciled",

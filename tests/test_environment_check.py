@@ -228,6 +228,38 @@ class EnvironmentCheckTests(unittest.TestCase):
         run_check.assert_called_once_with(backend_selector.PROJECT_PATH)
         run_chat.assert_not_called()
 
+    def test_keyboard_interrupt_closes_interactive_cli_cleanly(self) -> None:
+        with (
+            patch.object(
+                backend_selector,
+                "run_interactive",
+                side_effect=KeyboardInterrupt,
+            ),
+            patch("builtins.print") as terminal_print,
+        ):
+            result = backend_selector.main([])
+
+        self.assertEqual(result, 0)
+        terminal_print.assert_called_once_with(
+            "\nAlexandrian Library closed."
+        )
+
+    def test_eof_closes_interactive_cli_cleanly(self) -> None:
+        with (
+            patch.object(
+                backend_selector,
+                "run_interactive",
+                side_effect=EOFError,
+            ),
+            patch("builtins.print") as terminal_print,
+        ):
+            result = backend_selector.main([])
+
+        self.assertEqual(result, 0)
+        terminal_print.assert_called_once_with(
+            "\nAlexandrian Library closed."
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

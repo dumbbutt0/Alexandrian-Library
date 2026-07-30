@@ -1560,6 +1560,10 @@ class CapabilityPreflightError(RuntimeError):
     """Reject a provider call before it can consume a stage budget."""
 
 
+class ChapterArtifactReconciliationRequired(Exception):
+    """Hold a chapter when provider side effects do not prove one transition."""
+
+
 def required_stage_tool_names(stage_contract: str) -> tuple[str, ...]:
     """Return one canonical ordered MCP tool contract."""
     contract = STAGE_TOOL_CONTRACTS.get(stage_contract)
@@ -1878,6 +1882,29 @@ def capture_backend_response(
             start_new_session=True,
             env=process_environment,
         )
+        active_ledger = active_chapter_ledger()
+        if (
+            active_ledger is not None
+            and call_purpose
+            in {
+                CHAPTER_DEVELOPMENT_CALL,
+                CHAPTER_EVALUATION_CALL,
+                CHAPTER_RESEARCH_CALL,
+            }
+        ):
+            ledger, contract_id = active_ledger
+            try:
+                ledger.acknowledge_provider_call(
+                    contract_id,
+                    call_purpose,
+                )
+            except Exception:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.communicate()
+                raise
         stdout, stderr = process.communicate(timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
         if process is not None:
@@ -1904,21 +1931,6 @@ def capture_backend_response(
 
     if not assistant_message:
         raise RuntimeError(f"No assistant message was found in the {backend} output.")
-
-    active_contract = ACTIVE_CHAPTER_CONTRACT.get()
-    if (
-        active_contract is not None
-        and call_purpose
-        in {
-            CHAPTER_DEVELOPMENT_CALL,
-            CHAPTER_EVALUATION_CALL,
-            CHAPTER_RESEARCH_CALL,
-        }
-    ):
-        ledger_path, contract_id = active_contract
-        chapter_controller.ChapterEventLedger(
-            ledger_path
-        ).acknowledge_provider_call(contract_id, call_purpose)
 
     return events, assistant_message
 
@@ -2984,47 +2996,68 @@ def develop_chapter_once(
         human_input_path,
         recovery_authorization_path,
     )
-    capture_backend_response(
-        backend,
-        program_path,
-        developer_prompt,
-        CHAPTER_DEVELOPMENT_CALL,
-    )
-
-    if not context_path.is_file():
-        raise RuntimeError(
-            "Chapter developer did not prepare the required context."
-        )
-    workspace_after = load_chapter_workspace_state(book_id, chapter_id)
-    if workspace_after is None:
-        raise RuntimeError(
-            "Chapter developer did not create or revise the workspace."
-        )
-    before_version = (
-        workspace_before["current_version"]
-        if workspace_before is not None
-        else 0
-    )
-    expected_version = before_version + 1
-    if workspace_after["current_version"] != expected_version:
-        raise RuntimeError(
-            "Chapter developer must perform exactly one workspace transition."
-        )
-
-    current_json_path = (
-        PROJECT_PATH / workspace_after["current_json_path"]
-    )
-    current_markdown_path = (
-        PROJECT_PATH / workspace_after["current_markdown_path"]
-    )
+    before_artifacts = chapter_provider_artifact_state(book_id)
+    provider_error = None
     try:
-        workspace_body = current_markdown_path.read_text(
-            encoding="utf-8"
-        ).strip()
-    except OSError as error:
-        raise RuntimeError(
-            "Current chapter workspace view could not be read."
-        ) from error
+        capture_backend_response(
+            backend,
+            program_path,
+            developer_prompt,
+            CHAPTER_DEVELOPMENT_CALL,
+        )
+    except RuntimeError as error:
+        provider_error = error
+
+    validation_error = None
+    workspace_after = None
+    current_json_path = None
+    current_markdown_path = None
+    workspace_body = None
+    try:
+        if not context_path.is_file():
+            raise RuntimeError(
+                "Chapter developer did not prepare the required context."
+            )
+        workspace_after = load_chapter_workspace_state(book_id, chapter_id)
+        if workspace_after is None:
+            raise RuntimeError(
+                "Chapter developer did not create or revise the workspace."
+            )
+        before_version = (
+            workspace_before["current_version"]
+            if workspace_before is not None
+            else 0
+        )
+        expected_version = before_version + 1
+        if workspace_after["current_version"] != expected_version:
+            raise RuntimeError(
+                "Chapter developer must perform exactly one workspace "
+                "transition."
+            )
+
+        current_json_path = (
+            PROJECT_PATH / workspace_after["current_json_path"]
+        )
+        current_markdown_path = (
+            PROJECT_PATH / workspace_after["current_markdown_path"]
+        )
+        try:
+            workspace_body = current_markdown_path.read_text(
+                encoding="utf-8"
+            ).strip()
+        except OSError as error:
+            raise RuntimeError(
+                "Current chapter workspace view could not be read."
+            ) from error
+    except RuntimeError as error:
+        validation_error = error
+    finish_chapter_provider_transition(
+        book_id,
+        CHAPTER_DEVELOPMENT_CALL,
+        before_artifacts,
+        provider_error,
+        validation_error,
+    )
     return (
         current_json_path,
         current_markdown_path,
@@ -3109,6 +3142,78 @@ def chapter_controller_ledger_path(
         / "runs"
         / f"{chapter_id}.controller.jsonl"
     )
+
+
+def chapter_provider_artifact_state(book_id: str) -> dict[str, str]:
+    """Hash provider-writable book artifacts, excluding wrapper run records."""
+    book_directory = BOOKS_PATH / book_id
+    if not book_directory.is_dir():
+        return {}
+    state = {}
+    for path in sorted(book_directory.rglob("*")):
+        if not path.is_file():
+            continue
+        relative_path = path.relative_to(book_directory)
+        if relative_path.parts and relative_path.parts[0] == "runs":
+            continue
+        state[str(relative_path)] = file_sha256(path)
+    return state
+
+
+def active_chapter_ledger() -> tuple[
+    chapter_controller.ChapterEventLedger,
+    str,
+] | None:
+    """Return the active chapter ledger and contract in this call context."""
+    active_contract = ACTIVE_CHAPTER_CONTRACT.get()
+    if active_contract is None:
+        return None
+    ledger_path, contract_id = active_contract
+    return chapter_controller.ChapterEventLedger(ledger_path), contract_id
+
+
+def finish_chapter_provider_transition(
+    book_id: str,
+    call_kind: str,
+    before_artifacts: dict[str, str],
+    provider_error: RuntimeError | None,
+    validation_error: RuntimeError | None,
+) -> None:
+    """Resolve a provider result from exact artifacts or hold it for review."""
+    if provider_error is None:
+        if validation_error is not None:
+            raise validation_error
+        return
+
+    active_ledger = active_chapter_ledger()
+    if validation_error is None:
+        if active_ledger is not None:
+            ledger, contract_id = active_ledger
+            ledger.record_provider_error_recovered(
+                contract_id,
+                call_kind,
+                type(provider_error).__name__,
+                str(provider_error),
+            )
+        return
+
+    after_artifacts = chapter_provider_artifact_state(book_id)
+    if after_artifacts == before_artifacts:
+        raise provider_error
+
+    message = (
+        f"{provider_error} Canonical book artifacts changed, but they do not "
+        f"prove the required single transition: {validation_error}"
+    )
+    if active_ledger is not None:
+        ledger, contract_id = active_ledger
+        ledger.require_artifact_review(
+            contract_id,
+            call_kind,
+            type(provider_error).__name__,
+            message,
+        )
+    raise ChapterArtifactReconciliationRequired(message) from provider_error
 
 
 def chapter_recovery_authorization_path(
@@ -4964,6 +5069,14 @@ def reconcile_interrupted_chapter_action(
     contract_id = contract["contract_id"]
     if not ledger.contract_started(contract_id, events):
         raise RuntimeError("Chapter action did not start.")
+    artifact_review = ledger.artifact_review_requirement(contract_id)
+    if artifact_review is not None:
+        return {
+            "status": "controller_reconciliation_held",
+            "book_id": book_id,
+            "chapter_id": chapter_id,
+            "reason": artifact_review["message"],
+        }
     baseline_run = contract.get("run_baseline")
     baseline_snapshot = contract.get("snapshot")
     if (
@@ -5200,6 +5313,18 @@ def run_chapter_controller_action(
             book_id,
             chapter_id,
         )
+    except ChapterArtifactReconciliationRequired as error:
+        current_run = load_or_create_chapter_run(book_id, chapter_id)
+        call_counts = ledger.provider_call_counts(contract["contract_id"])
+        reconcile_chapter_counters_from_contract(
+            current_run,
+            baseline,
+            call_counts,
+        )
+        result = dict(current_run)
+        result["status"] = "controller_reconciliation_required"
+        result["stop_reason"] = str(error)
+        return result
     except Exception as error:
         current_run = load_or_create_chapter_run(book_id, chapter_id)
         call_counts = ledger.provider_call_counts(contract["contract_id"])
@@ -5516,6 +5641,11 @@ def research_chapter_once(
         / "source_receipts"
         / assessment_id
     )
+    before_pending_request_ids = [
+        request.get("request_id")
+        for request in session["pending_requests"]
+        if isinstance(request, dict)
+    ]
     prompt = build_chapter_researcher_prompt(
         researcher_instructions,
         str(assessment_path.relative_to(PROJECT_PATH)),
@@ -5539,52 +5669,100 @@ def research_chapter_once(
         ],
         recovery_closeout,
     )
-    capture_backend_response(
-        backend,
-        program_path,
-        prompt,
-        CHAPTER_RESEARCH_CALL,
-    )
-    after_paths = chapter_research_packet_paths(book_id, chapter_id)
-    if len(after_paths) == len(before_paths):
+    before_artifacts = chapter_provider_artifact_state(book_id)
+    provider_error = None
+    try:
+        capture_backend_response(
+            backend,
+            program_path,
+            prompt,
+            CHAPTER_RESEARCH_CALL,
+        )
+    except RuntimeError as error:
+        provider_error = error
+
+    validation_error = None
+    result = None
+    try:
+        after_paths = chapter_research_packet_paths(book_id, chapter_id)
         refreshed_session = load_or_create_chapter_research_session(
             book_id,
             chapter_id,
             assessment_id,
             research_mode,
         )
-        if refreshed_session["pending_requests"]:
-            return None
-        return None
-    if len(after_paths) != len(before_paths) + 1:
-        raise RuntimeError(
-            "Chapter Researcher must create exactly one research packet."
-        )
-    latest = load_latest_chapter_research_packet(book_id, chapter_id)
-    if latest is None:
-        raise RuntimeError("Chapter Researcher did not save a packet.")
-    packet_path, document = latest
-    research = document["research"]
-    if (
-        research.get("assessment_id") != assessment_id
-        or research.get("assessment_sha256")
-        != assessment_document["assessment_sha256"]
-        or research.get("workspace_sha256")
-        != assessment["workspace_sha256"]
-        or research.get("research_request")
-        != assessment.get("research_request")
-    ):
-        raise RuntimeError(
-            "Chapter research packet does not answer the current assessment."
-        )
-    markdown_path = packet_path.with_suffix(".md")
-    try:
-        body = markdown_path.read_text(encoding="utf-8").strip()
-    except OSError as error:
-        raise RuntimeError(
-            "Readable chapter research packet could not be read."
-        ) from error
-    return packet_path, document, body
+        after_pending_request_ids = [
+            request.get("request_id")
+            for request in refreshed_session["pending_requests"]
+            if isinstance(request, dict)
+        ]
+        if len(after_paths) == len(before_paths):
+            if (
+                len(after_pending_request_ids)
+                != len(before_pending_request_ids) + 1
+                or after_pending_request_ids[
+                    : len(before_pending_request_ids)
+                ]
+                != before_pending_request_ids
+            ):
+                raise RuntimeError(
+                    "Chapter Researcher did not create exactly one source "
+                    "request or research packet."
+                )
+        else:
+            if len(after_paths) != len(before_paths) + 1:
+                raise RuntimeError(
+                    "Chapter Researcher must create exactly one research "
+                    "packet."
+                )
+            if after_pending_request_ids != before_pending_request_ids:
+                raise RuntimeError(
+                    "Chapter Researcher created a packet and changed pending "
+                    "source requests in the same transition."
+                )
+            latest = load_latest_chapter_research_packet(
+                book_id,
+                chapter_id,
+            )
+            if latest is None:
+                raise RuntimeError(
+                    "Chapter Researcher did not save a packet."
+                )
+            packet_path, document = latest
+            research = document["research"]
+            if (
+                research.get("assessment_id") != assessment_id
+                or research.get("assessment_sha256")
+                != assessment_document["assessment_sha256"]
+                or research.get("workspace_sha256")
+                != assessment["workspace_sha256"]
+                or research.get("research_request")
+                != assessment.get("research_request")
+            ):
+                raise RuntimeError(
+                    "Chapter research packet does not answer the current "
+                    "assessment."
+                )
+            markdown_path = packet_path.with_suffix(".md")
+            try:
+                body = markdown_path.read_text(
+                    encoding="utf-8"
+                ).strip()
+            except OSError as error:
+                raise RuntimeError(
+                    "Readable chapter research packet could not be read."
+                ) from error
+            result = (packet_path, document, body)
+    except RuntimeError as error:
+        validation_error = error
+    finish_chapter_provider_transition(
+        book_id,
+        CHAPTER_RESEARCH_CALL,
+        before_artifacts,
+        provider_error,
+        validation_error,
+    )
+    return result
 
 
 def plan_chapter_research_sources_once(
@@ -5617,19 +5795,36 @@ def plan_chapter_research_sources_once(
             for path in chapter_research_packet_paths(book_id, chapter_id)
         ],
     )
-    capture_backend_response(
-        backend,
-        program_path,
-        prompt,
-        CHAPTER_RESEARCH_CALL,
-    )
-    source_plan = load_chapter_research_source_plan(
+    before_artifacts = chapter_provider_artifact_state(book_id)
+    provider_error = None
+    try:
+        capture_backend_response(
+            backend,
+            program_path,
+            prompt,
+            CHAPTER_RESEARCH_CALL,
+        )
+    except RuntimeError as error:
+        provider_error = error
+    validation_error = None
+    source_plan = None
+    try:
+        source_plan = load_chapter_research_source_plan(
+            book_id,
+            chapter_id,
+            assessment_id,
+        )
+        if source_plan is None:
+            raise RuntimeError("Researcher did not save a source plan.")
+    except RuntimeError as error:
+        validation_error = error
+    finish_chapter_provider_transition(
         book_id,
-        chapter_id,
-        assessment_id,
+        CHAPTER_RESEARCH_CALL,
+        before_artifacts,
+        provider_error,
+        validation_error,
     )
-    if source_plan is None:
-        raise RuntimeError("Researcher did not save a source plan.")
     return source_plan
 
 
@@ -5659,40 +5854,61 @@ def evaluate_chapter_once(
         newest_draft,
         run_state,
     )
-    capture_backend_response(
-        backend,
-        program_path,
-        prompt,
-        CHAPTER_EVALUATION_CALL,
-    )
-    after_paths = assessment_paths(book_id, chapter_id)
-    if len(after_paths) != len(before_paths) + 1:
-        raise RuntimeError(
-            "Chapter evaluator must create exactly one assessment."
-        )
-    latest = load_latest_chapter_assessment(book_id, chapter_id)
-    if latest is None:
-        raise RuntimeError("Chapter evaluator did not save an assessment.")
-    assessment_path, document = latest
-    assessment = document["assessment"]
-    if (
-        assessment.get("workspace_version")
-        != workspace_state["current_version"]
-        or assessment.get("workspace_sha256")
-        != workspace_document["workspace_sha256"]
-        or assessment.get("draft_id")
-        != (newest_draft or {}).get("draft_id")
-    ):
-        raise RuntimeError(
-            "Chapter assessment does not describe the current state."
-        )
-    markdown_path = assessment_path.with_suffix(".md")
+    before_artifacts = chapter_provider_artifact_state(book_id)
+    provider_error = None
     try:
-        body = markdown_path.read_text(encoding="utf-8").strip()
-    except OSError as error:
-        raise RuntimeError(
-            "Readable chapter assessment could not be read."
-        ) from error
+        capture_backend_response(
+            backend,
+            program_path,
+            prompt,
+            CHAPTER_EVALUATION_CALL,
+        )
+    except RuntimeError as error:
+        provider_error = error
+    validation_error = None
+    assessment_path = None
+    document = None
+    body = None
+    try:
+        after_paths = assessment_paths(book_id, chapter_id)
+        if len(after_paths) != len(before_paths) + 1:
+            raise RuntimeError(
+                "Chapter evaluator must create exactly one assessment."
+            )
+        latest = load_latest_chapter_assessment(book_id, chapter_id)
+        if latest is None:
+            raise RuntimeError(
+                "Chapter evaluator did not save an assessment."
+            )
+        assessment_path, document = latest
+        assessment = document["assessment"]
+        if (
+            assessment.get("workspace_version")
+            != workspace_state["current_version"]
+            or assessment.get("workspace_sha256")
+            != workspace_document["workspace_sha256"]
+            or assessment.get("draft_id")
+            != (newest_draft or {}).get("draft_id")
+        ):
+            raise RuntimeError(
+                "Chapter assessment does not describe the current state."
+            )
+        markdown_path = assessment_path.with_suffix(".md")
+        try:
+            body = markdown_path.read_text(encoding="utf-8").strip()
+        except OSError as error:
+            raise RuntimeError(
+                "Readable chapter assessment could not be read."
+            ) from error
+    except RuntimeError as error:
+        validation_error = error
+    finish_chapter_provider_transition(
+        book_id,
+        CHAPTER_EVALUATION_CALL,
+        before_artifacts,
+        provider_error,
+        validation_error,
+    )
     return assessment_path, document, body
 
 
@@ -10683,7 +10899,10 @@ def main(arguments: list[str] | None = None) -> int:
         )
         return 2
 
-    run_interactive()
+    try:
+        run_interactive()
+    except (KeyboardInterrupt, EOFError):
+        print("\nAlexandrian Library closed.")
     return 0
 
 

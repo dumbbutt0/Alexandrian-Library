@@ -269,6 +269,37 @@ class ChapterEventLedgerTests(unittest.TestCase):
                 backend_selector.CHAPTER_EVALUATION_CALL,
             )
 
+    def test_artifact_review_requirement_keeps_contract_active(self) -> None:
+        contract = self.ledger.open_contract(
+            self.snapshot,
+            self.decision,
+        )
+        self.ledger.mark_started(contract["contract_id"])
+        self.ledger.acknowledge_provider_call(
+            contract["contract_id"],
+            backend_selector.CHAPTER_DEVELOPMENT_CALL,
+        )
+        self.ledger.require_artifact_review(
+            contract["contract_id"],
+            backend_selector.CHAPTER_DEVELOPMENT_CALL,
+            "RuntimeError",
+            "The workspace transition is incomplete.",
+        )
+
+        requirement = self.ledger.artifact_review_requirement(
+            contract["contract_id"]
+        )
+
+        self.assertEqual(
+            requirement["message"],
+            "The workspace transition is incomplete.",
+        )
+        self.assertEqual(
+            self.ledger.interrupted_contract_id(),
+            contract["contract_id"],
+        )
+        self.assertEqual(self.ledger.failed_contracts(self.ledger.read()), [])
+
     def test_same_failed_snapshot_cannot_retry(self) -> None:
         contract = self.ledger.open_contract(
             self.snapshot,
@@ -531,6 +562,199 @@ class ChapterControllerIntegrationTests(unittest.TestCase):
         self.assertEqual(
             ledger.read()[-1]["event_type"],
             "contract_completed",
+        )
+
+    def test_ambiguous_provider_side_effect_holds_across_restart(self) -> None:
+        provider_calls = 0
+
+        def leave_partial_artifact(*_args):
+            nonlocal provider_calls
+            provider_calls += 1
+            ledger_path, contract_id = (
+                backend_selector.ACTIVE_CHAPTER_CONTRACT.get()
+            )
+            ledger = chapter_controller.ChapterEventLedger(ledger_path)
+            ledger.acknowledge_provider_call(
+                contract_id,
+                backend_selector.CHAPTER_DEVELOPMENT_CALL,
+            )
+            before_artifacts = (
+                backend_selector.chapter_provider_artifact_state(
+                    self.book_id
+                )
+            )
+            context_directory = (
+                self.books / self.book_id / "contexts"
+            )
+            context_directory.mkdir(parents=True)
+            (
+                context_directory / f"{self.chapter_id}.json"
+            ).write_text("{}\n", encoding="utf-8")
+            (
+                context_directory / f"{self.chapter_id}.md"
+            ).write_text("Incomplete context\n", encoding="utf-8")
+            backend_selector.finish_chapter_provider_transition(
+                self.book_id,
+                backend_selector.CHAPTER_DEVELOPMENT_CALL,
+                before_artifacts,
+                RuntimeError("provider timed out"),
+                RuntimeError(
+                    "Context exists, but the workspace transition is "
+                    "missing."
+                ),
+            )
+
+        with self.patches()[0], self.patches()[1], patch.object(
+            backend_selector,
+            "run_chapter_completion_loop",
+            side_effect=leave_partial_artifact,
+        ):
+            first = backend_selector.run_chapter_controller_action(
+                "codex",
+                "/usr/bin/codex",
+                self.book_id,
+                self.chapter_id,
+            )
+            second = backend_selector.run_chapter_controller_action(
+                "codex",
+                "/usr/bin/codex",
+                self.book_id,
+                self.chapter_id,
+            )
+            held = (
+                backend_selector.reconcile_interrupted_chapter_action(
+                    self.book_id,
+                    self.chapter_id,
+                )
+            )
+
+        self.assertEqual(
+            first["status"],
+            "controller_reconciliation_required",
+        )
+        self.assertEqual(
+            second["status"],
+            "controller_reconciliation_required",
+        )
+        self.assertEqual(
+            held["status"],
+            "controller_reconciliation_held",
+        )
+        self.assertEqual(provider_calls, 1)
+
+    def test_exact_artifacts_recover_provider_error_without_retry(self) -> None:
+        with self.patches()[0], self.patches()[1]:
+            snapshot = (
+                backend_selector.build_chapter_controller_snapshot(
+                    self.book_id,
+                    self.chapter_id,
+                )
+            )
+            decision = chapter_controller.decide_next_action(snapshot)
+            ledger = chapter_controller.ChapterEventLedger(
+                backend_selector.chapter_controller_ledger_path(
+                    self.book_id,
+                    self.chapter_id,
+                )
+            )
+            contract = ledger.open_contract(snapshot, decision)
+            ledger.mark_started(contract["contract_id"])
+            ledger.acknowledge_provider_call(
+                contract["contract_id"],
+                backend_selector.CHAPTER_DEVELOPMENT_CALL,
+            )
+            token = backend_selector.ACTIVE_CHAPTER_CONTRACT.set(
+                (ledger.path, contract["contract_id"])
+            )
+            try:
+                backend_selector.finish_chapter_provider_transition(
+                    self.book_id,
+                    backend_selector.CHAPTER_DEVELOPMENT_CALL,
+                    {},
+                    RuntimeError("provider timed out"),
+                    None,
+                )
+            finally:
+                backend_selector.ACTIVE_CHAPTER_CONTRACT.reset(token)
+
+        self.assertEqual(
+            ledger.read()[-1]["event_type"],
+            "provider_error_recovered",
+        )
+        self.assertEqual(
+            ledger.provider_call_counts(contract["contract_id"]),
+            {backend_selector.CHAPTER_DEVELOPMENT_CALL: 1},
+        )
+
+    def test_empty_provider_failure_remains_a_normal_failure(self) -> None:
+        with self.patches()[0], self.patches()[1], self.assertRaisesRegex(
+            RuntimeError,
+            "provider timed out",
+        ):
+            backend_selector.finish_chapter_provider_transition(
+                self.book_id,
+                backend_selector.CHAPTER_DEVELOPMENT_CALL,
+                {},
+                RuntimeError("provider timed out"),
+                RuntimeError("workspace is missing"),
+            )
+
+    def test_partial_artifact_requires_review_instead_of_retry(self) -> None:
+        with self.patches()[0], self.patches()[1]:
+            snapshot = (
+                backend_selector.build_chapter_controller_snapshot(
+                    self.book_id,
+                    self.chapter_id,
+                )
+            )
+            decision = chapter_controller.decide_next_action(snapshot)
+            ledger = chapter_controller.ChapterEventLedger(
+                backend_selector.chapter_controller_ledger_path(
+                    self.book_id,
+                    self.chapter_id,
+                )
+            )
+            contract = ledger.open_contract(snapshot, decision)
+            ledger.mark_started(contract["contract_id"])
+            ledger.acknowledge_provider_call(
+                contract["contract_id"],
+                backend_selector.CHAPTER_DEVELOPMENT_CALL,
+            )
+            context_path = (
+                self.books
+                / self.book_id
+                / "contexts"
+                / f"{self.chapter_id}.json"
+            )
+            context_path.parent.mkdir(parents=True)
+            context_path.write_text("{}\n", encoding="utf-8")
+            token = backend_selector.ACTIVE_CHAPTER_CONTRACT.set(
+                (ledger.path, contract["contract_id"])
+            )
+            try:
+                with self.assertRaisesRegex(
+                    backend_selector.ChapterArtifactReconciliationRequired,
+                    "do not prove the required single transition",
+                ):
+                    backend_selector.finish_chapter_provider_transition(
+                        self.book_id,
+                        backend_selector.CHAPTER_DEVELOPMENT_CALL,
+                        {},
+                        RuntimeError("provider timed out"),
+                        RuntimeError("workspace is missing"),
+                    )
+            finally:
+                backend_selector.ACTIVE_CHAPTER_CONTRACT.reset(token)
+
+        self.assertEqual(
+            ledger.artifact_review_requirement(
+                contract["contract_id"]
+            )["failure_kind"],
+            "RuntimeError",
+        )
+        self.assertEqual(
+            ledger.interrupted_contract_id(),
+            contract["contract_id"],
         )
 
     def test_unchanged_zero_call_action_stops_as_no_progress(self) -> None:

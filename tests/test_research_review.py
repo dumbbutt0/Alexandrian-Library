@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
 import backend_selector
+import chapter_controller
 import conversation_store
 import mcp_server
 from mcp.server.fastmcp.exceptions import ToolError
@@ -933,6 +934,65 @@ class ResearchReviewTests(unittest.TestCase):
 
         killpg.assert_called_once_with(123, backend_selector.signal.SIGKILL)
         self.assertNotIn(private_prompt, str(raised.exception))
+
+    def test_chapter_timeout_consumes_call_when_process_started(self) -> None:
+        ledger = chapter_controller.ChapterEventLedger(
+            self.project_path / "CH1.controller.jsonl"
+        )
+        snapshot = chapter_controller.ChapterSnapshot(
+            book_id="book-test",
+            chapter_id="CH1",
+            legacy_status="active",
+            developer_calls=0,
+            evaluator_calls=0,
+            researcher_calls=0,
+            call_limit=2,
+            workspace_exists=False,
+            matching_assessment_exists=False,
+            assessment_outcome=None,
+            human_input_exists=False,
+            closeout_authorized=False,
+            recovery_kind=None,
+            final_closeout_pending=False,
+            source_requests_pending=False,
+        )
+        decision = chapter_controller.decide_next_action(snapshot)
+        contract = ledger.open_contract(snapshot, decision)
+        ledger.mark_started(contract["contract_id"])
+        process = Mock(pid=123, returncode=-9)
+        process.communicate.side_effect = [
+            subprocess.TimeoutExpired(
+                cmd=["/usr/bin/claude"],
+                timeout=backend_selector.AUTONOMOUS_CALL_TIMEOUT_SECONDS,
+            ),
+            ("", ""),
+        ]
+        token = backend_selector.ACTIVE_CHAPTER_CONTRACT.set(
+            (ledger.path, contract["contract_id"])
+        )
+        try:
+            with (
+                patch.object(
+                    backend_selector.subprocess,
+                    "Popen",
+                    return_value=process,
+                ),
+                patch.object(backend_selector.os, "killpg"),
+                self.assertRaisesRegex(RuntimeError, "timed out"),
+            ):
+                backend_selector.capture_backend_response(
+                    "claude",
+                    "/usr/bin/claude",
+                    "Chapter prompt",
+                    backend_selector.CHAPTER_DEVELOPMENT_CALL,
+                )
+        finally:
+            backend_selector.ACTIVE_CHAPTER_CONTRACT.reset(token)
+
+        self.assertEqual(
+            ledger.provider_call_counts(contract["contract_id"]),
+            {backend_selector.CHAPTER_DEVELOPMENT_CALL: 1},
+        )
 
     def test_conversation_backend_call_has_no_timeout(self) -> None:
         process = Mock(
