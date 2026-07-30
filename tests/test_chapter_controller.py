@@ -999,7 +999,7 @@ class ChapterControllerIntegrationTests(unittest.TestCase):
             "no_provider_output",
         )
 
-    def test_ack_without_artifact_change_holds_reconciliation(self) -> None:
+    def test_ack_without_artifact_change_requires_review(self) -> None:
         with self.patches()[0], self.patches()[1]:
             snapshot = (
                 backend_selector.build_chapter_controller_snapshot(
@@ -1039,10 +1039,101 @@ class ChapterControllerIntegrationTests(unittest.TestCase):
 
         self.assertEqual(
             result["status"],
-            "controller_reconciliation_held",
+            "artifact_review_required",
+        )
+        self.assertEqual(
+            result["call_kind"],
+            backend_selector.CHAPTER_DEVELOPMENT_CALL,
+        )
+        self.assertEqual(result["artifact_changes"], [])
+        self.assertEqual(
+            ledger.artifact_review_requirement(
+                contract["contract_id"]
+            )["failure_kind"],
+            "InterruptedProviderCall",
         )
         self.assertEqual(
             ledger.interrupted_contract_id(),
+            contract["contract_id"],
+        )
+
+    def test_ack_without_artifact_can_be_rejected_for_one_retry(self) -> None:
+        with self.patches()[0], self.patches()[1]:
+            snapshot = (
+                backend_selector.build_chapter_controller_snapshot(
+                    self.book_id,
+                    self.chapter_id,
+                )
+            )
+            decision = chapter_controller.decide_next_action(snapshot)
+            baseline = (
+                backend_selector.load_or_create_chapter_run(
+                    self.book_id,
+                    self.chapter_id,
+                )
+            )
+            ledger = chapter_controller.ChapterEventLedger(
+                backend_selector.chapter_controller_ledger_path(
+                    self.book_id,
+                    self.chapter_id,
+                )
+            )
+            contract = ledger.open_contract(
+                snapshot,
+                decision,
+                run_baseline=baseline,
+            )
+            ledger.mark_started(contract["contract_id"])
+            ledger.acknowledge_provider_call(
+                contract["contract_id"],
+                backend_selector.CHAPTER_DEVELOPMENT_CALL,
+            )
+            reconciliation = (
+                backend_selector.reconcile_interrupted_chapter_action(
+                    self.book_id,
+                    self.chapter_id,
+                )
+            )
+            with patch(
+                "builtins.input",
+                side_effect=[
+                    "1",
+                    (
+                        "The provider process was interrupted and no "
+                        "canonical chapter transition exists."
+                    ),
+                ],
+            ):
+                reviewed = (
+                    backend_selector
+                    .record_chapter_artifact_review_checkpoint(
+                        self.book_id,
+                        self.chapter_id,
+                    )
+                )
+            current = (
+                backend_selector.build_chapter_controller_snapshot(
+                    self.book_id,
+                    self.chapter_id,
+                )
+            )
+            retry = ledger.retry_requirement(
+                current,
+                chapter_controller.decide_next_action(current),
+            )
+
+        self.assertEqual(
+            reconciliation["status"],
+            "artifact_review_required",
+        )
+        self.assertEqual(
+            reviewed["payload"]["disposition"],
+            "provider_output_rejected",
+        )
+        self.assertIsNone(ledger.interrupted_contract_id())
+        self.assertEqual(retry["status"], "authorization_required")
+        self.assertEqual(
+            retry["failed_contract_id"],
             contract["contract_id"],
         )
 

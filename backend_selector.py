@@ -5342,6 +5342,27 @@ def reconcile_interrupted_chapter_action(
                 "canonical artifacts."
             ),
         }
+    if accepted_calls == 1 and not artifacts_changed:
+        call_kind = next(iter(call_counts))
+        message = (
+            "One provider call was acknowledged, but no canonical chapter "
+            "artifact transition was observed after restart."
+        )
+        review = ledger.require_artifact_review(
+            contract_id,
+            call_kind,
+            "InterruptedProviderCall",
+            message,
+        )
+        return {
+            "status": "artifact_review_required",
+            "book_id": book_id,
+            "chapter_id": chapter_id,
+            "reason": message,
+            "failed_contract_id": contract_id,
+            "call_kind": call_kind,
+            "artifact_changes": review["payload"]["artifact_changes"],
+        }
     return {
         "status": "controller_reconciliation_held",
         "book_id": book_id,
@@ -5385,7 +5406,8 @@ def record_chapter_artifact_review_checkpoint(
             )
     else:
         print(
-            "Canonical artifact paths were not recorded by this older hold."
+            "No canonical artifact change was observed for this provider "
+            "transition."
         )
     print(
         "Rejecting closes this provider transition as incomplete. "
