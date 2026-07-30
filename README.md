@@ -26,9 +26,39 @@ Create the project environment:
 uv sync
 ```
 
-Claude reads the repository's `.mcp.json`. For Codex, copy
-`.codex/config.example.toml` to `.codex/config.toml`, replace its placeholder
-clone paths, and keep the resulting local file private.
+Claude reads the repository's `.mcp.json`.
+
+Codex project configuration is active only after you explicitly trust the
+exact worktree. A checked-in configuration is a proposal, not proof that Codex
+loaded it:
+
+1. Clone the repository.
+2. Copy `.codex/config.example.toml` to `.codex/config.toml`.
+3. Inspect `.codex/config.toml`, replace both placeholder paths with the
+   absolute path of this clone, and keep this local file private.
+4. Start Codex from the repository root.
+5. Review the trust prompt and explicitly trust this exact worktree if you
+   accept its project-controlled configuration.
+6. Run the Library environment check.
+7. Confirm that `Codex project readiness` reports `codex_ready`.
+
+You can inspect the MCP servers Codex actually loaded from the repository root:
+
+```text
+codex mcp list
+```
+
+The Library never adds or changes a Codex trust entry for you. A new clone at a
+different absolute path requires its own trust decision.
+
+Codex readiness uses explicit states:
+
+- `codex_not_installed`
+- `codex_project_config_missing`
+- `codex_project_untrusted`
+- `codex_mcp_not_effective`
+- `codex_mcp_server_unstartable`
+- `codex_ready`
 
 Check the complete local environment before starting:
 
@@ -36,10 +66,12 @@ Check the complete local environment before starting:
 python3 backend_selector.py --check
 ```
 
-The check inspects local versions, programs, project files, host
-configuration, schemas, skills, source policy, and storage permissions. It
-does not start a model or MCP server, access the network, or create durable
-library data.
+The check inspects local versions, programs, project files, effective host
+configuration, schemas, skills, source policy, and storage permissions. For
+Codex, it runs `codex mcp list --json`, initializes the effective Alexandrian
+MCP server, and verifies its required tool inventory. It does not call a model,
+access research-source domains, alter project trust, or create durable library
+data.
 
 Start the terminal workflow:
 

@@ -9,7 +9,7 @@ args = [
 ]
 cwd = "/absolute/path/to/Alexandrian-Library"
 required = true
-env = {
-  ALEXANDRIAN_AGENT_HOST = "codex",
-  ALEXANDRIAN_PROJECT_PATH = "/absolute/path/to/Alexandrian-Library"
-}
+
+[mcp_servers.alexandrian_library.env]
+ALEXANDRIAN_AGENT_HOST = "codex"
+ALEXANDRIAN_PROJECT_PATH = "/absolute/path/to/Alexandrian-Library"

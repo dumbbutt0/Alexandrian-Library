@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import importlib.metadata
 import json
 import os
@@ -12,6 +13,11 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
 
 
 MINIMUM_PYTHON = (3, 10)
@@ -58,6 +64,40 @@ REQUIRED_POLICY_FIELDS = {
     "max_text_characters",
     "timeout_seconds",
 }
+REQUIRED_MCP_TOOLS = {
+    "fetch_research_source",
+    "submit_chapter_research_source_plan",
+    "fetch_chapter_research_source",
+    "submit_research_review",
+    "promote_review_to_knowledge_index",
+    "submit_book_manifest",
+    "prepare_chapter_context",
+    "submit_chapter_research_packet",
+    "initialize_chapter_workspace",
+    "save_chapter_draft",
+    "submit_chapter_assessment",
+    "revise_chapter_workspace",
+    "prepare_book_synthesis_context",
+    "initialize_book_synthesis",
+    "save_book_synthesis_attempt",
+    "submit_book_synthesis_audit",
+    "submit_staged_synthesis_inventory_unit",
+    "prepare_staged_synthesis_plan_shards",
+    "submit_staged_synthesis_plan_shard",
+    "submit_staged_synthesis_plan",
+    "submit_staged_synthesis_plan_audit",
+    "submit_staged_synthesis_global_plan_audit",
+    "save_staged_synthesis_edition_unit",
+    "submit_staged_synthesis_audit_unit",
+    "submit_staged_synthesis_global_audit",
+}
+CODEX_READINESS_LABEL = "Codex project readiness"
+CODEX_NOT_INSTALLED = "codex_not_installed"
+CODEX_PROJECT_CONFIG_MISSING = "codex_project_config_missing"
+CODEX_PROJECT_UNTRUSTED = "codex_project_untrusted"
+CODEX_MCP_NOT_EFFECTIVE = "codex_mcp_not_effective"
+CODEX_MCP_SERVER_UNSTARTABLE = "codex_mcp_server_unstartable"
+CODEX_READY = "codex_ready"
 
 
 @dataclass(frozen=True)
@@ -190,6 +230,418 @@ def _mcp_runtime_result(project_path: Path, uv_path: str) -> CheckResult:
         "Alexandrian MCP runtime startup",
         "available",
         "uv started and cleanly closed the configured MCP server.",
+    )
+
+
+async def _mcp_protocol_probe(transport: dict) -> list[str]:
+    """Initialize the effective stdio server and request its tool inventory."""
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
+    environment = os.environ.copy()
+    environment.update(transport.get("env", {}))
+    parameters = StdioServerParameters(
+        command=transport["command"],
+        args=transport.get("args", []),
+        env=environment,
+        cwd=transport["cwd"],
+    )
+    with open(os.devnull, "w", encoding="utf-8") as error_log:
+        async with stdio_client(
+            parameters,
+            errlog=error_log,
+        ) as (read_stream, write_stream):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                response = await session.list_tools()
+                return [tool.name for tool in response.tools]
+
+
+def _mcp_tool_inventory_result(transport: dict) -> CheckResult:
+    """Verify MCP initialization and tools through the effective transport."""
+    try:
+        tool_names = asyncio.run(
+            asyncio.wait_for(
+                _mcp_protocol_probe(transport),
+                timeout=15,
+            )
+        )
+    except Exception as error:
+        return CheckResult(
+            "Alexandrian MCP tool inventory",
+            "missing",
+            f"The MCP initialize/tools-list check could not finish: {error}",
+        )
+    missing_tools = sorted(REQUIRED_MCP_TOOLS - set(tool_names))
+    if missing_tools:
+        return CheckResult(
+            "Alexandrian MCP tool inventory",
+            "missing",
+            "Missing tools: " + ", ".join(missing_tools),
+        )
+    return CheckResult(
+        "Alexandrian MCP tool inventory",
+        "available",
+        f"All {len(REQUIRED_MCP_TOOLS)} required tools are registered.",
+    )
+
+
+def _toml_document(path: Path) -> tuple[dict | None, str | None]:
+    """Read one TOML document without exposing its contents in errors."""
+    try:
+        with path.open("rb") as source:
+            document = tomllib.load(source)
+    except FileNotFoundError:
+        return None, f"Expected file: {path}"
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        return None, f"Cannot read valid TOML at {path}: {error}"
+    if not isinstance(document, dict):
+        return None, f"The TOML document at {path} must be a table."
+    return document, None
+
+
+def _codex_user_config_path() -> Path:
+    """Resolve the user-level Codex configuration without changing it."""
+    configured_home = os.environ.get("CODEX_HOME")
+    if configured_home:
+        return Path(configured_home).expanduser().resolve() / "config.toml"
+    return Path.home() / ".codex" / "config.toml"
+
+
+def _exact_worktree_is_trusted(
+    project_path: Path,
+    user_config_path: Path,
+) -> tuple[bool, str]:
+    """Check the explicit user-owned trust record for one exact worktree."""
+    document, error = _toml_document(user_config_path)
+    if document is None:
+        return False, error or "The user Codex configuration is unavailable."
+    projects = document.get("projects")
+    if not isinstance(projects, dict):
+        return False, (
+            f"No project trust entries exist in {user_config_path}."
+        )
+    for configured_path, settings in projects.items():
+        if not isinstance(configured_path, str) or not isinstance(settings, dict):
+            continue
+        try:
+            resolved_path = Path(configured_path).expanduser().resolve()
+        except OSError:
+            continue
+        if resolved_path != project_path:
+            continue
+        if settings.get("trust_level") == "trusted":
+            return True, f"Exact trusted worktree: {project_path}"
+        return False, (
+            f"The exact worktree is not trusted in {user_config_path}."
+        )
+    return False, (
+        f"No explicit trust entry exists for {project_path} in "
+        f"{user_config_path}."
+    )
+
+
+def _resolved_executable(value: object, cwd: Path) -> Path | None:
+    """Resolve one configured executable without running it."""
+    if not isinstance(value, str) or not value:
+        return None
+    candidate = Path(value).expanduser()
+    if candidate.is_absolute() or candidate.parent != Path("."):
+        if not candidate.is_absolute():
+            candidate = cwd / candidate
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError:
+            return None
+        return resolved if resolved.is_file() else None
+    found = shutil.which(value)
+    if found is None:
+        return None
+    try:
+        return Path(found).resolve(strict=True)
+    except OSError:
+        return None
+
+
+def _resolved_mcp_script(args: object, cwd: Path) -> Path | None:
+    """Resolve the configured Alexandrian MCP script from launcher arguments."""
+    if not isinstance(args, list) or any(
+        not isinstance(argument, str) for argument in args
+    ):
+        return None
+    matches = [
+        Path(argument).expanduser()
+        for argument in args
+        if Path(argument).name == "mcp_server.py"
+    ]
+    if len(matches) != 1:
+        return None
+    candidate = matches[0]
+    if not candidate.is_absolute():
+        candidate = cwd / candidate
+    try:
+        return candidate.resolve(strict=True)
+    except OSError:
+        return None
+
+
+def _validate_codex_server_identity(
+    server: object,
+    project_path: Path,
+) -> tuple[bool, str]:
+    """Validate one configured Alexandrian MCP identity for this worktree."""
+    if not isinstance(server, dict):
+        return False, "The Alexandrian MCP configuration must be a table."
+    cwd_value = server.get("cwd")
+    if not isinstance(cwd_value, str):
+        return False, "The Alexandrian MCP working directory is missing."
+    try:
+        server_cwd = Path(cwd_value).expanduser().resolve(strict=True)
+    except OSError:
+        return False, "The Alexandrian MCP working directory does not exist."
+    if server_cwd != project_path:
+        return False, (
+            "The Alexandrian MCP working directory points at another clone."
+        )
+    if _resolved_executable(server.get("command"), server_cwd) is None:
+        return False, "The Alexandrian MCP launcher is unavailable."
+    if (
+        _resolved_mcp_script(server.get("args"), server_cwd)
+        != project_path / "mcp_server.py"
+    ):
+        return False, "The Alexandrian MCP script points at another clone."
+    environment = server.get("env")
+    if not isinstance(environment, dict):
+        return False, "The Alexandrian MCP environment is missing."
+    project_value = environment.get("ALEXANDRIAN_PROJECT_PATH")
+    if not isinstance(project_value, str):
+        return False, "ALEXANDRIAN_PROJECT_PATH is missing."
+    try:
+        configured_project = (
+            Path(project_value).expanduser().resolve(strict=True)
+        )
+    except OSError:
+        return False, "ALEXANDRIAN_PROJECT_PATH does not exist."
+    if configured_project != project_path:
+        return False, "ALEXANDRIAN_PROJECT_PATH points at another clone."
+    return True, f"Alexandrian MCP identity matches {project_path}."
+
+
+def _project_git_root(project_path: Path) -> tuple[Path | None, str]:
+    """Resolve the Git root used for Codex project configuration discovery."""
+    git_path = shutil.which("git")
+    if git_path is None:
+        return None, "Git is unavailable, so the project root cannot be verified."
+    try:
+        completed = subprocess.run(
+            [git_path, "-C", str(project_path), "rev-parse", "--show-toplevel"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return None, f"The Git project root check could not finish: {error}"
+    if completed.returncode != 0:
+        return None, (
+            completed.stderr.strip()
+            or "Git could not resolve the project root."
+        )
+    try:
+        return Path(completed.stdout.strip()).resolve(strict=True), ""
+    except OSError:
+        return None, "Git returned a project root that does not exist."
+
+
+def _effective_codex_mcp_server(
+    codex_path: str,
+    project_path: Path,
+) -> tuple[dict | None, str]:
+    """Ask Codex for the MCP servers effective in the exact worktree."""
+    try:
+        completed = subprocess.run(
+            [codex_path, "mcp", "list", "--json"],
+            cwd=project_path,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return None, f"Codex MCP discovery could not finish: {error}"
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        if len(detail) > 1_000:
+            detail = detail[:1_000].rstrip() + "..."
+        return None, detail or "Codex MCP discovery failed."
+    try:
+        servers = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        return None, f"Codex MCP discovery returned invalid JSON: {error}"
+    if not isinstance(servers, list):
+        return None, "Codex MCP discovery must return a JSON array."
+    matches = [
+        server
+        for server in servers
+        if isinstance(server, dict)
+        and server.get("name") == "alexandrian_library"
+    ]
+    if len(matches) != 1:
+        return None, (
+            "Codex did not expose exactly one alexandrian_library MCP server."
+        )
+    server = matches[0]
+    if not server.get("enabled"):
+        return None, "Codex reports the Alexandrian MCP server as disabled."
+    transport = server.get("transport")
+    if not isinstance(transport, dict) or transport.get("type") != "stdio":
+        return None, "Codex reports an unsupported Alexandrian MCP transport."
+    return transport, "Codex exposes the project Alexandrian MCP server."
+
+
+def _codex_readiness_result(
+    project_path: Path,
+    codex_path: str | None,
+    check_runtime: bool,
+) -> CheckResult:
+    """Derive one explicit Codex readiness state without changing trust."""
+    if codex_path is None:
+        return CheckResult(
+            CODEX_READINESS_LABEL,
+            "optional",
+            f"{CODEX_NOT_INSTALLED}: Install Codex to use this host.",
+            required=False,
+        )
+
+    config_path = project_path / ".codex" / "config.toml"
+    if not config_path.is_file():
+        return CheckResult(
+            CODEX_READINESS_LABEL,
+            "missing",
+            (
+                f"{CODEX_PROJECT_CONFIG_MISSING}: Inspect and copy "
+                f"{project_path / '.codex' / 'config.example.toml'} to "
+                f"{config_path}."
+            ),
+            required=False,
+        )
+
+    git_root, git_error = _project_git_root(project_path)
+    if git_root != project_path:
+        detail = (
+            git_error
+            or "The resolved Git root does not match the Library worktree."
+        )
+        return CheckResult(
+            CODEX_READINESS_LABEL,
+            "missing",
+            f"{CODEX_MCP_NOT_EFFECTIVE}: {detail}",
+            required=False,
+        )
+
+    document, parse_error = _toml_document(config_path)
+    if document is None:
+        return CheckResult(
+            CODEX_READINESS_LABEL,
+            "missing",
+            f"{CODEX_MCP_NOT_EFFECTIVE}: {parse_error}",
+            required=False,
+        )
+    servers = document.get("mcp_servers")
+    server = (
+        servers.get("alexandrian_library")
+        if isinstance(servers, dict)
+        else None
+    )
+    valid_identity, identity_detail = _validate_codex_server_identity(
+        server,
+        project_path,
+    )
+    if (
+        not valid_identity
+        or not isinstance(server, dict)
+        or server.get("required") is not True
+    ):
+        if valid_identity:
+            identity_detail = (
+                "The project MCP server must set required = true."
+            )
+        return CheckResult(
+            CODEX_READINESS_LABEL,
+            "missing",
+            f"{CODEX_MCP_NOT_EFFECTIVE}: {identity_detail}",
+            required=False,
+        )
+
+    trusted, trust_detail = _exact_worktree_is_trusted(
+        project_path,
+        _codex_user_config_path(),
+    )
+    if not trusted:
+        return CheckResult(
+            CODEX_READINESS_LABEL,
+            "missing",
+            (
+                f"{CODEX_PROJECT_UNTRUSTED}: {trust_detail} Inspect "
+                f"{config_path}, then launch Codex from {project_path} and "
+                "approve trust."
+            ),
+            required=False,
+        )
+
+    effective_server, effective_detail = _effective_codex_mcp_server(
+        codex_path,
+        project_path,
+    )
+    effective_identity, effective_identity_detail = (
+        _validate_codex_server_identity(
+            effective_server,
+            project_path,
+        )
+    )
+    if effective_server is None or not effective_identity:
+        detail = (
+            effective_detail
+            if effective_server is None
+            else effective_identity_detail
+        )
+        return CheckResult(
+            CODEX_READINESS_LABEL,
+            "missing",
+            f"{CODEX_MCP_NOT_EFFECTIVE}: {detail}",
+            required=False,
+        )
+
+    if not check_runtime:
+        return CheckResult(
+            CODEX_READINESS_LABEL,
+            "missing",
+            (
+                f"{CODEX_MCP_SERVER_UNSTARTABLE}: MCP initialization and "
+                "tool inventory were not checked."
+            ),
+            required=False,
+        )
+
+    inventory_result = _mcp_tool_inventory_result(effective_server)
+    if inventory_result.status != "available":
+        return CheckResult(
+            CODEX_READINESS_LABEL,
+            "missing",
+            f"{CODEX_MCP_SERVER_UNSTARTABLE}: {inventory_result.detail}",
+            required=False,
+        )
+
+    return CheckResult(
+        CODEX_READINESS_LABEL,
+        "available",
+        (
+            f"{CODEX_READY}: Exact worktree trust, effective MCP identity, "
+            "server startup, and required tools are verified."
+        ),
+        required=False,
     )
 
 
@@ -329,10 +781,17 @@ def collect_environment_results(
             required=False,
         )
     )
+    codex_readiness = _codex_readiness_result(
+        project_path,
+        backend_paths["codex"],
+        check_runtime,
+    )
+    results.append(codex_readiness)
+
     configured_hosts = []
     if backend_paths["claude"] and (project_path / ".mcp.json").is_file():
         configured_hosts.append("claude")
-    if backend_paths["codex"] and codex_config.is_file():
+    if codex_readiness.detail.startswith(f"{CODEX_READY}:"):
         configured_hosts.append("codex")
     results.append(
         CheckResult(

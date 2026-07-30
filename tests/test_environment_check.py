@@ -1,5 +1,6 @@
 import importlib.metadata
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -83,6 +84,42 @@ class EnvironmentCheckTests(unittest.TestCase):
                 self.project_path
             )
 
+    def write_codex_project_config(self) -> dict:
+        transport = {
+            "type": "stdio",
+            "command": sys.executable,
+            "args": [
+                "run",
+                str(self.project_path / "mcp_server.py"),
+            ],
+            "env": {
+                "ALEXANDRIAN_PROJECT_PATH": str(self.project_path),
+            },
+            "cwd": str(self.project_path),
+        }
+        config_path = self.project_path / ".codex" / "config.toml"
+        config_path.write_text(
+            "[mcp_servers.alexandrian_library]\n"
+            f'command = "{sys.executable}"\n'
+            f'args = ["run", "{self.project_path / "mcp_server.py"}"]\n'
+            f'cwd = "{self.project_path}"\n'
+            "required = true\n\n"
+            "[mcp_servers.alexandrian_library.env]\n"
+            f'ALEXANDRIAN_PROJECT_PATH = "{self.project_path}"\n',
+            encoding="utf-8",
+        )
+        return transport
+
+    def write_codex_user_trust(self, trusted_path: Path) -> Path:
+        config_path = self.project_path / "codex-home" / "config.toml"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            f'[projects."{trusted_path}"]\n'
+            'trust_level = "trusted"\n',
+            encoding="utf-8",
+        )
+        return config_path
+
     def test_one_configured_backend_satisfies_the_backend_requirement(
         self,
     ) -> None:
@@ -103,6 +140,32 @@ class EnvironmentCheckTests(unittest.TestCase):
                 for result in results
                 if result.required and result.status == "missing"
             ]
+        )
+
+    def test_untrusted_codex_is_not_counted_as_a_runnable_host(self) -> None:
+        untrusted = environment_check.CheckResult(
+            environment_check.CODEX_READINESS_LABEL,
+            "missing",
+            f"{environment_check.CODEX_PROJECT_UNTRUSTED}: Not trusted.",
+            required=False,
+        )
+        with patch.object(
+            environment_check,
+            "_codex_readiness_result",
+            return_value=untrusted,
+        ):
+            results = self.collect_with_programs(
+                {
+                    "uv": "/bin/uv",
+                    "claude": None,
+                    "codex": "/bin/codex",
+                }
+            )
+        by_label = {result.label: result for result in results}
+
+        self.assertEqual(
+            by_label["Runnable full-workflow host"].status,
+            "missing",
         )
 
     def test_no_backend_is_a_required_failure(self) -> None:
@@ -189,6 +252,239 @@ class EnvironmentCheckTests(unittest.TestCase):
         self.assertIs(
             run.call_args.kwargs["stdin"],
             environment_check.subprocess.DEVNULL,
+        )
+
+    def test_codex_readiness_distinguishes_not_installed(self) -> None:
+        result = environment_check._codex_readiness_result(
+            self.project_path,
+            None,
+            check_runtime=True,
+        )
+
+        self.assertEqual(result.status, "optional")
+        self.assertTrue(
+            result.detail.startswith(
+                f"{environment_check.CODEX_NOT_INSTALLED}:"
+            )
+        )
+
+    def test_codex_readiness_distinguishes_missing_project_config(
+        self,
+    ) -> None:
+        result = environment_check._codex_readiness_result(
+            self.project_path,
+            "/bin/codex",
+            check_runtime=True,
+        )
+
+        self.assertTrue(
+            result.detail.startswith(
+                f"{environment_check.CODEX_PROJECT_CONFIG_MISSING}:"
+            )
+        )
+
+    def test_codex_trust_must_match_the_exact_worktree(self) -> None:
+        parent_path = self.project_path.parent
+        user_config_path = self.write_codex_user_trust(parent_path)
+
+        trusted, detail = environment_check._exact_worktree_is_trusted(
+            self.project_path,
+            user_config_path,
+        )
+
+        self.assertFalse(trusted)
+        self.assertIn(str(self.project_path), detail)
+
+    def test_codex_readiness_stops_before_effective_check_when_untrusted(
+        self,
+    ) -> None:
+        self.write_codex_project_config()
+        user_config_path = self.write_codex_user_trust(
+            self.project_path.parent
+        )
+
+        with (
+            patch.object(
+                environment_check,
+                "_project_git_root",
+                return_value=(self.project_path, ""),
+            ),
+            patch.object(
+                environment_check,
+                "_codex_user_config_path",
+                return_value=user_config_path,
+            ),
+            patch.object(
+                environment_check,
+                "_effective_codex_mcp_server",
+            ) as effective_server,
+        ):
+            result = environment_check._codex_readiness_result(
+                self.project_path,
+                "/bin/codex",
+                check_runtime=True,
+            )
+
+        self.assertTrue(
+            result.detail.startswith(
+                f"{environment_check.CODEX_PROJECT_UNTRUSTED}:"
+            )
+        )
+        effective_server.assert_not_called()
+
+    def test_codex_readiness_rejects_configuration_codex_did_not_load(
+        self,
+    ) -> None:
+        self.write_codex_project_config()
+        user_config_path = self.write_codex_user_trust(self.project_path)
+
+        with (
+            patch.object(
+                environment_check,
+                "_project_git_root",
+                return_value=(self.project_path, ""),
+            ),
+            patch.object(
+                environment_check,
+                "_codex_user_config_path",
+                return_value=user_config_path,
+            ),
+            patch.object(
+                environment_check,
+                "_effective_codex_mcp_server",
+                return_value=(None, "No effective server."),
+            ),
+        ):
+            result = environment_check._codex_readiness_result(
+                self.project_path,
+                "/bin/codex",
+                check_runtime=True,
+            )
+
+        self.assertTrue(
+            result.detail.startswith(
+                f"{environment_check.CODEX_MCP_NOT_EFFECTIVE}:"
+            )
+        )
+
+    def test_codex_readiness_requires_protocol_tool_inventory(self) -> None:
+        transport = self.write_codex_project_config()
+        user_config_path = self.write_codex_user_trust(self.project_path)
+
+        with (
+            patch.object(
+                environment_check,
+                "_project_git_root",
+                return_value=(self.project_path, ""),
+            ),
+            patch.object(
+                environment_check,
+                "_codex_user_config_path",
+                return_value=user_config_path,
+            ),
+            patch.object(
+                environment_check,
+                "_effective_codex_mcp_server",
+                return_value=(transport, "Effective."),
+            ),
+            patch.object(
+                environment_check,
+                "_mcp_tool_inventory_result",
+                return_value=environment_check.CheckResult(
+                    "Alexandrian MCP tool inventory",
+                    "missing",
+                    "One required tool is missing.",
+                ),
+            ),
+        ):
+            result = environment_check._codex_readiness_result(
+                self.project_path,
+                "/bin/codex",
+                check_runtime=True,
+            )
+
+        self.assertTrue(
+            result.detail.startswith(
+                f"{environment_check.CODEX_MCP_SERVER_UNSTARTABLE}:"
+            )
+        )
+
+    def test_codex_ready_requires_trust_effective_config_and_protocol(
+        self,
+    ) -> None:
+        transport = self.write_codex_project_config()
+        user_config_path = self.write_codex_user_trust(self.project_path)
+
+        with (
+            patch.object(
+                environment_check,
+                "_project_git_root",
+                return_value=(self.project_path, ""),
+            ),
+            patch.object(
+                environment_check,
+                "_codex_user_config_path",
+                return_value=user_config_path,
+            ),
+            patch.object(
+                environment_check,
+                "_effective_codex_mcp_server",
+                return_value=(transport, "Effective."),
+            ),
+            patch.object(
+                environment_check,
+                "_mcp_tool_inventory_result",
+                return_value=environment_check.CheckResult(
+                    "Alexandrian MCP tool inventory",
+                    "available",
+                    "All required tools are available.",
+                ),
+            ),
+        ):
+            result = environment_check._codex_readiness_result(
+                self.project_path,
+                "/bin/codex",
+                check_runtime=True,
+            )
+
+        self.assertEqual(result.status, "available")
+        self.assertTrue(
+            result.detail.startswith(f"{environment_check.CODEX_READY}:")
+        )
+
+    def test_effective_codex_check_uses_exact_project_root(self) -> None:
+        completed = Mock(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "name": "alexandrian_library",
+                        "enabled": True,
+                        "transport": {"type": "stdio"},
+                    }
+                ]
+            ),
+            stderr="",
+        )
+
+        with patch.object(
+            environment_check.subprocess,
+            "run",
+            return_value=completed,
+        ) as run:
+            transport, _ = environment_check._effective_codex_mcp_server(
+                "/bin/codex",
+                self.project_path,
+            )
+
+        self.assertEqual(transport, {"type": "stdio"})
+        self.assertEqual(
+            run.call_args.args[0],
+            ["/bin/codex", "mcp", "list", "--json"],
+        )
+        self.assertEqual(
+            run.call_args.kwargs["cwd"],
+            self.project_path,
         )
 
     def test_invalid_default_policy_is_reported_without_rewriting_it(
