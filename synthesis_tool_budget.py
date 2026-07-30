@@ -12,12 +12,16 @@ from typing import Any, Mapping
 
 READ_TOOL = "read_staged_synthesis_plan_shard_input"
 SUBMIT_TOOL = "submit_staged_synthesis_plan_shard"
+INVENTORY_READ_TOOL = "read_staged_synthesis_inventory_input"
+INVENTORY_SUBMIT_TOOL = "submit_staged_synthesis_inventory_unit"
 EDITION_TOOL = "save_staged_synthesis_edition_unit"
 AUDIT_UNIT_TOOL = "submit_staged_synthesis_audit_unit"
 GLOBAL_AUDIT_TOOL = "submit_staged_synthesis_global_audit"
 CONTROLLED_TOOLS = {
     READ_TOOL,
     SUBMIT_TOOL,
+    INVENTORY_READ_TOOL,
+    INVENTORY_SUBMIT_TOOL,
     EDITION_TOOL,
     AUDIT_UNIT_TOOL,
     GLOBAL_AUDIT_TOOL,
@@ -25,11 +29,16 @@ CONTROLLED_TOOLS = {
 TOOL_KINDS = {
     READ_TOOL: "read",
     SUBMIT_TOOL: "submit",
+    INVENTORY_READ_TOOL: "read",
+    INVENTORY_SUBMIT_TOOL: "submit",
     EDITION_TOOL: "edition-submit",
     AUDIT_UNIT_TOOL: "audit-submit",
     GLOBAL_AUDIT_TOOL: "global-audit-submit",
 }
 CORRECTABLE_ERROR_PREFIX = "CORRECTABLE_PLAN_SHARD_VALIDATION:"
+CORRECTABLE_INVENTORY_ERROR_PREFIX = (
+    "CORRECTABLE_INVENTORY_VALIDATION:"
+)
 
 CONTEXT_ENV = {
     "book_id": "ALEXANDRIAN_SYNTHESIS_BOOK_ID",
@@ -133,6 +142,10 @@ def _stage_scope_id(stage: str, tool_name: str) -> str | None:
         if not stage.startswith("plan-shard-"):
             return None
         return stage.removeprefix("plan-shard-") or None
+    if tool_name in {INVENTORY_READ_TOOL, INVENTORY_SUBMIT_TOOL}:
+        if not stage.startswith("inventory-"):
+            return None
+        return stage.removeprefix("inventory-") or None
     if tool_name == EDITION_TOOL:
         if not stage.startswith("edition-S"):
             return None
@@ -357,9 +370,9 @@ def reserve_tool_attempt(
         reservation_path, _ = _receipt_paths(root, kind, attempt_number)
         if reservation_path.exists():
             raise SynthesisToolBudgetError(
-                "The plan-shard input read budget is exhausted."
+                "The staged input read budget is exhausted."
             )
-    elif tool_name == SUBMIT_TOOL:
+    elif tool_name in {SUBMIT_TOOL, INVENTORY_SUBMIT_TOOL}:
         first_reservation, first_result = _receipt_paths(root, kind, 1)
         second_reservation, _ = _receipt_paths(root, kind, 2)
         if not first_reservation.exists():
@@ -368,7 +381,7 @@ def reserve_tool_attempt(
         else:
             if second_reservation.exists():
                 raise SynthesisToolBudgetError(
-                    "The plan-shard submission budget is exhausted."
+                    "The staged submission budget is exhausted."
                 )
             if not first_result.is_file():
                 raise SynthesisToolBudgetError(
@@ -516,18 +529,26 @@ def finalize_action_budget(
             }
         )
     tools = {receipt["tool_name"] for receipt in receipts}
-    plan_shard_budget = bool(tools & {READ_TOOL, SUBMIT_TOOL})
+    correction_budget = bool(
+        tools
+        & {
+            READ_TOOL,
+            SUBMIT_TOOL,
+            INVENTORY_READ_TOOL,
+            INVENTORY_SUBMIT_TOOL,
+        }
+    )
     summary = {
         "schema_version": "1.0",
         "book_id": book_id,
         "action_id": action_id,
-        "maximum_reads": 1 if plan_shard_budget else 0,
-        "maximum_submissions": 2 if plan_shard_budget else 1,
+        "maximum_reads": 1 if correction_budget else 0,
+        "maximum_submissions": 2 if correction_budget else 1,
         "maximum_successful_writes": 1,
         "second_submission_rule": (
             (
                 "correctable_validation_rejected_only"
-                if plan_shard_budget
+                if correction_budget
                 else "none"
             )
         ),

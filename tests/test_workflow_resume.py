@@ -594,6 +594,60 @@ class WorkflowResumeTests(unittest.TestCase):
                 "book_finalization",
             )
 
+    def test_inventory_provider_hold_is_terminal_at_public_workflow(
+        self,
+    ) -> None:
+        book_directory = self.write_ready_completed_book_state()
+        candidate_path = book_directory / "candidate.md"
+        candidate_path.write_text("# Candidate\n", encoding="utf-8")
+        candidate = {
+            "schema_version": "1.0",
+            "book_id": self.book_id,
+            "lifecycle_status": "candidate",
+            "candidate_path": str(
+                candidate_path.relative_to(self.project_path)
+            ),
+            "candidate_sha256": hashlib.sha256(
+                candidate_path.read_bytes()
+            ).hexdigest(),
+        }
+        self.write_json(
+            book_directory / "candidate_assembly.json",
+            candidate,
+        )
+        with ExitStack() as stack:
+            for active_patch in self.patches():
+                stack.enter_context(active_patch)
+            stack.enter_context(
+                patch.object(
+                    backend_selector.book_assembler,
+                    "verify_existing_candidate",
+                    return_value=candidate,
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    backend_selector.book_synthesis,
+                    "workflow_state",
+                    return_value="inventory_provider_held",
+                )
+            )
+            self.assertEqual(
+                backend_selector.workflow_stage(self.conversation_path),
+                "synthesis_held",
+            )
+            result = backend_selector.continue_book_workflow(
+                "codex",
+                "/usr/bin/codex",
+                self.conversation_path,
+            )
+        self.assertEqual(result["status"], "synthesis_held")
+        self.assertEqual(
+            result["synthesis_state"],
+            "inventory_provider_held",
+        )
+        self.assertIn("No further provider call", result["reason"])
+
     def test_noninteractive_editorial_checkpoint_pauses_cleanly(
         self,
     ) -> None:

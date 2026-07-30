@@ -123,6 +123,94 @@ class SynthesisToolBudgetTests(unittest.TestCase):
         ):
             self.reserve(synthesis_tool_budget.SUBMIT_TOOL)
 
+    def test_inventory_has_one_read_and_one_correctable_resubmission(
+        self,
+    ) -> None:
+        action_id = "inventory-CH1-test"
+        stage = "inventory-CH1"
+        event = {
+            "schema_version": "1.0",
+            "event": "contract_opened",
+            "book_id": self.book_id,
+            "cycle_id": self.cycle_id,
+            "action_id": action_id,
+            "stage": stage,
+            "backend": self.backend,
+            "input_hash": self.input_hash,
+            "tool_budget": {
+                "controlled_tools": [
+                    synthesis_tool_budget.INVENTORY_READ_TOOL,
+                    synthesis_tool_budget.INVENTORY_SUBMIT_TOOL,
+                ]
+            },
+        }
+        with self.ledger.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(event) + "\n")
+        environment = {
+            synthesis_tool_budget.CONTEXT_ENV[field]: value
+            for field, value in {
+                "book_id": self.book_id,
+                "cycle_id": self.cycle_id,
+                "action_id": action_id,
+                "stage": stage,
+                "backend": self.backend,
+                "input_hash": self.input_hash,
+            }.items()
+        }
+        read = synthesis_tool_budget.reserve_tool_attempt(
+            self.project,
+            synthesis_tool_budget.INVENTORY_READ_TOOL,
+            {},
+            environment,
+        )
+        synthesis_tool_budget.record_tool_result(
+            self.project,
+            read,
+            "success",
+        )
+        first = synthesis_tool_budget.reserve_tool_attempt(
+            self.project,
+            synthesis_tool_budget.INVENTORY_SUBMIT_TOOL,
+            {},
+            environment,
+        )
+        synthesis_tool_budget.record_tool_result(
+            self.project,
+            first,
+            "correctable_validation_rejected",
+            "missing canonical contribution",
+        )
+        second = synthesis_tool_budget.reserve_tool_attempt(
+            self.project,
+            synthesis_tool_budget.INVENTORY_SUBMIT_TOOL,
+            {},
+            environment,
+        )
+        self.assertEqual(second["attempt_number"], 2)
+        synthesis_tool_budget.record_tool_result(
+            self.project,
+            second,
+            "success",
+        )
+        with self.assertRaisesRegex(
+            synthesis_tool_budget.SynthesisToolBudgetError,
+            "submission budget is exhausted",
+        ):
+            synthesis_tool_budget.reserve_tool_attempt(
+                self.project,
+                synthesis_tool_budget.INVENTORY_SUBMIT_TOOL,
+                {},
+                environment,
+            )
+        summary = synthesis_tool_budget.finalize_action_budget(
+            self.project,
+            self.book_id,
+            action_id,
+        )
+        self.assertEqual(summary["maximum_reads"], 1)
+        self.assertEqual(summary["maximum_submissions"], 2)
+        self.assertEqual(summary["maximum_successful_writes"], 1)
+
     def test_schema_rejection_consumes_first_and_blocks_retry(self) -> None:
         first = self.reserve(
             synthesis_tool_budget.SUBMIT_TOOL,

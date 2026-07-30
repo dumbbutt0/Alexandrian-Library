@@ -8,6 +8,7 @@ from unittest.mock import patch
 import book_synthesis
 import backend_selector
 import staged_synthesis
+import synthesis_tool_budget
 
 
 class StagedSynthesisTests(unittest.TestCase):
@@ -155,6 +156,7 @@ class StagedSynthesisTests(unittest.TestCase):
             self.book_id,
             self.candidate,
             self.profile,
+            protocol_version="staged-v1",
         )
 
     def inventory_proposal(
@@ -278,6 +280,58 @@ class StagedSynthesisTests(unittest.TestCase):
                 else []
             ),
             "unresolved_questions": [],
+        }
+
+    def inventory_contribution(
+        self,
+        chapter_id: str,
+        *,
+        reverse_canonical: bool = False,
+    ) -> dict:
+        task = staged_synthesis.inventory_task(
+            self.project,
+            self.book_id,
+            chapter_id,
+        )
+        legacy = self.inventory_proposal(
+            chapter_id,
+            candidate_only=chapter_id == "CH1",
+            audited=True,
+        )
+        fields = (
+            "claim_id",
+            "candidate_excerpt",
+            "candidate_location",
+            "certainty",
+            "scope_and_conditions",
+            "attribution",
+            "evidence_relationship",
+            "resolution_status",
+            "normalized_summary",
+            "protected_semantics",
+            "importance_reason",
+        )
+        canonical = [
+            {field: claim[field] for field in fields}
+            for claim in legacy["claims"]
+            if claim["source_kind"] == "canonical"
+        ]
+        if reverse_canonical:
+            canonical.reverse()
+        candidate = [
+            {field: claim[field] for field in fields}
+            for claim in legacy["claims"]
+            if claim["source_kind"] == "candidate_only"
+        ]
+        return {
+            "book_id": self.book_id,
+            "unit_id": chapter_id,
+            "input_hash": task["input_hash"],
+            "canonical_claims": canonical,
+            "candidate_claims": candidate,
+            "definitions": legacy["definitions"],
+            "limitations": legacy["limitations"],
+            "unresolved_questions": legacy["unresolved_questions"],
         }
 
     def initialize_foundation(self) -> tuple[dict, dict, dict]:
@@ -1032,6 +1086,190 @@ class StagedSynthesisTests(unittest.TestCase):
         changed["limitations"] = ["Different."]
         with self.assertRaises(book_synthesis.BookSynthesisError):
             staged_synthesis.save_inventory_unit(self.project, changed)
+
+    def test_clean_start_uses_sharded_hash_bound_inventory(self) -> None:
+        staged_synthesis.prepare(
+            self.project,
+            self.book_id,
+            self.candidate,
+            self.profile,
+        )
+        context = book_synthesis.read_json_object(
+            staged_synthesis.staging_directory(
+                self.project,
+                self.book_id,
+            )
+            / "context.json",
+            "context",
+        )
+        self.assertEqual(
+            context["protocol_version"],
+            book_synthesis.SHARDED_PLAN_PROTOCOL,
+        )
+        self.assertEqual(context["cycle_id"], "cycle-001")
+        self.assertIsNone(context["cycle_authorization_sha256"])
+        task = staged_synthesis.inventory_task(
+            self.project,
+            self.book_id,
+            "CH2",
+        )
+        self.assertEqual(
+            [slot["claim_id"] for slot in task["canonical_claim_slots"]],
+            ["review-staged:C1", "review-staged:C2"],
+        )
+        read = staged_synthesis.read_inventory_input(
+            self.project,
+            self.book_id,
+            "CH2",
+            task["input_hash"],
+        )
+        self.assertEqual(read["input_hash"], task["input_hash"])
+        with self.assertRaisesRegex(
+            book_synthesis.BookSynthesisError,
+            "input hash is stale",
+        ):
+            staged_synthesis.read_inventory_input(
+                self.project,
+                self.book_id,
+                "CH2",
+                "0" * 64,
+            )
+        metadata_path = self.project / task["packet_metadata_path"]
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["working_title"] = "Changed after hashing"
+        self.write_json(metadata_path, metadata)
+        with self.assertRaisesRegex(
+            book_synthesis.BookSynthesisError,
+            "metadata changed",
+        ):
+            staged_synthesis.read_inventory_input(
+                self.project,
+                self.book_id,
+                "CH2",
+                task["input_hash"],
+            )
+
+    def test_inventory_order_is_deterministic_and_initial_plan_promotes(
+        self,
+    ) -> None:
+        staged_synthesis.prepare(
+            self.project,
+            self.book_id,
+            self.candidate,
+            self.profile,
+        )
+        staged_synthesis.save_inventory_contribution(
+            self.project,
+            self.inventory_contribution("CH1"),
+        )
+        chapter_two = staged_synthesis.save_inventory_contribution(
+            self.project,
+            self.inventory_contribution(
+                "CH2",
+                reverse_canonical=True,
+            ),
+        )
+        self.assertEqual(
+            [
+                claim["claim_id"]
+                for claim in chapter_two["claims"]
+                if claim["source_kind"] == "canonical"
+            ],
+            ["review-staged:C1", "review-staged:C2"],
+        )
+        staged_synthesis.prepare_plan_shard_inputs(
+            self.project,
+            self.book_id,
+        )
+        self.save_all_plan_shards()
+        staged_synthesis.merge_plan_shards(
+            self.project,
+            self.book_id,
+        )
+        self.sharded_audit()
+        staged_synthesis.promote_approved_plan(
+            self.project,
+            self.book_id,
+        )
+        context, _, _ = book_synthesis.load_initialized_synthesis(
+            self.project,
+            self.book_id,
+        )
+        self.assertEqual(context["cycle_id"], "cycle-001")
+        self.assertEqual(
+            book_synthesis.workflow_state(self.project, self.book_id),
+            "edition_units_S1",
+        )
+        self.save_editions()
+        receipt = self.save_audits()
+        self.assertEqual(
+            receipt["lifecycle_status"],
+            "ready_for_editorial",
+        )
+        self.assertEqual(
+            book_synthesis.workflow_state(self.project, self.book_id),
+            "ready_for_editorial",
+        )
+        book_synthesis.synthesis_cycle_directory(
+            self.project,
+            self.book_id,
+        ).mkdir(parents=True)
+        with self.assertRaisesRegex(
+            book_synthesis.BookSynthesisError,
+            "no valid plan audit",
+        ):
+            book_synthesis.load_initialized_synthesis(
+                self.project,
+                self.book_id,
+            )
+
+    def test_inventory_missing_canonical_slot_is_correctable(self) -> None:
+        staged_synthesis.prepare(
+            self.project,
+            self.book_id,
+            self.candidate,
+            self.profile,
+        )
+        proposal = self.inventory_contribution("CH2")
+        proposal["canonical_claims"].pop()
+        with self.assertRaisesRegex(
+            staged_synthesis.InventoryCorrectionError,
+            "match the supplied slots",
+        ):
+            staged_synthesis.save_inventory_contribution(
+                self.project,
+                proposal,
+            )
+
+    def test_inventory_failures_have_typed_diagnostics(self) -> None:
+        cases = {
+            "Inventory contribution input hash is stale.": (
+                "noncorrectable_input_hash_mismatch"
+            ),
+            "Inventory claim conflicts with its authoritative text.": (
+                "noncorrectable_authority_conflict"
+            ),
+            "Canonical inventory contributions must match supplied slots.": (
+                "correctable_reference_error"
+            ),
+            "Proposal has a validation error in a missing classification.": (
+                "correctable_schema_error"
+            ),
+        }
+        for error, expected in cases.items():
+            with self.subTest(expected=expected):
+                self.assertEqual(
+                    backend_selector.classify_staged_provider_failure(
+                        "",
+                        None,
+                        {
+                            "tool_calls": [],
+                            "tool_errors": [error],
+                        },
+                        synthesis_tool_budget.INVENTORY_SUBMIT_TOOL,
+                    ),
+                    expected,
+                )
 
     def test_cycle006_sc3_normalization_strengthening_is_rejected(self) -> None:
         fixture_path = (
@@ -2158,6 +2396,81 @@ class StagedSynthesisTests(unittest.TestCase):
             book_synthesis.workflow_state(self.project, self.book_id),
             "audit_provider_held",
         )
+
+    def test_inventory_provider_budget_exhaustion_is_terminal(self) -> None:
+        staged_synthesis.prepare(
+            self.project,
+            self.book_id,
+            self.candidate,
+            self.profile,
+        )
+        task = staged_synthesis.inventory_task(
+            self.project,
+            self.book_id,
+            "CH1",
+        )
+        preflight = {
+            "schema_version": "1.0",
+            "backend": "codex",
+            "stage_contract": "inventory",
+            "book_id": self.book_id,
+            "chapter_id": "CH1",
+            "input_hash": task["input_hash"],
+            "required_tools": [
+                "read_staged_synthesis_inventory_input",
+                "submit_staged_synthesis_inventory_unit",
+            ],
+            "registered_tools_verified": True,
+            "provider_permissions_verified": True,
+            "bounded_input_verified": True,
+            "chapter_sha256": task["packet_sha256"],
+        }
+        preflight["capability_sha256"] = (
+            book_synthesis.canonical_json_sha256(
+                preflight,
+                "capability_sha256",
+            )
+        )
+        with (
+            patch.object(backend_selector, "PROJECT_PATH", self.project),
+            patch.object(
+                backend_selector,
+                "BOOKS_PATH",
+                self.project / "data" / "books",
+            ),
+            patch.object(
+                backend_selector,
+                "preflight_staged_capabilities",
+                return_value=preflight,
+            ),
+            patch.object(
+                backend_selector,
+                "capture_backend_response",
+                side_effect=RuntimeError("provider timed out"),
+            ) as provider,
+        ):
+            for _ in range(2):
+                with self.assertRaisesRegex(RuntimeError, "provider timed out"):
+                    backend_selector.run_next_staged_synthesis_action(
+                        "codex",
+                        "/bin/codex",
+                        self.book_id,
+                    )
+            self.assertEqual(provider.call_count, 2)
+            self.assertEqual(
+                book_synthesis.workflow_state(self.project, self.book_id),
+                "inventory_provider_held",
+            )
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "terminal: inventory_provider_held",
+            ):
+                backend_selector.run_next_staged_synthesis_action(
+                    "codex",
+                    "/bin/codex",
+                    self.book_id,
+                )
+            self.assertEqual(provider.call_count, 2)
 
     def test_audit_recovery_cycle_preserves_s1_and_resumes_next_unit(
         self,

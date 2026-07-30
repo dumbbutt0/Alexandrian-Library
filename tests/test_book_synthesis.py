@@ -114,6 +114,7 @@ class BookSynthesisTests(unittest.TestCase):
             self.book_id,
             self.candidate,
             self.profile_path,
+            protocol_version="staged-v1",
         )
         inventory = {
             "book_id": self.book_id,

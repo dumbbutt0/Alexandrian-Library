@@ -12,11 +12,13 @@
     "status",
     "target_path",
     "target_created",
+    "accepted_artifact",
     "input_hash",
     "maximum_provider_calls",
     "same_provider_retry_allowed",
     "consumed_backends",
     "provider_attempts",
+    "required_recovery_authority_type",
     "controller_path",
     "stage_event_sha256",
     "recorded_at",
@@ -34,10 +36,11 @@
     },
     "stage": {
       "type": "string",
-      "pattern": "^(edition|audit)-S[12]-.+|global-audit-S[12]$"
+      "pattern": "^(inventory-CH[1-9][0-9]*|(edition|audit)-S[12]-.+|global-audit-S[12])$"
     },
     "status": {
       "enum": [
+        "inventory_provider_held",
         "edition_provider_held",
         "audit_provider_held",
         "global_audit_provider_held"
@@ -45,6 +48,7 @@
     },
     "target_path": {"type": "string", "minLength": 1},
     "target_created": {"const": false},
+    "accepted_artifact": {"const": false},
     "input_hash": {"$ref": "#/$defs/sha256"},
     "maximum_provider_calls": {"const": 2},
     "same_provider_retry_allowed": {"const": true},
@@ -65,15 +69,20 @@
           "action_id",
           "backend",
           "failure_classification",
-          "diagnostic_sha256"
+          "diagnostic_sha256",
+          "correction_submission_used"
         ],
         "properties": {
           "action_id": {"type": "string", "minLength": 1},
           "backend": {"enum": ["codex", "claude"]},
           "failure_classification": {"type": "string", "minLength": 1},
-          "diagnostic_sha256": {"$ref": "#/$defs/sha256"}
+          "diagnostic_sha256": {"$ref": "#/$defs/sha256"},
+          "correction_submission_used": {"type": "boolean"}
         }
       }
+    },
+    "required_recovery_authority_type": {
+      "const": "human_synthesis_recovery_authorization"
     },
     "controller_path": {"type": "string", "minLength": 1},
     "stage_event_sha256": {"$ref": "#/$defs/sha256"},

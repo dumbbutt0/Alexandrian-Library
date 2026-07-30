@@ -928,13 +928,36 @@ class SynthesisAuditSubmission(StrictModel):
     blocking_reasons: list[str] = Field(default_factory=list)
 
 
+class StagedSynthesisInventoryClaimContribution(StrictModel):
+    claim_id: str = Field(min_length=1)
+    candidate_excerpt: str = Field(min_length=1)
+    candidate_location: str = Field(min_length=1)
+    certainty: str = Field(min_length=1)
+    scope_and_conditions: str = Field(min_length=1)
+    attribution: str = Field(min_length=1)
+    evidence_relationship: str = Field(min_length=1)
+    resolution_status: Literal[
+        "established",
+        "qualified",
+        "project_choice",
+        "open",
+        "routed",
+        "unresolved",
+        "contradicted",
+    ]
+    normalized_summary: str = Field(min_length=1)
+    protected_semantics: SynthesisProtectedSemantics
+    importance_reason: str = Field(min_length=1)
+
+
 class StagedSynthesisInventoryUnitProposal(StrictModel):
     book_id: str = Field(pattern=r"^book-[A-Za-z0-9._-]+$")
     unit_id: str = Field(pattern=r"^CH[1-9][0-9]*$")
-    context_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    candidate_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    packet_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    claims: list[SynthesisInventoryClaim]
+    input_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    canonical_claims: list[StagedSynthesisInventoryClaimContribution]
+    candidate_claims: list[StagedSynthesisInventoryClaimContribution] = Field(
+        default_factory=list
+    )
     definitions: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
     unresolved_questions: list[str] = Field(default_factory=list)
@@ -5869,7 +5892,16 @@ class AlexandrianFastMCP(FastMCP):
             result = await super().call_tool(name, arguments)
         except ToolError as error:
             message = str(error)
-            if synthesis_tool_budget.CORRECTABLE_ERROR_PREFIX in message:
+            if (
+                synthesis_tool_budget.CORRECTABLE_ERROR_PREFIX in message
+                or synthesis_tool_budget.CORRECTABLE_INVENTORY_ERROR_PREFIX
+                in message
+                or (
+                    name
+                    == synthesis_tool_budget.INVENTORY_SUBMIT_TOOL
+                    and "validation error" in message.lower()
+                )
+            ):
                 outcome = "correctable_validation_rejected"
             elif "validation error" in message.lower():
                 outcome = "argument_validation_rejected"
@@ -7489,6 +7521,31 @@ def submit_book_synthesis_audit(
 
 @mcp.tool(
     annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    )
+)
+def read_staged_synthesis_inventory_input(
+    book_id: str,
+    unit_id: str,
+    input_hash: str,
+) -> dict:
+    """Return one hash-verified inventory input and exact chapter text."""
+    try:
+        return staged_synthesis.read_inventory_input(
+            PROJECT_PATH,
+            book_id,
+            unit_id,
+            input_hash,
+        )
+    except book_synthesis.BookSynthesisError as error:
+        raise ToolError(str(error)) from error
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
         readOnlyHint=False,
         destructiveHint=False,
         idempotentHint=True,
@@ -7500,10 +7557,16 @@ def submit_staged_synthesis_inventory_unit(
 ) -> dict:
     """Save one candidate-bound chapter inventory shard."""
     try:
-        return staged_synthesis.save_inventory_unit(
+        return staged_synthesis.save_inventory_contribution(
             PROJECT_PATH,
             proposal.model_dump(mode="json"),
         )
+    except staged_synthesis.InventoryCorrectionError as error:
+        raise ToolError(
+            synthesis_tool_budget.CORRECTABLE_INVENTORY_ERROR_PREFIX
+            + " "
+            + str(error)
+        ) from error
     except book_synthesis.BookSynthesisError as error:
         raise ToolError(str(error)) from error
 

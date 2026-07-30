@@ -27,6 +27,7 @@ SUPPORTED_PIPELINE_VERSIONS = {
     SHARDED_PIPELINE_VERSION,
 }
 MAX_UNIT_CHARACTERS = 60_000
+INVENTORY_TOOL_CONTRACT_VERSION = "inventory-authority-slots-v1"
 
 
 class PlanShardCorrectionError(book_synthesis.BookSynthesisError):
@@ -35,6 +36,10 @@ class PlanShardCorrectionError(book_synthesis.BookSynthesisError):
 
 class PlanShardArtifactConflictError(book_synthesis.BookSynthesisError):
     """A non-correctable conflict with an already durable shard."""
+
+
+class InventoryCorrectionError(book_synthesis.BookSynthesisError):
+    """A deterministic inventory defect that permits one corrected submit."""
 
 
 def staging_directory(project_path: Path, book_id: str) -> Path:
@@ -55,20 +60,28 @@ def provider_stage_hold_path(
 ) -> Path:
     """Return the immutable hold path for one exhausted provider stage."""
     if not re.fullmatch(
+        r"inventory-CH[1-9][0-9]*|"
         r"(?:edition|audit)-S[12]-[A-Za-z0-9._-]+|global-audit-S[12]",
         stage,
     ):
         raise book_synthesis.BookSynthesisError(
             "Provider-stage hold identity is invalid."
         )
+    root = (
+        staging_directory(project_path, book_id)
+        if stage.startswith("inventory-")
+        else staged_directory(project_path, book_id)
+    )
     return (
-        staged_directory(project_path, book_id)
+        root
         / "provider_holds"
         / f"{stage}.json"
     )
 
 
 def _provider_hold_status(stage: str) -> str:
+    if stage.startswith("inventory-"):
+        return "inventory_provider_held"
     if stage.startswith("edition-"):
         return "edition_provider_held"
     if stage.startswith("audit-"):
@@ -168,17 +181,49 @@ def save_provider_stage_hold(
         raise book_synthesis.BookSynthesisError(
             "Provider-stage hold does not match consumed calls."
         )
-    attempts = [
-        {
-            "action_id": event.get("action_id"),
-            "backend": event.get("backend"),
-            "failure_classification": event.get(
-                "failure_classification"
-            ),
-            "diagnostic_sha256": event.get("diagnostic_sha256"),
-        }
-        for event in failed[-2:]
-    ]
+    attempts = []
+    for event in failed[-2:]:
+        correction_submission_used = False
+        budget_path = event.get("tool_budget_path")
+        if isinstance(budget_path, str):
+            summary_path = book_synthesis.resolve_project_path(
+                project_path,
+                budget_path,
+                "Synthesis tool-budget summary",
+            )
+            summary = book_synthesis.read_json_object(
+                summary_path,
+                "Synthesis tool-budget summary",
+            )
+            if (
+                summary.get("budget_sha256")
+                != event.get("tool_budget_sha256")
+                or summary.get("budget_sha256")
+                != book_synthesis.canonical_json_sha256(
+                    summary,
+                    "budget_sha256",
+                )
+            ):
+                raise book_synthesis.BookSynthesisError(
+                    "Provider-stage tool budget is stale."
+                )
+            correction_submission_used = any(
+                receipt.get("record_type") == "reservation"
+                and receipt.get("attempt_number") == 2
+                for receipt in summary.get("attempt_receipts", [])
+                if isinstance(receipt, dict)
+            )
+        attempts.append(
+            {
+                "action_id": event.get("action_id"),
+                "backend": event.get("backend"),
+                "failure_classification": event.get(
+                    "failure_classification"
+                ),
+                "diagnostic_sha256": event.get("diagnostic_sha256"),
+                "correction_submission_used": correction_submission_used,
+            }
+        )
     if any(
         not isinstance(attempt["action_id"], str)
         or not isinstance(attempt["failure_classification"], str)
@@ -204,11 +249,15 @@ def save_provider_stage_hold(
         "status": _provider_hold_status(stage),
         "target_path": relative_target,
         "target_created": False,
+        "accepted_artifact": False,
         "input_hash": input_hash,
         "maximum_provider_calls": maximum_provider_calls,
         "same_provider_retry_allowed": True,
         "consumed_backends": consumed_backends,
         "provider_attempts": attempts,
+        "required_recovery_authority_type": (
+            "human_synthesis_recovery_authorization"
+        ),
         "controller_path": str(controller_path.relative_to(project_path)),
         "stage_event_sha256": stage_event_sha256,
         "recorded_at": book_synthesis.current_utc_time(),
@@ -246,6 +295,19 @@ def load_provider_stage_hold(path: Path) -> dict:
     hold = book_synthesis.read_json_object(path, "Provider-stage hold")
     if (
         hold.get("status") != _provider_hold_status(hold.get("stage", ""))
+        or hold.get("target_created") is not False
+        or hold.get("accepted_artifact") is not False
+        or hold.get("required_recovery_authority_type")
+        != "human_synthesis_recovery_authorization"
+        or not isinstance(hold.get("provider_attempts"), list)
+        or any(
+            not isinstance(attempt, dict)
+            or not isinstance(
+                attempt.get("correction_submission_used"),
+                bool,
+            )
+            for attempt in hold.get("provider_attempts", [])
+        )
         or hold.get("hold_sha256")
         != book_synthesis.canonical_json_sha256(hold, "hold_sha256")
     ):
@@ -372,6 +434,8 @@ def prepare(
     book_id: str,
     candidate: dict,
     profile_path: Path,
+    *,
+    protocol_version: str | None = None,
 ) -> dict:
     """Create immutable chapter packets and locked candidate segments."""
     project_path = project_path.resolve()
@@ -381,6 +445,7 @@ def prepare(
         book_id,
         candidate,
         profile_path,
+        protocol_version=protocol_version,
     )
     if (
         context.get("protocol_version")
@@ -591,11 +656,52 @@ def inventory_task(project_path: Path, book_id: str, unit_id: str) -> dict:
     if unit is None:
         raise book_synthesis.BookSynthesisError("Unknown inventory unit.")
     root = staging_directory(project_path, book_id)
-    return {
+    claims_by_id = {
+        claim["claim_id"]: claim for claim in context["required_claims"]
+    }
+    canonical_slots = []
+    for order, claim_id in enumerate(unit["canonical_claim_ids"], start=1):
+        claim = claims_by_id[claim_id]
+        receipts = claim.get("source_receipt_ids", [])
+        authority_type = (
+            "source_evidence"
+            if receipts
+            else (
+                "user_statement"
+                if claim.get("origin") == "user"
+                else "unknown"
+            )
+        )
+        canonical_slots.append(
+            {
+                "claim_id": claim_id,
+                "canonical_order": order,
+                "authoritative_text": claim["claim"],
+                "authoritative_text_sha256": hashlib.sha256(
+                    claim["claim"].encode("utf-8")
+                ).hexdigest(),
+                "authority_type": authority_type,
+                "authority_source": "canonical_claim",
+                "authority_ref": claim_id,
+                "evidence_receipt_ids": receipts,
+                "source_origin": claim.get("origin"),
+                "source_status": claim.get("status"),
+            }
+        )
+    document = {
+        "schema_version": "1.0",
+        "tool_contract_version": INVENTORY_TOOL_CONTRACT_VERSION,
+        "inventory_schema_version": "4.0",
+        "protocol_version": context["protocol_version"],
         "book_id": book_id,
         "unit_id": unit_id,
         "context_sha256": context["context_sha256"],
         "candidate_sha256": context["candidate_sha256"],
+        "candidate_assembly_sha256": context[
+            "candidate_assembly_sha256"
+        ],
+        "manifest_sha256": context["manifest_sha256"],
+        "profile_skill_sha256": context["profile"]["skill_sha256"],
         "packet_path": str(
             (root / unit["packet_path"]).relative_to(project_path.resolve())
         ),
@@ -604,9 +710,215 @@ def inventory_task(project_path: Path, book_id: str, unit_id: str) -> dict:
                 project_path.resolve()
             )
         ),
+        "packet_metadata_sha256": unit["packet_metadata_sha256"],
         "packet_sha256": unit["packet_sha256"],
-        "canonical_claim_ids": unit["canonical_claim_ids"],
+        "canonical_claim_ids": list(unit["canonical_claim_ids"]),
+        "canonical_claim_slots": canonical_slots,
     }
+    document["input_hash"] = book_synthesis.canonical_json_sha256(
+        document,
+        "input_hash",
+    )
+    return document
+
+
+def read_inventory_input(
+    project_path: Path,
+    book_id: str,
+    unit_id: str,
+    input_hash: str,
+) -> dict:
+    """Return one hash-bound inventory input and its exact chapter text."""
+    project_path = project_path.resolve()
+    task = inventory_task(project_path, book_id, unit_id)
+    if input_hash != task["input_hash"]:
+        raise book_synthesis.BookSynthesisError(
+            "Requested inventory input hash is stale."
+        )
+    packet_path = book_synthesis.resolve_project_path(
+        project_path,
+        task["packet_path"],
+        "Inventory chapter packet",
+    )
+    metadata_path = book_synthesis.resolve_project_path(
+        project_path,
+        task["packet_metadata_path"],
+        "Inventory packet metadata",
+    )
+    if (
+        book_synthesis.file_sha256(packet_path) != task["packet_sha256"]
+        or not metadata_path.is_file()
+    ):
+        raise book_synthesis.BookSynthesisError(
+            "Inventory input packet changed."
+        )
+    metadata = book_synthesis.read_json_object(
+        metadata_path,
+        "Inventory packet metadata",
+    )
+    if (
+        metadata.get("packet_metadata_sha256")
+        != task["packet_metadata_sha256"]
+        or metadata.get("packet_metadata_sha256")
+        != book_synthesis.canonical_json_sha256(
+            metadata,
+            "packet_metadata_sha256",
+        )
+        or metadata.get("packet_sha256") != task["packet_sha256"]
+    ):
+        raise book_synthesis.BookSynthesisError(
+            "Inventory packet metadata changed."
+        )
+    return {
+        "schema_version": "1.0",
+        "book_id": book_id,
+        "unit_id": unit_id,
+        "input_hash": input_hash,
+        "inventory_input": task,
+        "packet_metadata": metadata,
+        "chapter_markdown": packet_path.read_text(encoding="utf-8"),
+    }
+
+
+def save_inventory_contribution(
+    project_path: Path,
+    proposal: dict,
+) -> dict:
+    """Join model interpretation to deterministic canonical authority slots."""
+    project_path = project_path.resolve()
+    book_id = proposal.get("book_id")
+    unit_id = proposal.get("unit_id")
+    input_hash = proposal.get("input_hash")
+    if not all(
+        isinstance(value, str) and value
+        for value in (book_id, unit_id, input_hash)
+    ):
+        raise book_synthesis.BookSynthesisError(
+            "Inventory contribution identity is invalid."
+        )
+    task = inventory_task(project_path, book_id, unit_id)
+    if input_hash != task["input_hash"]:
+        raise book_synthesis.BookSynthesisError(
+            "Inventory contribution input hash is stale."
+        )
+
+    canonical = proposal.get("canonical_claims")
+    candidate = proposal.get("candidate_claims")
+    if not isinstance(canonical, list) or not isinstance(candidate, list):
+        raise InventoryCorrectionError(
+            "Inventory contribution claim groups are invalid."
+        )
+    canonical_by_id = {
+        item.get("claim_id"): item
+        for item in canonical
+        if isinstance(item, dict)
+        and isinstance(item.get("claim_id"), str)
+    }
+    expected_ids = [
+        slot["claim_id"] for slot in task["canonical_claim_slots"]
+    ]
+    submitted_ids = [
+        item.get("claim_id") for item in canonical if isinstance(item, dict)
+    ]
+    if (
+        len(canonical_by_id) != len(canonical)
+        or set(canonical_by_id) != set(expected_ids)
+    ):
+        raise InventoryCorrectionError(
+            "Canonical inventory contributions must match the supplied slots."
+        )
+    candidate_ids = [
+        item.get("claim_id") for item in candidate if isinstance(item, dict)
+    ]
+    if (
+        len(candidate_ids) != len(candidate)
+        or candidate_ids
+        != [f"LOCAL{index}" for index in range(1, len(candidate) + 1)]
+    ):
+        raise InventoryCorrectionError(
+            "Candidate-only contributions must be LOCAL1, LOCAL2, and so on."
+        )
+
+    claims = []
+    for slot in task["canonical_claim_slots"]:
+        contribution = canonical_by_id[slot["claim_id"]]
+        claims.append(
+            {
+                "claim_id": slot["claim_id"],
+                "source_kind": "canonical",
+                "statement": slot["authoritative_text"],
+                "candidate_excerpt": contribution["candidate_excerpt"],
+                "candidate_location": contribution["candidate_location"],
+                "certainty": contribution["certainty"],
+                "scope_and_conditions": contribution[
+                    "scope_and_conditions"
+                ],
+                "evidence_receipt_ids": slot["evidence_receipt_ids"],
+                "attribution": contribution["attribution"],
+                "evidence_relationship": contribution[
+                    "evidence_relationship"
+                ],
+                "authority_type": slot["authority_type"],
+                "resolution_status": contribution["resolution_status"],
+                "authority_source": slot["authority_source"],
+                "authority_ref": slot["authority_ref"],
+                "authoritative_text": slot["authoritative_text"],
+                "normalized_summary": contribution["normalized_summary"],
+                "protected_semantics": contribution[
+                    "protected_semantics"
+                ],
+                "required_in_edition": True,
+                "importance_reason": contribution["importance_reason"],
+            }
+        )
+    for contribution in candidate:
+        claims.append(
+            {
+                "claim_id": contribution["claim_id"],
+                "source_kind": "candidate_only",
+                "statement": contribution["candidate_excerpt"],
+                "candidate_excerpt": contribution["candidate_excerpt"],
+                "candidate_location": contribution["candidate_location"],
+                "certainty": contribution["certainty"],
+                "scope_and_conditions": contribution[
+                    "scope_and_conditions"
+                ],
+                "evidence_receipt_ids": [],
+                "attribution": contribution["attribution"],
+                "evidence_relationship": contribution[
+                    "evidence_relationship"
+                ],
+                "authority_type": "candidate_prose",
+                "resolution_status": contribution["resolution_status"],
+                "authority_source": "candidate_excerpt",
+                "authority_ref": "candidate_excerpt",
+                "authoritative_text": contribution["candidate_excerpt"],
+                "normalized_summary": contribution["normalized_summary"],
+                "protected_semantics": contribution[
+                    "protected_semantics"
+                ],
+                "required_in_edition": True,
+                "importance_reason": contribution["importance_reason"],
+            }
+        )
+    return save_inventory_unit(
+        project_path,
+        {
+            "book_id": book_id,
+            "unit_id": unit_id,
+            "input_hash": input_hash,
+            "context_sha256": task["context_sha256"],
+            "candidate_sha256": task["candidate_sha256"],
+            "packet_sha256": task["packet_sha256"],
+            "claims": claims,
+            "definitions": proposal.get("definitions", []),
+            "limitations": proposal.get("limitations", []),
+            "unresolved_questions": proposal.get(
+                "unresolved_questions",
+                [],
+            ),
+        },
+    )
 
 
 def save_inventory_unit(
@@ -3310,6 +3622,15 @@ def state(project_path: Path, book_id: str) -> str | None:
         if not staging.exists():
             return "not_started"
         _load_staging(project_path, book_id)
+        provider_holds = sorted(
+            (staging / "provider_holds").glob("*.json")
+        )
+        if provider_holds:
+            if len(provider_holds) != 1:
+                raise book_synthesis.BookSynthesisError(
+                    "Synthesis has multiple terminal provider-stage holds."
+                )
+            return load_provider_stage_hold(provider_holds[0])["status"]
         if next_inventory_unit(project_path, book_id) is not None:
             return "inventory_required"
         if not (staging / "inventory.json").is_file():

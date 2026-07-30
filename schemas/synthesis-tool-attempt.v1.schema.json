@@ -29,13 +29,18 @@
       "pattern": "^cycle-[0-9]{3,}$"
     },
     "action_id": {"type": "string", "minLength": 1},
-    "stage": {"type": "string", "pattern": "^plan-shard-.+$"},
+    "stage": {
+      "type": "string",
+      "pattern": "^(inventory-CH[1-9][0-9]*|plan-shard-.+|(edition|audit)-S[12]-.+|global-audit-S[12])$"
+    },
     "backend": {"enum": ["codex", "claude"]},
     "input_hash": {"$ref": "#/$defs/sha256"},
     "chapter_id": {"type": "string", "minLength": 1},
     "scope_id": {"type": "string", "minLength": 1},
     "tool_name": {
       "enum": [
+        "read_staged_synthesis_inventory_input",
+        "submit_staged_synthesis_inventory_unit",
         "read_staged_synthesis_plan_shard_input",
         "submit_staged_synthesis_plan_shard",
         "save_staged_synthesis_edition_unit",

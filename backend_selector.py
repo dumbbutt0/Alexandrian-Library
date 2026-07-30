@@ -66,6 +66,10 @@ ACTIVE_CHAPTER_CONTRACT: ContextVar[tuple[Path, str] | None] = (
 CLAUDE_MCP_PREFIX = "mcp__alexandrian-library__"
 CODEX_MCP_PREFIX = "mcp__alexandrian_library__"
 STAGE_TOOL_CONTRACTS = {
+    "inventory": {
+        "read_tools": ("read_staged_synthesis_inventory_input",),
+        "write_tools": ("submit_staged_synthesis_inventory_unit",),
+    },
     "plan_shard": {
         "read_tools": ("read_staged_synthesis_plan_shard_input",),
         "write_tools": ("submit_staged_synthesis_plan_shard",),
@@ -111,6 +115,7 @@ CLAUDE_CHAPTER_RESEARCH_TOOLS = ",".join(
 CLAUDE_BOOK_SYNTHESIS_TOOLS = ",".join(
     [
         "Read",
+        "mcp__alexandrian-library__read_staged_synthesis_inventory_input",
         "mcp__alexandrian-library__submit_staged_synthesis_inventory_unit",
         "mcp__alexandrian-library__submit_staged_synthesis_plan",
         *(
@@ -1299,16 +1304,18 @@ def build_staged_inventory_prompt(
         "<book_synthesizer_instructions>\n"
         f"{instructions}\n"
         "</book_synthesizer_instructions>\n\n"
-        "This is one inventory transition only. Read the supplied packet and "
-        "packet metadata completely. Preserve every supplied canonical claim "
-        "first and in the supplied order. Add only material candidate claims "
-        "from this packet as LOCAL1, LOCAL2, and so on. Use exact candidate "
-        "excerpts. For the audited-plan protocol, also record each claim's "
-        "attribution, evidence relationship, authority type, and resolution "
-        "status without inferring that an open or routed matter is settled. "
-        "Call submit_staged_synthesis_inventory_unit exactly once, "
-        "then stop. Do not plan, rewrite, audit, research, or write files "
-        "directly.\n\n"
+        "This is one inventory transition only. Call "
+        "read_staged_synthesis_inventory_input exactly once with the supplied "
+        "book_id, unit_id, and input_hash. Treat its canonical claim slots as "
+        "immutable authority. Submit interpretation fields for every canonical "
+        "slot and only material candidate claims from the chapter as LOCAL1, "
+        "LOCAL2, and so on. Use exact candidate excerpts. Do not reproduce, "
+        "reorder, normalize, or replace canonical authority fields; the "
+        "wrapper joins them deterministically by claim_id. Call "
+        "submit_staged_synthesis_inventory_unit once. A second submission is "
+        "permitted only when the first receives an explicitly correctable "
+        "validation rejection. Then stop. Do not plan, rewrite, audit, "
+        "research, or write files directly.\n\n"
         "<staged_inventory_task>\n"
         f"{json.dumps(task, ensure_ascii=False, indent=2)}\n"
         "</staged_inventory_task>"
@@ -1589,6 +1596,7 @@ def preflight_staged_capabilities(
 
     if backend == "claude":
         allowed_by_contract = {
+            "inventory": set(CLAUDE_BOOK_SYNTHESIS_TOOLS.split(",")),
             "plan_shard": set(CLAUDE_BOOK_SYNTHESIS_TOOLS.split(",")),
             "global_plan_audit": set(
                 CLAUDE_SYNTHESIS_AUDIT_TOOLS.split(",")
@@ -1621,20 +1629,29 @@ def preflight_staged_capabilities(
             )
 
     read_result = None
-    if stage_contract == "plan_shard":
+    if stage_contract in {"inventory", "plan_shard"}:
         if (
             not isinstance(chapter_id, str)
             or not isinstance(input_hash, str)
         ):
             raise CapabilityPreflightError(
-                "Plan-shard preflight needs chapter and input identities."
+                "Staged preflight needs chapter and input identities."
             )
         try:
-            read_result = staged_synthesis.read_plan_shard_input(
-                PROJECT_PATH,
-                book_id,
-                chapter_id,
-                input_hash,
+            read_result = (
+                staged_synthesis.read_inventory_input(
+                    PROJECT_PATH,
+                    book_id,
+                    chapter_id,
+                    input_hash,
+                )
+                if stage_contract == "inventory"
+                else staged_synthesis.read_plan_shard_input(
+                    PROJECT_PATH,
+                    book_id,
+                    chapter_id,
+                    input_hash,
+                )
             )
         except book_synthesis.BookSynthesisError as error:
             raise CapabilityPreflightError(str(error)) from error
@@ -1651,7 +1668,14 @@ def preflight_staged_capabilities(
         "provider_permissions_verified": True,
         "bounded_input_verified": read_result is not None,
         "chapter_sha256": (
-            None if read_result is None else read_result["chapter_sha256"]
+            None
+            if read_result is None
+            else (
+                read_result.get("chapter_sha256")
+                or read_result.get("inventory_input", {}).get(
+                    "packet_sha256"
+                )
+            )
         ),
     }
     result["capability_sha256"] = book_synthesis.canonical_json_sha256(
@@ -7907,6 +7931,37 @@ def classify_staged_provider_failure(
             *tool_summary["tool_errors"],
         ]
     ).lower()
+    if expected_write_tool == synthesis_tool_budget.INVENTORY_SUBMIT_TOOL:
+        if "input hash" in combined or "input_hash" in combined:
+            return "noncorrectable_input_hash_mismatch"
+        if any(
+            marker in combined
+            for marker in (
+                "authority conflict",
+                "authoritative text",
+                "protected semantics conflict",
+            )
+        ):
+            return "noncorrectable_authority_conflict"
+        if any(
+            marker in combined
+            for marker in (
+                "canonical inventory contributions",
+                "supplied slots",
+                "unknown claim",
+                "invalid reference",
+            )
+        ):
+            return "correctable_reference_error"
+        if any(
+            marker in combined
+            for marker in (
+                "validation error",
+                "malformed json",
+                "missing classification",
+            )
+        ):
+            return "correctable_schema_error"
     if any(
         marker in combined
         for marker in (
@@ -8196,6 +8251,8 @@ def reconcile_terminal_plan_shard_hold(
 
 def controlled_write_tool_for_stage(stage: str) -> str | None:
     """Return the sole write tool permitted for a bounded synthesis stage."""
+    if stage.startswith("inventory-"):
+        return synthesis_tool_budget.INVENTORY_SUBMIT_TOOL
     if stage.startswith("plan-shard-"):
         return synthesis_tool_budget.SUBMIT_TOOL
     if stage.startswith("edition-S"):
@@ -8365,9 +8422,13 @@ def run_staged_provider_action(
         ),
         provider_call_number=provider_call_number,
         chapter_id=(
-            stage.removeprefix("plan-shard-")
-            if stage.startswith("plan-shard-")
-            else None
+            stage.removeprefix("inventory-")
+            if stage.startswith("inventory-")
+            else (
+                stage.removeprefix("plan-shard-")
+                if stage.startswith("plan-shard-")
+                else None
+            )
         ),
         input_hash=input_hash,
         capability_preflight_sha256=(
@@ -8378,18 +8439,25 @@ def run_staged_provider_action(
         tool_budget=(
             (
                 {
-                "maximum_reads": 1,
-                "maximum_submissions": 2,
-                "maximum_successful_writes": 1,
-                "second_submission_rule": (
-                    "correctable_validation_rejected_only"
-                ),
-                "controlled_tools": [
-                    synthesis_tool_budget.READ_TOOL,
-                    synthesis_tool_budget.SUBMIT_TOOL,
-                ],
+                    "maximum_reads": 1,
+                    "maximum_submissions": 2,
+                    "maximum_successful_writes": 1,
+                    "second_submission_rule": (
+                        "correctable_validation_rejected_only"
+                    ),
+                    "controlled_tools": (
+                        [
+                            synthesis_tool_budget.INVENTORY_READ_TOOL,
+                            synthesis_tool_budget.INVENTORY_SUBMIT_TOOL,
+                        ]
+                        if stage.startswith("inventory-")
+                        else [
+                            synthesis_tool_budget.READ_TOOL,
+                            synthesis_tool_budget.SUBMIT_TOOL,
+                        ]
+                    ),
                 }
-                if stage.startswith("plan-shard-")
+                if stage.startswith(("plan-shard-", "inventory-"))
                 else {
                     "maximum_reads": 0,
                     "maximum_submissions": 1,
@@ -8509,6 +8577,7 @@ def run_staged_provider_action(
             maximum_stage_calls == 2
             and controlled_write_tool
             in {
+                synthesis_tool_budget.INVENTORY_SUBMIT_TOOL,
                 synthesis_tool_budget.EDITION_TOOL,
                 synthesis_tool_budget.AUDIT_UNIT_TOOL,
                 synthesis_tool_budget.GLOBAL_AUDIT_TOOL,
@@ -8688,8 +8757,8 @@ def run_next_staged_synthesis_action(
                 book_id,
             )
             if (
-                authorization is None
-                or authorization.get("inventory_policy")
+                authorization is not None
+                and authorization.get("inventory_policy")
                 != "regenerate_required"
             ):
                 inventory = staged_synthesis.reuse_prior_verified_inventory(
@@ -8720,6 +8789,13 @@ def run_next_staged_synthesis_action(
             book_id,
             unit_id,
         )
+        capability_preflight = preflight_staged_capabilities(
+            backend,
+            "inventory",
+            book_id,
+            unit_id,
+            task["input_hash"],
+        )
         target = (
             staged_synthesis.staging_directory(PROJECT_PATH, book_id)
             / "inventory_units"
@@ -8734,6 +8810,7 @@ def run_next_staged_synthesis_action(
             build_staged_inventory_prompt(instructions, task),
             BOOK_SYNTHESIS_CALL,
             maximum_stage_calls=2,
+            capability_preflight=capability_preflight,
         )
 
     if state == "plan_shards_required":
@@ -8866,6 +8943,7 @@ def run_next_staged_synthesis_action(
         )
 
     if state in {
+        "inventory_provider_held",
         "edition_provider_held",
         "audit_provider_held",
         "global_audit_provider_held",
@@ -9388,7 +9466,6 @@ def workflow_stage(conversation_path: Path) -> str:
             "inventory_merge_required",
             "plan_shard_inputs_required",
             "plan_shards_required",
-            "plan_shard_held",
             "plan_merge_required",
             "plan_global_audit_required",
             "plan_required",
@@ -9399,7 +9476,14 @@ def workflow_stage(conversation_path: Path) -> str:
             "assembly_S1",
         }:
             return "book_synthesis"
-        if synthesis_state in {"plan_held", "plan_shard_held"}:
+        if synthesis_state in {
+            "inventory_provider_held",
+            "plan_held",
+            "plan_shard_held",
+            "edition_provider_held",
+            "audit_provider_held",
+            "global_audit_provider_held",
+        }:
             return "synthesis_held"
         if synthesis_state in {
             "audit_units_S1",
@@ -10234,16 +10318,22 @@ def continue_book_workflow(
             continue
 
         if stage == "synthesis_held":
+            synthesis_state = book_synthesis.workflow_state(
+                PROJECT_PATH,
+                book_id,
+            )
             return {
                 "status": "synthesis_held",
                 "conversation_id": conversation_id,
                 "book_id": book_id,
+                "synthesis_state": synthesis_state,
                 "receipt_path": str(
                     book_directory / "synthesis" / "receipt.json"
                 ),
                 "reason": (
-                    "The second and final synthesis attempt still has "
-                    "blocking claim-preservation findings."
+                    "The bounded synthesis workflow reached a durable terminal "
+                    f"state: {synthesis_state}. No further provider call or "
+                    "successor cycle is automatic."
                 ),
             }
 

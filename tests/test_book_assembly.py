@@ -395,6 +395,7 @@ class BookAssemblyTests(unittest.TestCase):
             self.book_id,
             candidate,
             self.synthesizer_skill_path,
+            protocol_version="staged-v1",
         )
         candidate_body = (
             self.book_directory / "candidate.md"

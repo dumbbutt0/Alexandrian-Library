@@ -31,14 +31,16 @@ named in the wrapper prompt.
 
 ### Inventory unit
 
-Read one complete chapter packet and its metadata. Preserve supplied canonical
-claims first and in order. Record material packet-only claims as `LOCAL1`,
-`LOCAL2`, and so on. Use exact excerpts. When the task uses the audited-plan
-protocol, use the claim's source-kind authority contract:
+Call `read_staged_synthesis_inventory_input` once with the wrapper-supplied
+book, unit, and input hash. Use only its exact chapter text and canonical
+authority slots. The wrapper owns canonical identity, authoritative wording,
+evidence receipts, authority references, and order. Do not reproduce or
+normalize those fields.
 
-- A canonical occurrence is governed by its exact canonical research claim.
-- A candidate-only claim is governed by its exact candidate excerpt.
-- `statement` and `authoritative_text` must equal that governing text.
+Submit one interpretation contribution for every canonical slot. Record
+material packet-only claims as `LOCAL1`, `LOCAL2`, and so on. Use exact
+candidate excerpts. Record:
+
 - `normalized_summary` is derived index material and has no authority.
 - `protected_semantics` must separately record claim role, normative force,
   normative polarity and exact surface form, certainty, scope and conditions,
@@ -47,7 +49,9 @@ protocol, use the claim's source-kind authority contract:
 Do not convert a recommendation into a requirement, a negative recommendation
 into a prohibition, or a project choice into an external rule. Do not infer
 that an open, routed, or unresolved matter is settled. Call
-`submit_staged_synthesis_inventory_unit` once and stop.
+`submit_staged_synthesis_inventory_unit` once. A second call is permitted only
+after an explicitly correctable validation rejection. Stop after a success or
+the second submission.
 
 ### Whole-book plan
 

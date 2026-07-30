@@ -33,6 +33,7 @@ PROFILE_VERSION = "unversioned"
 MAX_ATTEMPTS = 2
 AUDITED_PLAN_PROTOCOL = "audited-plan-v2"
 SHARDED_PLAN_PROTOCOL = "chapter-sharded-plan-v1"
+DEFAULT_SYNTHESIS_PROTOCOL = SHARDED_PLAN_PROTOCOL
 AUDITED_PLAN_PROTOCOLS = {
     AUDITED_PLAN_PROTOCOL,
     SHARDED_PLAN_PROTOCOL,
@@ -2185,6 +2186,8 @@ def build_context(
     book_id: str,
     candidate: dict,
     profile_path: Path,
+    *,
+    protocol_version: str | None = None,
 ) -> dict:
     """Build one deterministic, hash-bound synthesis context."""
     project_path = project_path.resolve()
@@ -2276,7 +2279,11 @@ def build_context(
             else cycle_authorization["cycle_id"]
         ),
         "protocol_version": (
-            "staged-v1"
+            (
+                DEFAULT_SYNTHESIS_PROTOCOL
+                if protocol_version is None
+                else protocol_version
+            )
             if cycle_authorization is None
             else cycle_authorization["protocol_version"]
         ),
@@ -2769,6 +2776,15 @@ def load_initialized_synthesis(
             project_path,
             book_id,
         )
+        cycle_root = synthesis_cycle_directory(project_path, book_id)
+        initial_cycle = (
+            authorization is None
+            and context.get("cycle_id") == "cycle-001"
+            and context.get("synthesis_id") == f"synthesis-{book_id}"
+            and context.get("cycle_authorization_path") is None
+            and context.get("cycle_authorization_sha256") is None
+            and not cycle_root.exists()
+        )
         plan_audit_path = resolve_project_path(
             project_path,
             plan.get("plan_audit_path"),
@@ -2787,7 +2803,8 @@ def load_initialized_synthesis(
         )
         plan_audit = read_json_object(plan_audit_path, "Plan audit")
         if (
-            authorization is None
+            not initial_cycle
+            and authorization is None
             or context.get("cycle_authorization_sha256")
             != expected_foundation_authorization
             or plan_audit.get("overall_status") != "pass"
