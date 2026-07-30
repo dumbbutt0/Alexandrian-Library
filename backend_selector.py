@@ -1026,6 +1026,27 @@ def build_chapter_evaluator_prompt(
         "final_closeout_baseline_agent_calls_total"
     )
     if (
+        human_closeout is not None
+        and used_calls >= human_closeout["baseline_agent_calls_total"]
+    ):
+        budget_limit = (
+            human_closeout["baseline_agent_calls_total"]
+            + human_closeout["max_calls"]
+        )
+        budget_mode = (
+            "human_input_final_pass_closeout"
+            if (
+                isinstance(closeout_baseline, int)
+                and closeout_baseline
+                >= human_closeout["baseline_agent_calls_total"]
+                and isinstance(
+                    run_state.get("final_closeout_source_draft_id"),
+                    str,
+                )
+            )
+            else "human_input_closeout"
+        )
+    elif (
         isinstance(closeout_baseline, int)
         and isinstance(
             run_state.get("final_closeout_source_draft_id"),
@@ -1033,16 +1054,6 @@ def build_chapter_evaluator_prompt(
         )
     ):
         if (
-            human_closeout is not None
-            and closeout_baseline
-            >= human_closeout["baseline_agent_calls_total"]
-        ):
-            budget_limit = (
-                human_closeout["baseline_agent_calls_total"]
-                + human_closeout["max_calls"]
-            )
-            budget_mode = "human_input_final_pass_closeout"
-        elif (
             recovery is not None
             and closeout_baseline
             >= recovery["baseline_agent_calls_total"]
@@ -1057,15 +1068,6 @@ def build_chapter_evaluator_prompt(
                 closeout_baseline + MAX_FINAL_CLOSEOUT_CALLS_TOTAL
             )
             budget_mode = "final_pass_closeout"
-    elif (
-        human_closeout is not None
-        and used_calls >= human_closeout["baseline_agent_calls_total"]
-    ):
-        budget_limit = (
-            human_closeout["baseline_agent_calls_total"]
-            + human_closeout["max_calls"]
-        )
-        budget_mode = "human_input_closeout"
     elif (
         extension is not None
         and used_calls == extension["baseline_agent_calls_total"]
@@ -5004,17 +5006,17 @@ def chapter_provider_call_limit(
     )
 
     if (
+        closeout is not None
+        and used_calls >= closeout["baseline_agent_calls_total"]
+    ):
+        return (
+            closeout["baseline_agent_calls_total"]
+            + closeout["max_calls"]
+        )
+    if (
         isinstance(final_baseline, int)
         and isinstance(run.get("final_closeout_source_draft_id"), str)
     ):
-        if (
-            closeout is not None
-            and final_baseline >= closeout["baseline_agent_calls_total"]
-        ):
-            return (
-                closeout["baseline_agent_calls_total"]
-                + closeout["max_calls"]
-            )
         if (
             recovery is not None
             and final_baseline >= recovery["baseline_agent_calls_total"]
@@ -5025,14 +5027,6 @@ def chapter_provider_call_limit(
             )
         return final_baseline + MAX_FINAL_CLOSEOUT_CALLS_TOTAL
 
-    if (
-        closeout is not None
-        and used_calls >= closeout["baseline_agent_calls_total"]
-    ):
-        return (
-            closeout["baseline_agent_calls_total"]
-            + closeout["max_calls"]
-        )
     if (
         extension is not None
         and used_calls == extension["baseline_agent_calls_total"]
@@ -6770,6 +6764,71 @@ def run_chapter_completion_loop(
     if run.get("status") == "chapter_complete":
         return run
     recovery = load_chapter_recovery_authorization(book_id, chapter_id)
+    human_input_closeout = load_chapter_human_input_closeout(
+        book_id,
+        chapter_id,
+    )
+    agent_calls = chapter_agent_calls_total(run)
+    if (
+        human_input_closeout is not None
+        and human_input_closeout.get("authority_kind")
+        == "final_pass_human_input"
+        and agent_calls
+        == human_input_closeout["baseline_agent_calls_total"]
+        and run.get("status")
+        in {"human_input_required", "human_input_closeout_required"}
+        and run.get("last_assessment_id")
+        == human_input_closeout["assessment_id"]
+        and run.get("last_assessment_outcome") == "human_input_required"
+    ):
+        completed_final_closeout = (
+            run.get("final_pass_requested") is True
+            and isinstance(run.get("final_pass_source_draft_id"), str)
+            and isinstance(
+                run.get("final_closeout_baseline_agent_calls_total"),
+                int,
+            )
+            and all(
+                isinstance(run.get(field), str)
+                for field in (
+                    "final_closeout_source_draft_id",
+                    "final_closeout_developer_call_started_at",
+                    "final_closeout_developer_call_completed_at",
+                    "final_closeout_evaluator_call_started_at",
+                    "final_closeout_evaluator_call_completed_at",
+                )
+            )
+        )
+        retired_final_closeout = (
+            run.get("final_pass_requested") is False
+            and run.get("final_pass_source_draft_id") is None
+            and all(
+                run.get(field) is None
+                for field in (
+                    "final_closeout_baseline_agent_calls_total",
+                    "final_closeout_source_draft_id",
+                    "final_closeout_developer_call_started_at",
+                    "final_closeout_developer_call_completed_at",
+                    "final_closeout_evaluator_call_started_at",
+                    "final_closeout_evaluator_call_completed_at",
+                )
+            )
+        )
+        if not completed_final_closeout and not retired_final_closeout:
+            raise RuntimeError(
+                "Final-pass human closeout found a partial prior final-pass "
+                "state."
+            )
+        if completed_final_closeout:
+            run["final_pass_requested"] = False
+            run["final_pass_source_draft_id"] = None
+            run["final_closeout_baseline_agent_calls_total"] = None
+            run["final_closeout_source_draft_id"] = None
+            run["final_closeout_developer_call_started_at"] = None
+            run["final_closeout_developer_call_completed_at"] = None
+            run["final_closeout_evaluator_call_started_at"] = None
+            run["final_closeout_evaluator_call_completed_at"] = None
+            save_chapter_run(run)
     if (
         recovery is not None
         and recovery.get("recovery_kind") == "final_pass_revision"
@@ -6790,12 +6849,7 @@ def run_chapter_completion_loop(
             chapter_id,
             run,
         )
-    agent_calls = chapter_agent_calls_total(run)
     recovery_active = False
-    human_input_closeout = load_chapter_human_input_closeout(
-        book_id,
-        chapter_id,
-    )
     human_input_closeout_active = human_input_closeout is not None
     research_access_recovery_active = (
         recovery is not None
@@ -7621,6 +7675,10 @@ def run_chapter_completion_loop(
             run["final_pass_source_draft_id"] = newest_draft["draft_id"]
             run["final_closeout_baseline_agent_calls_total"] = agent_calls
             run["final_closeout_source_draft_id"] = newest_draft["draft_id"]
+            run["final_closeout_developer_call_started_at"] = None
+            run["final_closeout_developer_call_completed_at"] = None
+            run["final_closeout_evaluator_call_started_at"] = None
+            run["final_closeout_evaluator_call_completed_at"] = None
             save_chapter_run(run)
             if ACTIVE_CHAPTER_CONTRACT.get() is not None:
                 return run

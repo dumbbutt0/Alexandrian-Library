@@ -370,6 +370,129 @@ class ChapterCompletionControllerTests(unittest.TestCase):
         )
         self.assertEqual(result["human_input_requests"], [question])
 
+    def test_final_pass_human_closeout_applies_under_new_budget(
+        self,
+    ) -> None:
+        self.state["version"] = 4
+        self.state["drafts"] = [self.draft("D1"), self.draft("D2")]
+        question = "Approve the exact bounded recommendation?"
+        decision_path = (
+            self.books_path
+            / self.book_id
+            / "runs"
+            / "CH1.A4.human-input.json"
+        )
+        decision_path.parent.mkdir(parents=True, exist_ok=True)
+        human_document = {
+            "assessment_id": "A4",
+            "assessment_sha256": "a" * 64,
+            "human_input_sha256": "h" * 64,
+            "decisions": [
+                {
+                    "question": question,
+                    "response": "Approved without expansion.",
+                }
+            ],
+        }
+        closeout = {
+            "assessment_id": "A4",
+            "authority_kind": "final_pass_human_input",
+            "baseline_agent_calls_total": 8,
+            "calls_already_consumed": 0,
+            "max_calls": 6,
+        }
+
+        with ExitStack() as stack:
+            for controller_patch in self.controller_patches():
+                stack.enter_context(controller_patch)
+            run = backend_selector.load_or_create_chapter_run(
+                self.book_id,
+                self.chapter_id,
+            )
+            run.update(
+                {
+                    "developer_passes_total": 4,
+                    "evaluator_passes_total": 4,
+                    "status": "human_input_closeout_required",
+                    "final_pass_requested": True,
+                    "final_pass_source_draft_id": "D1",
+                    "final_closeout_baseline_agent_calls_total": 6,
+                    "final_closeout_source_draft_id": "D1",
+                    "final_closeout_developer_call_started_at": "started",
+                    "final_closeout_developer_call_completed_at": "completed",
+                    "final_closeout_evaluator_call_started_at": "started",
+                    "final_closeout_evaluator_call_completed_at": "completed",
+                    "last_assessment_id": "A4",
+                    "last_assessment_path": (
+                        "data/books/book-controller-test/"
+                        "assessments/CH1/A4.json"
+                    ),
+                    "last_assessment_sha256": "a" * 64,
+                    "last_assessment_outcome": "human_input_required",
+                    "human_input_requests": [question],
+                }
+            )
+            backend_selector.save_chapter_run(run)
+            stack.enter_context(
+                patch.object(
+                    backend_selector,
+                    "load_chapter_human_input_closeout",
+                    return_value=closeout,
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    backend_selector,
+                    "load_chapter_human_input",
+                    return_value=(decision_path, human_document),
+                )
+            )
+
+            self.assertEqual(
+                backend_selector.chapter_provider_call_limit(
+                    self.book_id,
+                    self.chapter_id,
+                    run,
+                ),
+                14,
+            )
+            token = backend_selector.ACTIVE_CHAPTER_CONTRACT.set(
+                (self.project_path / "controller.jsonl", "CC-test")
+            )
+            try:
+                result = backend_selector.run_chapter_completion_loop(
+                    "codex",
+                    "/usr/bin/codex",
+                    self.book_id,
+                    self.chapter_id,
+                )
+            finally:
+                backend_selector.ACTIVE_CHAPTER_CONTRACT.reset(token)
+
+        self.assertEqual(result["status"], "active")
+        self.assertEqual(result["developer_passes_total"], 5)
+        self.assertEqual(result["evaluator_passes_total"], 4)
+        self.assertEqual(
+            self.developer_human_input_paths,
+            [
+                (
+                    "data/books/book-controller-test/runs/"
+                    "CH1.A4.human-input.json"
+                )
+            ],
+        )
+        self.assertFalse(result["final_pass_requested"])
+        self.assertIsNone(result["final_pass_source_draft_id"])
+        for field in (
+            "final_closeout_baseline_agent_calls_total",
+            "final_closeout_source_draft_id",
+            "final_closeout_developer_call_started_at",
+            "final_closeout_developer_call_completed_at",
+            "final_closeout_evaluator_call_started_at",
+            "final_closeout_evaluator_call_completed_at",
+        ):
+            self.assertIsNone(result[field])
+
     def test_final_pass_answer_routes_to_no_research_closeout(self) -> None:
         question = "Approve the narrow artifact-authority interpretation?"
         with ExitStack() as stack:
