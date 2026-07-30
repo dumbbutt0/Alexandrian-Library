@@ -5157,6 +5157,78 @@ def chapter_controller_dry_run(
     )
 
 
+def prepare_final_pass_closeout(
+    book_id: str,
+    chapter_id: str,
+    expected_snapshot: chapter_controller.ChapterSnapshot,
+) -> dict:
+    """Bind a matching final-pass assessment without calling a provider."""
+    current_snapshot = build_chapter_controller_snapshot(
+        book_id,
+        chapter_id,
+        include_interrupted_contract=False,
+    )
+    if current_snapshot.digest != expected_snapshot.digest:
+        raise RuntimeError(
+            "Chapter state changed before final-pass closeout preparation."
+        )
+
+    run = load_or_create_chapter_run(book_id, chapter_id)
+    if (
+        run.get("final_pass_requested")
+        or run.get("final_closeout_baseline_agent_calls_total") is not None
+        or run.get("final_closeout_source_draft_id") is not None
+    ):
+        raise RuntimeError(
+            "Final-pass closeout preparation is already recorded."
+        )
+
+    workspace_state = load_chapter_workspace_state(book_id, chapter_id)
+    if workspace_state is None:
+        raise RuntimeError(
+            "Final-pass closeout preparation has no workspace."
+        )
+    workspace_document = load_workspace_document(workspace_state)
+    latest = matching_latest_assessment(
+        book_id,
+        chapter_id,
+        workspace_document,
+    )
+    if (
+        latest is None
+        or latest[1]["assessment"].get("outcome")
+        != "ready_for_final_pass"
+    ):
+        raise RuntimeError(
+            "Final-pass closeout requires a matching final-pass assessment."
+        )
+    newest_draft = newest_registered_draft(workspace_document)
+    if newest_draft is None:
+        raise RuntimeError(
+            "Final-pass closeout was requested without a registered draft."
+        )
+
+    assessment_path, assessment_document = latest
+    update_run_from_assessment(
+        run,
+        assessment_path,
+        assessment_document,
+    )
+    baseline = chapter_agent_calls_total(run)
+    run["final_pass_requested"] = True
+    run["final_pass_source_draft_id"] = newest_draft["draft_id"]
+    run["final_closeout_baseline_agent_calls_total"] = baseline
+    run["final_closeout_source_draft_id"] = newest_draft["draft_id"]
+    run["final_closeout_developer_call_started_at"] = None
+    run["final_closeout_developer_call_completed_at"] = None
+    run["final_closeout_evaluator_call_started_at"] = None
+    run["final_closeout_evaluator_call_completed_at"] = None
+    run["status"] = "active"
+    run["stop_reason"] = None
+    save_chapter_run(run)
+    return run
+
+
 def reconcile_chapter_counters_from_contract(
     run: dict,
     baseline: dict[str, int],
@@ -5563,16 +5635,27 @@ def run_chapter_controller_action(
         "evaluator_passes_total": snapshot.evaluator_calls,
         "researcher_passes_total": snapshot.researcher_calls,
     }
-    context_token = ACTIVE_CHAPTER_CONTRACT.set(
-        (ledger.path, contract["contract_id"])
-    )
+    context_token = None
     try:
-        result = run_chapter_completion_loop(
-            backend,
-            program_path,
-            book_id,
-            chapter_id,
-        )
+        if (
+            decision.action
+            == chapter_controller.ActionKind.PREPARE_FINAL_PASS_CLOSEOUT
+        ):
+            result = prepare_final_pass_closeout(
+                book_id,
+                chapter_id,
+                snapshot,
+            )
+        else:
+            context_token = ACTIVE_CHAPTER_CONTRACT.set(
+                (ledger.path, contract["contract_id"])
+            )
+            result = run_chapter_completion_loop(
+                backend,
+                program_path,
+                book_id,
+                chapter_id,
+            )
     except ChapterArtifactReconciliationRequired as error:
         current_run = load_or_create_chapter_run(book_id, chapter_id)
         call_counts = ledger.provider_call_counts(contract["contract_id"])
@@ -5603,7 +5686,8 @@ def run_chapter_controller_action(
         )
         raise
     finally:
-        ACTIVE_CHAPTER_CONTRACT.reset(context_token)
+        if context_token is not None:
+            ACTIVE_CHAPTER_CONTRACT.reset(context_token)
 
     complete_run_record = (
         isinstance(result, dict)

@@ -39,6 +39,7 @@ class ChapterState(str, Enum):
 
 class ActionKind(str, Enum):
     RUN_CHAPTER_PHASE = "run_chapter_phase"
+    PREPARE_FINAL_PASS_CLOSEOUT = "prepare_final_pass_closeout"
     RUN_FINAL_PASS_CLOSEOUT = "run_final_pass_closeout"
     RUN_FINAL_PASS_REPAIR = "run_final_pass_repair"
     RUN_RESEARCH_ACCESS_RECOVERY = "run_research_access_recovery"
@@ -59,6 +60,7 @@ class ActionKind(str, Enum):
 
 EXECUTABLE_ACTIONS = {
     ActionKind.RUN_CHAPTER_PHASE,
+    ActionKind.PREPARE_FINAL_PASS_CLOSEOUT,
     ActionKind.RUN_FINAL_PASS_CLOSEOUT,
     ActionKind.RUN_FINAL_PASS_REPAIR,
     ActionKind.RUN_RESEARCH_ACCESS_RECOVERY,
@@ -260,6 +262,18 @@ def decide_next_action(snapshot: ChapterSnapshot) -> NextAction:
             ActionKind.RUN_FINAL_PASS_CLOSEOUT,
             "A final-pass closeout has been durably requested.",
             min(1, snapshot.calls_remaining),
+        )
+
+    if (
+        snapshot.matching_assessment_exists
+        and snapshot.assessment_outcome == "ready_for_final_pass"
+    ):
+        return NextAction(
+            ChapterState.FINAL_PASS_REQUIRED,
+            ActionKind.PREPARE_FINAL_PASS_CLOSEOUT,
+            "The matching final-pass assessment must be bound to its "
+            "source draft before closeout.",
+            0,
         )
 
     if snapshot.closeout_authorized:

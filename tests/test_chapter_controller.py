@@ -138,6 +138,28 @@ class ChapterControllerDecisionTests(unittest.TestCase):
         )
         self.assertEqual(decision.max_provider_calls, 0)
 
+    def test_final_pass_preparation_is_allowed_at_exact_call_limit(
+        self,
+    ) -> None:
+        decision = chapter_controller.decide_next_action(
+            self.snapshot(
+                developer_calls=5,
+                evaluator_calls=5,
+                researcher_calls=2,
+                assessment_outcome="ready_for_final_pass",
+            )
+        )
+        self.assertEqual(
+            decision.action,
+            chapter_controller.ActionKind.PREPARE_FINAL_PASS_CLOSEOUT,
+        )
+        self.assertEqual(
+            decision.state,
+            chapter_controller.ChapterState.FINAL_PASS_REQUIRED,
+        )
+        self.assertEqual(decision.max_provider_calls, 0)
+        self.assertTrue(decision.executable)
+
     def test_resolved_source_requests_do_not_hold_the_controller(
         self,
     ) -> None:
@@ -564,6 +586,150 @@ class ChapterControllerIntegrationTests(unittest.TestCase):
             ledger.read()[-1]["event_type"],
             "contract_completed",
         )
+
+    def test_exact_limit_prepares_two_call_final_closeout_without_provider(
+        self,
+    ) -> None:
+        run = json.loads(self.run_path.read_text(encoding="utf-8"))
+        run.update(
+            {
+                "developer_passes_total": 5,
+                "evaluator_passes_total": 5,
+                "researcher_passes_total": 2,
+            }
+        )
+        self.run_path.write_text(
+            json.dumps(run) + "\n",
+            encoding="utf-8",
+        )
+        workspace_document = {
+            "workspace_sha256": "w" * 64,
+            "workspace": {
+                "draft_versions": [
+                    {
+                        "draft_id": "D1",
+                        "relative_path": "drafts/CH1/D1.md",
+                        "sha256": "d" * 64,
+                    }
+                ]
+            },
+        }
+        assessment_path = (
+            self.books
+            / self.book_id
+            / "assessments"
+            / self.chapter_id
+            / "A6.json"
+        )
+        assessment_document = {
+            "assessment_id": "A6",
+            "assessment_sha256": "a" * 64,
+            "assessment": {
+                "outcome": "ready_for_final_pass",
+                "most_important_gap": "Only the final pass remains.",
+                "required_next_actions": ["Perform the final pass."],
+                "human_input_requests": [],
+                "research_request": None,
+                "criteria": {
+                    "central_lesson": {"status": "satisfied"}
+                },
+            },
+        }
+        matching_assessment = (
+            assessment_path,
+            assessment_document,
+        )
+
+        with (
+            self.patches()[0],
+            self.patches()[1],
+            patch.object(
+                backend_selector,
+                "load_chapter_workspace_state",
+                return_value={"current_json_path": "unused.json"},
+            ),
+            patch.object(
+                backend_selector,
+                "load_workspace_document",
+                return_value=workspace_document,
+            ),
+            patch.object(
+                backend_selector,
+                "matching_latest_assessment",
+                return_value=matching_assessment,
+            ),
+            patch.object(
+                backend_selector,
+                "run_chapter_completion_loop",
+            ) as provider_executor,
+        ):
+            prepared = backend_selector.run_chapter_controller_action(
+                "codex",
+                "/usr/bin/codex",
+                self.book_id,
+                self.chapter_id,
+            )
+            restarted_snapshot = (
+                backend_selector.build_chapter_controller_snapshot(
+                    self.book_id,
+                    self.chapter_id,
+                )
+            )
+            restarted_decision = chapter_controller.decide_next_action(
+                restarted_snapshot
+            )
+
+        provider_executor.assert_not_called()
+        self.assertEqual(
+            backend_selector.chapter_agent_calls_total(prepared),
+            12,
+        )
+        self.assertTrue(prepared["final_pass_requested"])
+        self.assertEqual(prepared["final_pass_source_draft_id"], "D1")
+        self.assertEqual(
+            prepared["final_closeout_baseline_agent_calls_total"],
+            12,
+        )
+        self.assertEqual(
+            prepared["final_closeout_source_draft_id"],
+            "D1",
+        )
+        self.assertEqual(prepared["last_assessment_id"], "A6")
+        self.assertEqual(restarted_snapshot.call_limit, 14)
+        self.assertEqual(restarted_snapshot.calls_remaining, 2)
+        self.assertEqual(
+            restarted_decision.action,
+            chapter_controller.ActionKind.RUN_FINAL_PASS_CLOSEOUT,
+        )
+        self.assertEqual(restarted_decision.max_provider_calls, 1)
+
+        ledger = chapter_controller.ChapterEventLedger(
+            self.books
+            / self.book_id
+            / "runs"
+            / f"{self.chapter_id}.controller.jsonl"
+        )
+        events = ledger.read()
+        contract_id = next(
+            event["payload"]["contract_id"]
+            for event in events
+            if event["event_type"] == "contract_opened"
+        )
+        opened = next(
+            event["payload"]
+            for event in events
+            if event["event_type"] == "contract_opened"
+        )
+        self.assertEqual(opened["max_provider_calls"], 0)
+        self.assertEqual(
+            opened["action"],
+            "prepare_final_pass_closeout",
+        )
+        self.assertEqual(
+            ledger.provider_call_counts(contract_id),
+            {},
+        )
+        self.assertEqual(events[-1]["event_type"], "contract_completed")
 
     def test_ambiguous_provider_side_effect_holds_across_restart(self) -> None:
         provider_calls = 0
