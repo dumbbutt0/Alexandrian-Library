@@ -294,6 +294,7 @@ class ChapterEventLedgerTests(unittest.TestCase):
             requirement["message"],
             "The workspace transition is incomplete.",
         )
+        self.assertEqual(requirement["artifact_changes"], [])
         self.assertEqual(
             self.ledger.interrupted_contract_id(),
             contract["contract_id"],
@@ -638,7 +639,14 @@ class ChapterControllerIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(
             held["status"],
-            "controller_reconciliation_held",
+            "artifact_review_required",
+        )
+        self.assertEqual(
+            [change["path"] for change in held["artifact_changes"]],
+            [
+                f"contexts/{self.chapter_id}.json",
+                f"contexts/{self.chapter_id}.md",
+            ],
         )
         self.assertEqual(provider_calls, 1)
 
@@ -753,8 +761,167 @@ class ChapterControllerIntegrationTests(unittest.TestCase):
             "RuntimeError",
         )
         self.assertEqual(
+            ledger.artifact_review_requirement(
+                contract["contract_id"]
+            )["artifact_changes"],
+            [
+                {
+                    "path": f"contexts/{self.chapter_id}.json",
+                    "change_type": "added",
+                    "before_sha256": None,
+                    "after_sha256": backend_selector.file_sha256(
+                        context_path
+                    ),
+                }
+            ],
+        )
+        self.assertEqual(
             ledger.interrupted_contract_id(),
             contract["contract_id"],
+        )
+
+    def test_human_rejection_closes_partial_transition_for_retry(self) -> None:
+        with self.patches()[0], self.patches()[1]:
+            snapshot = (
+                backend_selector.build_chapter_controller_snapshot(
+                    self.book_id,
+                    self.chapter_id,
+                )
+            )
+            decision = chapter_controller.decide_next_action(snapshot)
+            ledger = chapter_controller.ChapterEventLedger(
+                backend_selector.chapter_controller_ledger_path(
+                    self.book_id,
+                    self.chapter_id,
+                )
+            )
+            contract = ledger.open_contract(snapshot, decision)
+            ledger.mark_started(contract["contract_id"])
+            ledger.acknowledge_provider_call(
+                contract["contract_id"],
+                backend_selector.CHAPTER_DEVELOPMENT_CALL,
+            )
+            context_path = (
+                self.books
+                / self.book_id
+                / "contexts"
+                / f"{self.chapter_id}.json"
+            )
+            context_path.parent.mkdir(parents=True)
+            context_path.write_text("{}\n", encoding="utf-8")
+            ledger.require_artifact_review(
+                contract["contract_id"],
+                backend_selector.CHAPTER_DEVELOPMENT_CALL,
+                "RuntimeError",
+                "Workspace initialization is missing.",
+                [
+                    {
+                        "path": f"contexts/{self.chapter_id}.json",
+                        "change_type": "added",
+                        "before_sha256": None,
+                        "after_sha256": (
+                            backend_selector.file_sha256(context_path)
+                        ),
+                    }
+                ],
+            )
+            with patch(
+                "builtins.input",
+                side_effect=[
+                    "1",
+                    (
+                        "The valid context exists, but the required workspace "
+                        "transition is missing."
+                    ),
+                ],
+            ):
+                reviewed = (
+                    backend_selector
+                    .record_chapter_artifact_review_checkpoint(
+                        self.book_id,
+                        self.chapter_id,
+                    )
+                )
+            current = (
+                backend_selector.build_chapter_controller_snapshot(
+                    self.book_id,
+                    self.chapter_id,
+                )
+            )
+            retry = ledger.retry_requirement(
+                current,
+                chapter_controller.decide_next_action(current),
+            )
+
+        self.assertEqual(
+            reviewed["payload"]["disposition"],
+            "provider_output_rejected",
+        )
+        self.assertTrue(context_path.is_file())
+        self.assertIsNone(ledger.interrupted_contract_id())
+        self.assertEqual(retry["status"], "authorization_required")
+        self.assertEqual(
+            retry["failed_contract_id"],
+            contract["contract_id"],
+        )
+
+    def test_human_can_keep_partial_transition_held(self) -> None:
+        with self.patches()[0], self.patches()[1]:
+            snapshot = (
+                backend_selector.build_chapter_controller_snapshot(
+                    self.book_id,
+                    self.chapter_id,
+                )
+            )
+            decision = chapter_controller.decide_next_action(snapshot)
+            ledger = chapter_controller.ChapterEventLedger(
+                backend_selector.chapter_controller_ledger_path(
+                    self.book_id,
+                    self.chapter_id,
+                )
+            )
+            contract = ledger.open_contract(snapshot, decision)
+            ledger.mark_started(contract["contract_id"])
+            ledger.require_artifact_review(
+                contract["contract_id"],
+                backend_selector.CHAPTER_DEVELOPMENT_CALL,
+                "RuntimeError",
+                "Workspace initialization is missing.",
+            )
+            with patch("builtins.input", return_value="2"):
+                reviewed = (
+                    backend_selector
+                    .record_chapter_artifact_review_checkpoint(
+                        self.book_id,
+                        self.chapter_id,
+                    )
+                )
+
+        self.assertIsNone(reviewed)
+        self.assertEqual(
+            ledger.interrupted_contract_id(),
+            contract["contract_id"],
+        )
+
+    def test_artifact_change_list_is_exact_and_sorted(self) -> None:
+        changes = backend_selector.chapter_provider_artifact_changes(
+            {
+                "modified.md": "a" * 64,
+                "removed.md": "b" * 64,
+            },
+            {
+                "added.md": "c" * 64,
+                "modified.md": "d" * 64,
+            },
+        )
+
+        self.assertEqual(
+            [(item["path"], item["change_type"]) for item in changes],
+            [
+                ("added.md", "added"),
+                ("modified.md", "modified"),
+                ("removed.md", "removed"),
+            ],
         )
 
     def test_unchanged_zero_call_action_stops_as_no_progress(self) -> None:

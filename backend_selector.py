@@ -3160,6 +3160,34 @@ def chapter_provider_artifact_state(book_id: str) -> dict[str, str]:
     return state
 
 
+def chapter_provider_artifact_changes(
+    before: dict[str, str],
+    after: dict[str, str],
+) -> list[dict]:
+    """Describe exact provider-writable artifact changes for human review."""
+    changes = []
+    for relative_path in sorted(set(before) | set(after)):
+        before_sha256 = before.get(relative_path)
+        after_sha256 = after.get(relative_path)
+        if before_sha256 == after_sha256:
+            continue
+        if before_sha256 is None:
+            change_type = "added"
+        elif after_sha256 is None:
+            change_type = "removed"
+        else:
+            change_type = "modified"
+        changes.append(
+            {
+                "path": relative_path,
+                "change_type": change_type,
+                "before_sha256": before_sha256,
+                "after_sha256": after_sha256,
+            }
+        )
+    return changes
+
+
 def active_chapter_ledger() -> tuple[
     chapter_controller.ChapterEventLedger,
     str,
@@ -3212,6 +3240,10 @@ def finish_chapter_provider_transition(
             call_kind,
             type(provider_error).__name__,
             message,
+            chapter_provider_artifact_changes(
+                before_artifacts,
+                after_artifacts,
+            ),
         )
     raise ChapterArtifactReconciliationRequired(message) from provider_error
 
@@ -5072,10 +5104,16 @@ def reconcile_interrupted_chapter_action(
     artifact_review = ledger.artifact_review_requirement(contract_id)
     if artifact_review is not None:
         return {
-            "status": "controller_reconciliation_held",
+            "status": "artifact_review_required",
             "book_id": book_id,
             "chapter_id": chapter_id,
             "reason": artifact_review["message"],
+            "failed_contract_id": contract_id,
+            "call_kind": artifact_review["call_kind"],
+            "artifact_changes": artifact_review.get(
+                "artifact_changes",
+                [],
+            ),
         }
     baseline_run = contract.get("run_baseline")
     baseline_snapshot = contract.get("snapshot")
@@ -5182,6 +5220,72 @@ def reconcile_interrupted_chapter_action(
             "prove one unambiguous state transition."
         ),
     }
+
+
+def record_chapter_artifact_review_checkpoint(
+    book_id: str,
+    chapter_id: str,
+) -> dict | None:
+    """Let a human reject one incomplete provider transition or keep its hold."""
+    ledger = chapter_controller.ChapterEventLedger(
+        chapter_controller_ledger_path(book_id, chapter_id)
+    )
+    events = ledger.read()
+    active = ledger.active_contract(events)
+    if active is None:
+        raise RuntimeError("Chapter has no artifact review checkpoint.")
+    contract_id = active["payload"]["contract_id"]
+    requirement = ledger.artifact_review_requirement(contract_id)
+    if requirement is None:
+        raise RuntimeError("Chapter has no artifact review checkpoint.")
+
+    print("\nIncomplete chapter artifact review")
+    print(f"Contract: {contract_id}")
+    print(f"Provider action: {requirement['call_kind']}")
+    print(f"Reason: {requirement['message']}")
+    changes = requirement.get("artifact_changes", [])
+    if changes:
+        print("Canonical artifact changes:")
+        for change in changes:
+            print(
+                f"- {change['change_type']}: {change['path']}"
+                f"\n  before: {change.get('before_sha256') or 'none'}"
+                f"\n  after: {change.get('after_sha256') or 'none'}"
+            )
+    else:
+        print(
+            "Canonical artifact paths were not recorded by this older hold."
+        )
+    print(
+        "Rejecting closes this provider transition as incomplete. "
+        "It does not delete or promote any artifact."
+    )
+    print("1. Reject the incomplete transition")
+    print("2. Keep the review hold")
+    while True:
+        choice = input("Select artifact review status: ").strip()
+        if choice in {"1", "2"}:
+            break
+        print("Invalid selection. Please enter 1 or 2.")
+    if choice == "2":
+        return None
+    while True:
+        note = input("Why is this transition incomplete? ").strip()
+        if note:
+            break
+        print("A concrete review note is required.")
+
+    current_snapshot = build_chapter_controller_snapshot(
+        book_id,
+        chapter_id,
+        include_interrupted_contract=False,
+    )
+    return ledger.reconcile(
+        contract_id,
+        "provider_output_rejected",
+        current_snapshot,
+        note,
+    )
 
 
 def record_chapter_retry_checkpoint(
@@ -10167,6 +10271,32 @@ def continue_book_workflow(
                             print(
                                 "\nInterrupted chapter action recovered from "
                                 "canonical artifacts."
+                            )
+                            continue
+                        if reconciliation["status"] == (
+                            "artifact_review_required"
+                        ):
+                            reviewed = (
+                                record_chapter_artifact_review_checkpoint(
+                                    book_id,
+                                    chapter_id,
+                                )
+                            )
+                            if reviewed is None:
+                                return {
+                                    **reconciliation,
+                                    "status": "artifact_review_held",
+                                    "conversation_id": conversation_id,
+                                    "run_path": str(
+                                        chapter_run_path(
+                                            book_id,
+                                            chapter_id,
+                                        )
+                                    ),
+                                }
+                            print(
+                                "\nIncomplete provider transition rejected. "
+                                "Its attempt remains counted."
                             )
                             continue
                         return {

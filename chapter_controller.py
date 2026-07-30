@@ -548,10 +548,21 @@ class ChapterEventLedger:
         call_kind: str,
         failure_kind: str,
         message: str,
+        artifact_changes: list[dict] | None = None,
     ) -> dict:
         """Hold an active contract after an unproven artifact transition."""
         events = self.read()
         self._require_active_started(contract_id, events)
+        changes = artifact_changes or []
+        for change in changes:
+            if (
+                not isinstance(change, dict)
+                or change.get("change_type")
+                not in {"added", "modified", "removed"}
+                or not isinstance(change.get("path"), str)
+                or not change["path"]
+            ):
+                raise ValueError("Artifact review changes are invalid.")
         return self.append(
             "artifact_review_required",
             {
@@ -559,6 +570,7 @@ class ChapterEventLedger:
                 "call_kind": call_kind,
                 "failure_kind": failure_kind,
                 "message": message,
+                "artifact_changes": changes,
             },
         )
 

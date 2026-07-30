@@ -79,6 +79,12 @@ Start the terminal workflow:
 uv run python3 backend_selector.py
 ```
 
+If a chapter provider call ends after only part of its required MCP transition,
+the Library lists the exact canonical artifact changes and pauses for review.
+The user can keep the hold or reject the incomplete transition. Rejection does
+not delete the artifacts, does not restore the consumed provider attempt, and
+permits at most one retry after the user records a relevant changed condition.
+
 Run the tests:
 
 ```text
