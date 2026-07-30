@@ -27,7 +27,7 @@ SUPPORTED_PIPELINE_VERSIONS = {
     SHARDED_PIPELINE_VERSION,
 }
 MAX_UNIT_CHARACTERS = 60_000
-INVENTORY_TOOL_CONTRACT_VERSION = "inventory-authority-slots-v1"
+INVENTORY_TOOL_CONTRACT_VERSION = "inventory-authority-slots-v2"
 
 
 class PlanShardCorrectionError(book_synthesis.BookSynthesisError):
@@ -40,6 +40,28 @@ class PlanShardArtifactConflictError(book_synthesis.BookSynthesisError):
 
 class InventoryCorrectionError(book_synthesis.BookSynthesisError):
     """A deterministic inventory defect that permits one corrected submit."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "invalid_inventory_contribution",
+        field_path: str = "proposal",
+        claim_id: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.field_path = field_path
+        self.claim_id = claim_id
+
+    def safe_diagnostic(self) -> dict:
+        """Return bounded correction evidence without rejected field values."""
+        return {
+            "code": self.code,
+            "claim_id": self.claim_id,
+            "field_path": self.field_path,
+            "correctable": True,
+        }
 
 
 def staging_directory(project_path: Path, book_id: str) -> Path:
@@ -183,7 +205,8 @@ def save_provider_stage_hold(
         )
     attempts = []
     for event in failed[-2:]:
-        correction_submission_used = False
+        correction_reservation_granted = False
+        correction_validation_completed = False
         budget_path = event.get("tool_budget_path")
         if isinstance(budget_path, str):
             summary_path = book_synthesis.resolve_project_path(
@@ -207,8 +230,14 @@ def save_provider_stage_hold(
                 raise book_synthesis.BookSynthesisError(
                     "Provider-stage tool budget is stale."
                 )
-            correction_submission_used = any(
+            correction_reservation_granted = any(
                 receipt.get("record_type") == "reservation"
+                and receipt.get("attempt_number") == 2
+                for receipt in summary.get("attempt_receipts", [])
+                if isinstance(receipt, dict)
+            )
+            correction_validation_completed = any(
+                receipt.get("record_type") == "result"
                 and receipt.get("attempt_number") == 2
                 for receipt in summary.get("attempt_receipts", [])
                 if isinstance(receipt, dict)
@@ -221,7 +250,15 @@ def save_provider_stage_hold(
                     "failure_classification"
                 ),
                 "diagnostic_sha256": event.get("diagnostic_sha256"),
-                "correction_submission_used": correction_submission_used,
+                "correction_proposed_by_provider": (
+                    True if correction_reservation_granted else None
+                ),
+                "correction_reservation_granted": (
+                    correction_reservation_granted
+                ),
+                "correction_validation_completed": (
+                    correction_validation_completed
+                ),
             }
         )
     if any(
@@ -242,7 +279,7 @@ def save_provider_stage_hold(
         ).encode("utf-8")
     ).hexdigest()
     hold = {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "book_id": book_id,
         "cycle_id": cycle_id,
         "stage": stage,
@@ -293,6 +330,35 @@ def save_provider_stage_hold(
 def load_provider_stage_hold(path: Path) -> dict:
     """Load and verify one provider-stage hold."""
     hold = book_synthesis.read_json_object(path, "Provider-stage hold")
+    schema_version = hold.get("schema_version")
+
+    def valid_attempt(attempt: object) -> bool:
+        if not isinstance(attempt, dict):
+            return False
+        if schema_version == "1.0":
+            return isinstance(
+                attempt.get("correction_submission_used"),
+                bool,
+            )
+        if schema_version == "1.1":
+            return (
+                attempt.get("correction_proposed_by_provider")
+                in {True, None}
+                and isinstance(
+                    attempt.get("correction_reservation_granted"),
+                    bool,
+                )
+                and isinstance(
+                    attempt.get("correction_validation_completed"),
+                    bool,
+                )
+                and (
+                    not attempt["correction_validation_completed"]
+                    or attempt["correction_reservation_granted"]
+                )
+            )
+        return False
+
     if (
         hold.get("status") != _provider_hold_status(hold.get("stage", ""))
         or hold.get("target_created") is not False
@@ -301,12 +367,8 @@ def load_provider_stage_hold(path: Path) -> dict:
         != "human_synthesis_recovery_authorization"
         or not isinstance(hold.get("provider_attempts"), list)
         or any(
-            not isinstance(attempt, dict)
-            or not isinstance(
-                attempt.get("correction_submission_used"),
-                bool,
-            )
-            for attempt in hold.get("provider_attempts", [])
+            not valid_attempt(attempt)
+            for attempt in hold["provider_attempts"]
         )
         or hold.get("hold_sha256")
         != book_synthesis.canonical_json_sha256(hold, "hold_sha256")
@@ -714,6 +776,21 @@ def inventory_task(project_path: Path, book_id: str, unit_id: str) -> dict:
         "packet_sha256": unit["packet_sha256"],
         "canonical_claim_ids": list(unit["canonical_claim_ids"]),
         "canonical_claim_slots": canonical_slots,
+        "interpretation_contract": {
+            "candidate_excerpt": {
+                "match_mode": "case_sensitive_contiguous_substring",
+                "source_field": "chapter_markdown",
+            },
+            "normative_surface_form": {
+                "when": "protected_semantics.normative_force != none",
+                "match_mode": "case_sensitive_contiguous_substring",
+                "source_field": "canonical_claim_slots.authoritative_text",
+            },
+            "non_normative_surface_form": {
+                "when": "protected_semantics.normative_force == none",
+                "required_value": None,
+            },
+        },
     }
     document["input_hash"] = book_synthesis.canonical_json_sha256(
         document,
@@ -806,8 +883,53 @@ def save_inventory_contribution(
     candidate = proposal.get("candidate_claims")
     if not isinstance(canonical, list) or not isinstance(candidate, list):
         raise InventoryCorrectionError(
-            "Inventory contribution claim groups are invalid."
+            "Inventory contribution claim groups are invalid.",
+            code="claim_group_list_required",
+            field_path="canonical_claims_or_candidate_claims",
         )
+    contribution_fields = (
+        "claim_id",
+        "candidate_excerpt",
+        "candidate_location",
+        "certainty",
+        "scope_and_conditions",
+        "attribution",
+        "evidence_relationship",
+        "resolution_status",
+        "normalized_summary",
+        "protected_semantics",
+        "importance_reason",
+    )
+    for group_name, contributions in (
+        ("canonical_claims", canonical),
+        ("candidate_claims", candidate),
+    ):
+        for index, contribution in enumerate(contributions):
+            if not isinstance(contribution, dict):
+                raise InventoryCorrectionError(
+                    "Inventory contribution claim is invalid.",
+                    code="claim_object_required",
+                    field_path=f"{group_name}[{index}]",
+                )
+            missing = next(
+                (
+                    field
+                    for field in contribution_fields
+                    if field not in contribution
+                ),
+                None,
+            )
+            if missing is not None:
+                raise InventoryCorrectionError(
+                    "Inventory contribution claim is incomplete.",
+                    code="required_field_missing",
+                    field_path=f"{group_name}[{index}].{missing}",
+                    claim_id=(
+                        contribution.get("claim_id")
+                        if isinstance(contribution.get("claim_id"), str)
+                        else None
+                    ),
+                )
     canonical_by_id = {
         item.get("claim_id"): item
         for item in canonical
@@ -825,7 +947,9 @@ def save_inventory_contribution(
         or set(canonical_by_id) != set(expected_ids)
     ):
         raise InventoryCorrectionError(
-            "Canonical inventory contributions must match the supplied slots."
+            "Canonical inventory contributions must match the supplied slots.",
+            code="canonical_slot_set_mismatch",
+            field_path="canonical_claims.claim_id",
         )
     candidate_ids = [
         item.get("claim_id") for item in candidate if isinstance(item, dict)
@@ -836,7 +960,9 @@ def save_inventory_contribution(
         != [f"LOCAL{index}" for index in range(1, len(candidate) + 1)]
     ):
         raise InventoryCorrectionError(
-            "Candidate-only contributions must be LOCAL1, LOCAL2, and so on."
+            "Candidate-only contributions must be LOCAL1, LOCAL2, and so on.",
+            code="candidate_claim_numbering_invalid",
+            field_path="candidate_claims.claim_id",
         )
 
     claims = []
@@ -918,12 +1044,15 @@ def save_inventory_contribution(
                 [],
             ),
         },
+        correction_boundary=True,
     )
 
 
 def save_inventory_unit(
     project_path: Path,
     proposal: dict,
+    *,
+    correction_boundary: bool = False,
 ) -> dict:
     """Save one exact chapter inventory shard, idempotently."""
     project_path = project_path.resolve()
@@ -990,15 +1119,52 @@ def save_inventory_unit(
         context.get("protocol_version")
     )
     for claim in claims:
-        if (
-            claim.get("source_kind") not in {"canonical", "candidate_only"}
-            or any(
+        claim_id = (
+            claim.get("claim_id")
+            if isinstance(claim.get("claim_id"), str)
+            else None
+        )
+
+        def reject_model_field(
+            message: str,
+            code: str,
+            field_path: str,
+        ) -> None:
+            if correction_boundary:
+                raise InventoryCorrectionError(
+                    message,
+                    code=code,
+                    field_path=field_path,
+                    claim_id=claim_id,
+                )
+            raise book_synthesis.BookSynthesisError(message)
+
+        if claim.get("source_kind") not in {"canonical", "candidate_only"}:
+            raise book_synthesis.BookSynthesisError(
+                "Inventory unit claim content is invalid."
+            )
+        for field in required_text_fields:
+            if (
                 not isinstance(claim.get(field), str)
                 or not claim[field].strip()
-                for field in required_text_fields
+            ):
+                if field == "statement":
+                    raise book_synthesis.BookSynthesisError(
+                        "Inventory unit claim content is invalid."
+                    )
+                reject_model_field(
+                    "Inventory unit claim content is invalid.",
+                    "nonempty_text_required",
+                    field,
+                )
+        if claim["candidate_excerpt"] not in packet_text:
+            reject_model_field(
+                "Inventory candidate excerpt was not found exactly.",
+                "exact_candidate_substring_required",
+                "candidate_excerpt",
             )
-            or claim["candidate_excerpt"] not in packet_text
-            or claim.get("required_in_edition") is not True
+        if (
+            claim.get("required_in_edition") is not True
             or not isinstance(claim.get("evidence_receipt_ids"), list)
             or len(claim["evidence_receipt_ids"])
             != len(set(claim["evidence_receipt_ids"]))
@@ -1014,18 +1180,57 @@ def save_inventory_unit(
             or not claim["attribution"].strip()
             or not isinstance(claim.get("evidence_relationship"), str)
             or not claim["evidence_relationship"].strip()
-            or claim.get("authority_type")
-            not in book_synthesis.INVENTORY_AUTHORITY_TYPES
             or claim.get("resolution_status")
             not in book_synthesis.INVENTORY_RESOLUTION_STATUSES
         ):
+            invalid_field = next(
+                field
+                for field in (
+                    "attribution",
+                    "evidence_relationship",
+                    "resolution_status",
+                )
+                if (
+                    not isinstance(claim.get(field), str)
+                    or not claim[field].strip()
+                    or (
+                        field == "resolution_status"
+                        and claim.get(field)
+                        not in book_synthesis.INVENTORY_RESOLUTION_STATUSES
+                    )
+                )
+            )
+            reject_model_field(
+                "Audited-plan inventory claim frame is incomplete.",
+                "claim_frame_invalid",
+                invalid_field,
+            )
+        if (
+            audited_protocol
+            and claim.get("authority_type")
+            not in book_synthesis.INVENTORY_AUTHORITY_TYPES
+        ):
             raise book_synthesis.BookSynthesisError(
-                "Audited-plan inventory claim frame is incomplete."
+                "Audited-plan inventory authority frame is invalid."
             )
         book_synthesis.validate_inventory_claim_authority(
             claim,
             canonical_by_id,
             required=audited_protocol,
+            correction_factory=(
+                (
+                    lambda message, code, field_path: (
+                        InventoryCorrectionError(
+                            message,
+                            code=code,
+                            field_path=field_path,
+                            claim_id=claim_id,
+                        )
+                    )
+                )
+                if correction_boundary
+                else None
+            ),
         )
         if claim["source_kind"] == "canonical":
             source = canonical_by_id.get(claim["claim_id"])
@@ -1043,6 +1248,12 @@ def save_inventory_unit(
         if not isinstance(values, list) or any(
             not isinstance(value, str) or not value.strip() for value in values
         ):
+            if correction_boundary:
+                raise InventoryCorrectionError(
+                    f"Inventory unit {field} are invalid.",
+                    code="nonempty_text_list_required",
+                    field_path=field,
+                )
             raise book_synthesis.BookSynthesisError(
                 f"Inventory unit {field} are invalid."
             )

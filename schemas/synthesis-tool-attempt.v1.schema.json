@@ -66,6 +66,47 @@
         {"type": "null"}
       ]
     },
+    "validation_diagnostic": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "claim_id",
+            "field_path",
+            "correctable",
+            "submission_attempt"
+          ],
+          "properties": {
+            "code": {
+              "type": "string",
+              "pattern": "^[a-z0-9_]{1,100}$"
+            },
+            "claim_id": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9:._-]{1,200}$"
+                },
+                {"type": "null"}
+              ]
+            },
+            "field_path": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.\\[\\]-]{1,300}$"
+            },
+            "correctable": {"const": true},
+            "submission_attempt": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2
+            }
+          }
+        },
+        {"type": "null"}
+      ]
+    },
     "reserved_at": {"type": "string", "minLength": 1},
     "completed_at": {"type": "string", "minLength": 1},
     "attempt_sha256": {"$ref": "#/$defs/sha256"}

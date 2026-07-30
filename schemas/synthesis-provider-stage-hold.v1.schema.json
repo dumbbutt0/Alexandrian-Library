@@ -25,7 +25,7 @@
     "hold_sha256"
   ],
   "properties": {
-    "schema_version": {"const": "1.0"},
+    "schema_version": {"enum": ["1.0", "1.1"]},
     "book_id": {
       "type": "string",
       "pattern": "^book-[A-Za-z0-9._-]+$"
@@ -69,15 +69,31 @@
           "action_id",
           "backend",
           "failure_classification",
-          "diagnostic_sha256",
-          "correction_submission_used"
+          "diagnostic_sha256"
+        ],
+        "oneOf": [
+          {
+            "required": ["correction_submission_used"]
+          },
+          {
+            "required": [
+              "correction_proposed_by_provider",
+              "correction_reservation_granted",
+              "correction_validation_completed"
+            ]
+          }
         ],
         "properties": {
           "action_id": {"type": "string", "minLength": 1},
           "backend": {"enum": ["codex", "claude"]},
           "failure_classification": {"type": "string", "minLength": 1},
           "diagnostic_sha256": {"$ref": "#/$defs/sha256"},
-          "correction_submission_used": {"type": "boolean"}
+          "correction_submission_used": {"type": "boolean"},
+          "correction_proposed_by_provider": {
+            "type": ["boolean", "null"]
+          },
+          "correction_reservation_granted": {"type": "boolean"},
+          "correction_validation_completed": {"type": "boolean"}
         }
       }
     },

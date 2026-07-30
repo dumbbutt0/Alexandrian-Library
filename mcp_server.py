@@ -24,7 +24,13 @@ from urllib.parse import urljoin, urlsplit
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    model_validator,
+)
 
 import book_assembler
 import book_synthesis
@@ -61,6 +67,82 @@ class StrictModel(BaseModel):
     """Reject fields that are not part of the research-review contract."""
 
     model_config = ConfigDict(extra="forbid")
+
+
+class CorrectableInventoryToolError(ToolError):
+    """Carry safe structured correction evidence through FastMCP wrapping."""
+
+    def __init__(
+        self,
+        error: staged_synthesis.InventoryCorrectionError,
+    ) -> None:
+        self.validation_diagnostic = error.safe_diagnostic()
+        claim = self.validation_diagnostic["claim_id"] or "none"
+        super().__init__(
+            synthesis_tool_budget.CORRECTABLE_INVENTORY_ERROR_PREFIX
+            + f" claim_id={claim}"
+            + f" field={self.validation_diagnostic['field_path']}"
+            + f" code={self.validation_diagnostic['code']}"
+            + f" message={error}"
+        )
+
+
+def _exception_in_chain(
+    error: BaseException,
+    expected_type: type[BaseException],
+) -> BaseException | None:
+    """Return the first typed cause without parsing exception prose."""
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        if isinstance(current, expected_type):
+            return current
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return None
+
+
+def _inventory_schema_diagnostic(
+    arguments: dict[str, Any],
+    error: ValidationError,
+) -> dict:
+    """Reduce a Pydantic rejection to non-sensitive correction metadata."""
+    detail = error.errors(
+        include_url=False,
+        include_context=False,
+        include_input=False,
+    )[0]
+    location = list(detail.get("loc", ()))
+    if location and location[0] == "proposal":
+        location = location[1:]
+    field_path = ""
+    for part in location:
+        if isinstance(part, int):
+            field_path += f"[{part}]"
+        else:
+            field_path += ("." if field_path else "") + str(part)
+    proposal = arguments.get("proposal")
+    claim_id = None
+    if (
+        isinstance(proposal, dict)
+        and len(location) >= 2
+        and location[0] in {"canonical_claims", "candidate_claims"}
+        and isinstance(location[1], int)
+    ):
+        claims = proposal.get(location[0])
+        if (
+            isinstance(claims, list)
+            and 0 <= location[1] < len(claims)
+            and isinstance(claims[location[1]], dict)
+            and isinstance(claims[location[1]].get("claim_id"), str)
+        ):
+            claim_id = claims[location[1]]["claim_id"]
+    return {
+        "code": f"schema_{detail.get('type', 'validation_error')}",
+        "claim_id": claim_id,
+        "field_path": field_path or "proposal",
+        "correctable": True,
+    }
 
 
 class ResearchRoute(str, Enum):
@@ -5910,16 +5992,33 @@ class AlexandrianFastMCP(FastMCP):
             result = await super().call_tool(name, arguments)
         except ToolError as error:
             message = str(error)
+            inventory_error = _exception_in_chain(
+                error,
+                CorrectableInventoryToolError,
+            )
+            schema_error = _exception_in_chain(error, ValidationError)
+            safe_diagnostic = None
             if (
-                synthesis_tool_budget.CORRECTABLE_ERROR_PREFIX in message
-                or synthesis_tool_budget.CORRECTABLE_INVENTORY_ERROR_PREFIX
-                in message
-                or (
-                    name
-                    == synthesis_tool_budget.INVENTORY_SUBMIT_TOOL
-                    and "validation error" in message.lower()
+                isinstance(
+                    inventory_error,
+                    CorrectableInventoryToolError,
                 )
+                and name == synthesis_tool_budget.INVENTORY_SUBMIT_TOOL
             ):
+                outcome = "correctable_validation_rejected"
+                safe_diagnostic = dict(
+                    inventory_error.validation_diagnostic
+                )
+            elif (
+                isinstance(schema_error, ValidationError)
+                and name == synthesis_tool_budget.INVENTORY_SUBMIT_TOOL
+            ):
+                outcome = "correctable_validation_rejected"
+                safe_diagnostic = _inventory_schema_diagnostic(
+                    arguments,
+                    schema_error,
+                )
+            elif synthesis_tool_budget.CORRECTABLE_ERROR_PREFIX in message:
                 outcome = "correctable_validation_rejected"
             elif "validation error" in message.lower():
                 outcome = "argument_validation_rejected"
@@ -5930,6 +6029,7 @@ class AlexandrianFastMCP(FastMCP):
                 reservation,
                 outcome,
                 message,
+                safe_diagnostic=safe_diagnostic,
             )
             raise
         except Exception as error:
@@ -7600,11 +7700,7 @@ def submit_staged_synthesis_inventory_unit(
             proposal.model_dump(mode="json"),
         )
     except staged_synthesis.InventoryCorrectionError as error:
-        raise ToolError(
-            synthesis_tool_budget.CORRECTABLE_INVENTORY_ERROR_PREFIX
-            + " "
-            + str(error)
-        ) from error
+        raise CorrectableInventoryToolError(error) from error
     except book_synthesis.BookSynthesisError as error:
         raise ToolError(str(error)) from error
 

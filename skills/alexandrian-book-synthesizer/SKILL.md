@@ -38,13 +38,19 @@ evidence receipts, authority references, and order. Do not reproduce or
 normalize those fields.
 
 Submit one interpretation contribution for every canonical slot. Record
-material packet-only claims as `LOCAL1`, `LOCAL2`, and so on. Use exact
-candidate excerpts. Record:
+material packet-only claims as `LOCAL1`, `LOCAL2`, and so on. Each candidate
+excerpt must be a case-sensitive, contiguous substring of the supplied chapter
+text. Record:
 
 - `normalized_summary` is derived index material and has no authority.
 - `protected_semantics` must separately record claim role, normative force,
   normative polarity and exact surface form, certainty, scope and conditions,
   attribution, evidence relationship, and resolution status.
+
+When normative force is not `none`, the normative surface form must be a
+case-sensitive, contiguous substring of that canonical slot's
+`authoritative_text`. When normative force is `none`, the surface form must be
+null.
 
 Do not convert a recommendation into a requirement, a negative recommendation
 into a prohibition, or a project choice into an external rule. Do not infer

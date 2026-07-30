@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -434,6 +435,8 @@ def record_tool_result(
     reservation: dict,
     outcome: str,
     error_message: str | None = None,
+    *,
+    safe_diagnostic: dict | None = None,
 ) -> dict:
     """Append the immutable outcome for one already-consumed call slot."""
     project_path = project_path.resolve()
@@ -456,6 +459,41 @@ def record_tool_result(
         kind,
         int(reservation["attempt_number"]),
     )
+    validation_diagnostic = None
+    if safe_diagnostic is not None:
+        if (
+            set(safe_diagnostic)
+            != {"code", "claim_id", "field_path", "correctable"}
+            or not isinstance(safe_diagnostic.get("code"), str)
+            or not re.fullmatch(
+                r"[a-z0-9_]{1,100}",
+                safe_diagnostic["code"],
+            )
+            or (
+                safe_diagnostic.get("claim_id") is not None
+                and (
+                    not isinstance(safe_diagnostic["claim_id"], str)
+                    or not re.fullmatch(
+                        r"[A-Za-z0-9:._-]{1,200}",
+                        safe_diagnostic["claim_id"],
+                    )
+                )
+            )
+            or not isinstance(safe_diagnostic.get("field_path"), str)
+            or not re.fullmatch(
+                r"[A-Za-z0-9_.\[\]-]{1,300}",
+                safe_diagnostic["field_path"],
+            )
+            or safe_diagnostic.get("correctable") is not True
+            or outcome != "correctable_validation_rejected"
+        ):
+            raise SynthesisToolBudgetError(
+                "Safe validation diagnostic is invalid."
+            )
+        validation_diagnostic = {
+            **safe_diagnostic,
+            "submission_attempt": reservation["attempt_number"],
+        }
     document = {
         "schema_version": "1.0",
         "record_type": "result",
@@ -469,6 +507,7 @@ def record_tool_result(
             if error_message is None
             else hashlib.sha256(error_message.encode("utf-8")).hexdigest()
         ),
+        "validation_diagnostic": validation_diagnostic,
         "completed_at": _now(),
     }
     document["attempt_sha256"] = _canonical_sha256(
@@ -526,6 +565,9 @@ def finalize_action_budget(
                 "tool_name": document.get("tool_name"),
                 "attempt_number": document.get("attempt_number"),
                 "outcome": document.get("outcome"),
+                "validation_diagnostic": document.get(
+                    "validation_diagnostic"
+                ),
             }
         )
     tools = {receipt["tool_name"] for receipt in receipts}

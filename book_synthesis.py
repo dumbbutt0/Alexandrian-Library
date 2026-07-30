@@ -10,7 +10,7 @@ import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 CLAIM_STATUSES = {
@@ -129,8 +129,20 @@ def validate_inventory_claim_authority(
     canonical_claims: dict[str, dict],
     *,
     required: bool,
+    correction_factory: (
+        Callable[[str, str, str], Exception] | None
+    ) = None,
 ) -> None:
     """Reject a derived claim representation that conflicts with its source."""
+    def reject_model_field(
+        message: str,
+        code: str,
+        field_path: str,
+    ) -> None:
+        if correction_factory is not None:
+            raise correction_factory(message, code, field_path)
+        raise BookSynthesisError(message)
+
     contract_fields = (
         "authority_source",
         "authority_ref",
@@ -141,8 +153,13 @@ def validate_inventory_claim_authority(
     if not required and not any(field in claim for field in contract_fields):
         return
     if any(field not in claim for field in contract_fields):
-        raise BookSynthesisError(
-            "Inventory claim authority contract is incomplete."
+        missing = next(
+            field for field in contract_fields if field not in claim
+        )
+        reject_model_field(
+            "Inventory claim authority contract is incomplete.",
+            "required_field_missing",
+            missing,
         )
 
     source_kind = claim.get("source_kind")
@@ -171,17 +188,26 @@ def validate_inventory_claim_authority(
         or claim.get("authority_ref") != expected_ref
         or claim.get("authoritative_text") != expected_text
         or claim.get("statement") != expected_text
-        or not isinstance(claim.get("normalized_summary"), str)
-        or not claim["normalized_summary"].strip()
     ):
         raise BookSynthesisError(
             "Inventory claim conflicts with its authoritative text."
         )
+    if (
+        not isinstance(claim.get("normalized_summary"), str)
+        or not claim["normalized_summary"].strip()
+    ):
+        reject_model_field(
+            "Inventory claim normalized summary is invalid.",
+            "nonempty_text_required",
+            "normalized_summary",
+        )
 
     protected = claim.get("protected_semantics")
     if not isinstance(protected, dict):
-        raise BookSynthesisError(
-            "Inventory claim protected semantics are invalid."
+        reject_model_field(
+            "Inventory claim protected semantics are invalid.",
+            "object_required",
+            "protected_semantics",
         )
     expected_fields = {
         "claim_role",
@@ -195,44 +221,71 @@ def validate_inventory_claim_authority(
         "resolution_status",
     }
     if set(protected) != expected_fields:
-        raise BookSynthesisError(
-            "Inventory claim protected semantics are incomplete."
+        reject_model_field(
+            "Inventory claim protected semantics are incomplete.",
+            "exact_field_set_required",
+            "protected_semantics",
         )
-    if (
-        protected.get("claim_role") not in INVENTORY_CLAIM_ROLES
-        or protected.get("normative_force") not in INVENTORY_NORMATIVE_FORCES
-        or protected.get("normative_polarity")
-        not in INVENTORY_NORMATIVE_POLARITIES
-        or protected.get("certainty") != claim.get("certainty")
-        or protected.get("scope_and_conditions")
-        != claim.get("scope_and_conditions")
-        or protected.get("attribution") != claim.get("attribution")
-        or protected.get("evidence_relationship")
-        != claim.get("evidence_relationship")
-        or protected.get("resolution_status")
-        != claim.get("resolution_status")
-    ):
-        raise BookSynthesisError(
-            "Inventory claim protected semantics conflict with its frame."
-        )
+    enumerated_fields = {
+        "claim_role": INVENTORY_CLAIM_ROLES,
+        "normative_force": INVENTORY_NORMATIVE_FORCES,
+        "normative_polarity": INVENTORY_NORMATIVE_POLARITIES,
+    }
+    for field, allowed in enumerated_fields.items():
+        if protected.get(field) not in allowed:
+            reject_model_field(
+                "Inventory claim protected semantics are invalid.",
+                "unsupported_enum_value",
+                f"protected_semantics.{field}",
+            )
+    mirrored_fields = (
+        "certainty",
+        "scope_and_conditions",
+        "attribution",
+        "evidence_relationship",
+        "resolution_status",
+    )
+    for field in mirrored_fields:
+        if protected.get(field) != claim.get(field):
+            reject_model_field(
+                "Inventory claim protected semantics conflict with its frame.",
+                "protected_frame_mismatch",
+                f"protected_semantics.{field}",
+            )
 
     force = protected["normative_force"]
     polarity = protected["normative_polarity"]
     surface = protected["normative_surface_form"]
     if force == "none":
-        if polarity != "not_applicable" or surface is not None:
-            raise BookSynthesisError(
-                "A non-normative claim cannot carry normative wording."
+        if polarity != "not_applicable":
+            reject_model_field(
+                "A non-normative claim cannot carry normative wording.",
+                "non_normative_polarity_required",
+                "protected_semantics.normative_polarity",
             )
-    elif (
-        polarity not in {"positive", "negative"}
-        or not isinstance(surface, str)
-        or not surface.strip()
-        or surface not in expected_text
-    ):
-        raise BookSynthesisError(
-            "Normative force must cite exact authoritative wording."
-        )
+        if surface is not None:
+            reject_model_field(
+                "A non-normative claim cannot carry normative wording.",
+                "non_normative_surface_must_be_null",
+                "protected_semantics.normative_surface_form",
+            )
+    else:
+        if polarity not in {"positive", "negative"}:
+            reject_model_field(
+                "Normative force must declare positive or negative polarity.",
+                "normative_polarity_required",
+                "protected_semantics.normative_polarity",
+            )
+        if (
+            not isinstance(surface, str)
+            or not surface.strip()
+            or surface not in expected_text
+        ):
+            reject_model_field(
+                "Normative force must cite exact authoritative wording.",
+                "exact_authoritative_substring_required",
+                "protected_semantics.normative_surface_form",
+            )
 
 
 def validate_audit_changed_dimensions(

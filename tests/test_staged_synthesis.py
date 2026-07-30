@@ -1,5 +1,7 @@
+import asyncio
 import hashlib
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,6 +9,7 @@ from unittest.mock import patch
 
 import book_synthesis
 import backend_selector
+import mcp_server
 import staged_synthesis
 import synthesis_tool_budget
 
@@ -332,6 +335,45 @@ class StagedSynthesisTests(unittest.TestCase):
             "definitions": legacy["definitions"],
             "limitations": legacy["limitations"],
             "unresolved_questions": legacy["unresolved_questions"],
+        }
+
+    def open_inventory_tool_action(
+        self,
+        task: dict,
+        suffix: str,
+    ) -> tuple[str, dict[str, str]]:
+        action_id = f"inventory-{task['unit_id']}-{suffix}"
+        event = {
+            "schema_version": "1.0",
+            "event": "contract_opened",
+            "book_id": self.book_id,
+            "cycle_id": "cycle-001",
+            "action_id": action_id,
+            "stage": f"inventory-{task['unit_id']}",
+            "backend": "codex",
+            "input_hash": task["input_hash"],
+            "tool_budget": {
+                "controlled_tools": [
+                    synthesis_tool_budget.INVENTORY_READ_TOOL,
+                    synthesis_tool_budget.INVENTORY_SUBMIT_TOOL,
+                ]
+            },
+        }
+        ledger = self.book / "runs" / "synthesis.controller.jsonl"
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        with ledger.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(event) + "\n")
+        values = {
+            "book_id": self.book_id,
+            "cycle_id": "cycle-001",
+            "action_id": action_id,
+            "stage": event["stage"],
+            "backend": "codex",
+            "input_hash": task["input_hash"],
+        }
+        return action_id, {
+            synthesis_tool_budget.CONTEXT_ENV[field]: value
+            for field, value in values.items()
         }
 
     def initialize_foundation(self) -> tuple[dict, dict, dict]:
@@ -1117,6 +1159,16 @@ class StagedSynthesisTests(unittest.TestCase):
             [slot["claim_id"] for slot in task["canonical_claim_slots"]],
             ["review-staged:C1", "review-staged:C2"],
         )
+        self.assertEqual(
+            task["tool_contract_version"],
+            "inventory-authority-slots-v2",
+        )
+        self.assertEqual(
+            task["interpretation_contract"]["normative_surface_form"][
+                "match_mode"
+            ],
+            "case_sensitive_contiguous_substring",
+        )
         read = staged_synthesis.read_inventory_input(
             self.project,
             self.book_id,
@@ -1240,6 +1292,514 @@ class StagedSynthesisTests(unittest.TestCase):
                 self.project,
                 proposal,
             )
+
+    def test_inventory_mcp_correction_survives_restart_and_is_bounded(
+        self,
+    ) -> None:
+        staged_synthesis.prepare(
+            self.project,
+            self.book_id,
+            self.candidate,
+            self.profile,
+        )
+        task = staged_synthesis.inventory_task(
+            self.project,
+            self.book_id,
+            "CH1",
+        )
+        action_id, environment = self.open_inventory_tool_action(
+            task,
+            "mcp-correction",
+        )
+        invalid = self.inventory_contribution("CH1")
+        semantics = invalid["canonical_claims"][0]["protected_semantics"]
+        semantics["normative_force"] = "requirement"
+        semantics["normative_polarity"] = "positive"
+        semantics["normative_surface_form"] = (
+            "the first claim stays bounded."
+        )
+
+        with (
+            patch.object(mcp_server, "PROJECT_PATH", self.project),
+            patch.dict(os.environ, environment, clear=False),
+        ):
+            asyncio.run(
+                mcp_server.mcp.call_tool(
+                    synthesis_tool_budget.INVENTORY_READ_TOOL,
+                    {
+                        "book_id": self.book_id,
+                        "unit_id": "CH1",
+                        "input_hash": task["input_hash"],
+                    },
+                )
+            )
+            with self.assertRaisesRegex(
+                mcp_server.ToolError,
+                "exact_authoritative_substring_required",
+            ):
+                asyncio.run(
+                    mcp_server.mcp.call_tool(
+                        synthesis_tool_budget.INVENTORY_SUBMIT_TOOL,
+                        {"proposal": invalid},
+                    )
+                )
+
+        first_result_path = (
+            self.book
+            / "runs"
+            / "synthesis_tool_budgets"
+            / action_id
+            / "submit-01.result.json"
+        )
+        first_result = json.loads(
+            first_result_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            first_result["outcome"],
+            "correctable_validation_rejected",
+        )
+        self.assertEqual(
+            first_result["validation_diagnostic"],
+            {
+                "code": "exact_authoritative_substring_required",
+                "claim_id": "review-staged:C1",
+                "field_path": (
+                    "protected_semantics.normative_surface_form"
+                ),
+                "correctable": True,
+                "submission_attempt": 1,
+            },
+        )
+
+        corrected = self.inventory_contribution("CH1")
+        semantics = corrected["canonical_claims"][0][
+            "protected_semantics"
+        ]
+        semantics["normative_force"] = "requirement"
+        semantics["normative_polarity"] = "positive"
+        semantics["normative_surface_form"] = (
+            "The first claim stays bounded."
+        )
+        # A new environment scope represents reloading the remaining slot
+        # from durable receipts after a process restart.
+        with (
+            patch.object(mcp_server, "PROJECT_PATH", self.project),
+            patch.dict(os.environ, environment, clear=False),
+        ):
+            asyncio.run(
+                mcp_server.mcp.call_tool(
+                    synthesis_tool_budget.INVENTORY_SUBMIT_TOOL,
+                    {"proposal": corrected},
+                )
+            )
+            with self.assertRaisesRegex(
+                mcp_server.ToolError,
+                "submission budget is exhausted",
+            ):
+                asyncio.run(
+                    mcp_server.mcp.call_tool(
+                        synthesis_tool_budget.INVENTORY_SUBMIT_TOOL,
+                        {"proposal": corrected},
+                    )
+                )
+
+        artifact = (
+            staged_synthesis.staging_directory(
+                self.project,
+                self.book_id,
+            )
+            / "inventory_units"
+            / "CH1.json"
+        )
+        self.assertTrue(artifact.is_file())
+
+    def test_all_model_owned_inventory_fields_use_typed_corrections(
+        self,
+    ) -> None:
+        staged_synthesis.prepare(
+            self.project,
+            self.book_id,
+            self.candidate,
+            self.profile,
+        )
+        mutations = {
+            "candidate_excerpt": lambda proposal: proposal[
+                "canonical_claims"
+            ][0].update(candidate_excerpt="not in the chapter"),
+            "candidate_location": lambda proposal: proposal[
+                "canonical_claims"
+            ][0].update(candidate_location=""),
+            "certainty": lambda proposal: proposal["canonical_claims"][
+                0
+            ].update(certainty=""),
+            "scope_and_conditions": lambda proposal: proposal[
+                "canonical_claims"
+            ][0].update(scope_and_conditions=""),
+            "attribution": lambda proposal: proposal["canonical_claims"][
+                0
+            ].update(attribution=""),
+            "evidence_relationship": lambda proposal: proposal[
+                "canonical_claims"
+            ][0].update(evidence_relationship=""),
+            "resolution_status": lambda proposal: proposal[
+                "canonical_claims"
+            ][0].update(resolution_status="invalid"),
+            "normalized_summary": lambda proposal: proposal[
+                "canonical_claims"
+            ][0].update(normalized_summary=""),
+            "protected_semantics": lambda proposal: proposal[
+                "canonical_claims"
+            ][0]["protected_semantics"].update(certainty="different"),
+            "importance_reason": lambda proposal: proposal[
+                "canonical_claims"
+            ][0].update(importance_reason=""),
+            "definitions": lambda proposal: proposal.update(
+                definitions=[""]
+            ),
+            "limitations": lambda proposal: proposal.update(
+                limitations=[""]
+            ),
+            "unresolved_questions": lambda proposal: proposal.update(
+                unresolved_questions=[""]
+            ),
+        }
+        for field, mutate in mutations.items():
+            with self.subTest(field=field):
+                proposal = self.inventory_contribution("CH1")
+                mutate(proposal)
+                with self.assertRaises(
+                    staged_synthesis.InventoryCorrectionError
+                ) as caught:
+                    staged_synthesis.save_inventory_contribution(
+                        self.project,
+                        proposal,
+                    )
+                diagnostic = caught.exception.safe_diagnostic()
+                self.assertTrue(diagnostic["correctable"])
+                self.assertIsInstance(diagnostic["code"], str)
+                self.assertIsInstance(diagnostic["field_path"], str)
+
+    def test_stale_inventory_hash_is_terminal_without_correction_slot(
+        self,
+    ) -> None:
+        staged_synthesis.prepare(
+            self.project,
+            self.book_id,
+            self.candidate,
+            self.profile,
+        )
+        task = staged_synthesis.inventory_task(
+            self.project,
+            self.book_id,
+            "CH1",
+        )
+        action_id, environment = self.open_inventory_tool_action(
+            task,
+            "stale-hash",
+        )
+        stale = self.inventory_contribution("CH1")
+        stale["input_hash"] = "f" * 64
+        with (
+            patch.object(mcp_server, "PROJECT_PATH", self.project),
+            patch.dict(os.environ, environment, clear=False),
+        ):
+            with self.assertRaisesRegex(
+                mcp_server.ToolError,
+                "input hash is stale",
+            ):
+                asyncio.run(
+                    mcp_server.mcp.call_tool(
+                        synthesis_tool_budget.INVENTORY_SUBMIT_TOOL,
+                        {"proposal": stale},
+                    )
+                )
+            with self.assertRaisesRegex(
+                mcp_server.ToolError,
+                "only after a correctable",
+            ):
+                asyncio.run(
+                    mcp_server.mcp.call_tool(
+                        synthesis_tool_budget.INVENTORY_SUBMIT_TOOL,
+                        {"proposal": self.inventory_contribution("CH1")},
+                    )
+                )
+        result = json.loads(
+            (
+                self.book
+                / "runs"
+                / "synthesis_tool_budgets"
+                / action_id
+                / "submit-01.result.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(result["outcome"], "tool_execution_rejected")
+        self.assertIsNone(result["validation_diagnostic"])
+
+    def test_two_invalid_inventory_submissions_are_terminal(self) -> None:
+        staged_synthesis.prepare(
+            self.project,
+            self.book_id,
+            self.candidate,
+            self.profile,
+        )
+        task = staged_synthesis.inventory_task(
+            self.project,
+            self.book_id,
+            "CH1",
+        )
+        _, environment = self.open_inventory_tool_action(
+            task,
+            "two-invalid",
+        )
+        invalid = self.inventory_contribution("CH1")
+        invalid["canonical_claims"][0]["candidate_excerpt"] = "absent"
+        with (
+            patch.object(mcp_server, "PROJECT_PATH", self.project),
+            patch.dict(os.environ, environment, clear=False),
+        ):
+            for _ in range(2):
+                with self.assertRaisesRegex(
+                    mcp_server.ToolError,
+                    "exact_candidate_substring_required",
+                ):
+                    asyncio.run(
+                        mcp_server.mcp.call_tool(
+                            synthesis_tool_budget.INVENTORY_SUBMIT_TOOL,
+                            {"proposal": invalid},
+                        )
+                    )
+            with self.assertRaisesRegex(
+                mcp_server.ToolError,
+                "submission budget is exhausted",
+            ):
+                asyncio.run(
+                    mcp_server.mcp.call_tool(
+                        synthesis_tool_budget.INVENTORY_SUBMIT_TOOL,
+                        {"proposal": self.inventory_contribution("CH1")},
+                    )
+                )
+
+    def test_inventory_schema_rejection_is_structured_and_correctable(
+        self,
+    ) -> None:
+        staged_synthesis.prepare(
+            self.project,
+            self.book_id,
+            self.candidate,
+            self.profile,
+        )
+        task = staged_synthesis.inventory_task(
+            self.project,
+            self.book_id,
+            "CH1",
+        )
+        action_id, environment = self.open_inventory_tool_action(
+            task,
+            "schema-correction",
+        )
+        invalid = self.inventory_contribution("CH1")
+        del invalid["canonical_claims"][0]["candidate_location"]
+        with (
+            patch.object(mcp_server, "PROJECT_PATH", self.project),
+            patch.dict(os.environ, environment, clear=False),
+        ):
+            with self.assertRaises(mcp_server.ToolError):
+                asyncio.run(
+                    mcp_server.mcp.call_tool(
+                        synthesis_tool_budget.INVENTORY_SUBMIT_TOOL,
+                        {"proposal": invalid},
+                    )
+                )
+            asyncio.run(
+                mcp_server.mcp.call_tool(
+                    synthesis_tool_budget.INVENTORY_SUBMIT_TOOL,
+                    {"proposal": self.inventory_contribution("CH1")},
+                )
+            )
+        result = json.loads(
+            (
+                self.book
+                / "runs"
+                / "synthesis_tool_budgets"
+                / action_id
+                / "submit-01.result.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            result["validation_diagnostic"],
+            {
+                "code": "schema_missing",
+                "claim_id": "review-staged:C1",
+                "field_path": "canonical_claims[0].candidate_location",
+                "correctable": True,
+                "submission_attempt": 1,
+            },
+        )
+
+    def test_conflicting_inventory_artifact_is_terminal(self) -> None:
+        staged_synthesis.prepare(
+            self.project,
+            self.book_id,
+            self.candidate,
+            self.profile,
+        )
+        staged_synthesis.save_inventory_contribution(
+            self.project,
+            self.inventory_contribution("CH1"),
+        )
+        task = staged_synthesis.inventory_task(
+            self.project,
+            self.book_id,
+            "CH1",
+        )
+        action_id, environment = self.open_inventory_tool_action(
+            task,
+            "artifact-conflict",
+        )
+        conflicting = self.inventory_contribution("CH1")
+        conflicting["definitions"] = ["A conflicting definition."]
+        with (
+            patch.object(mcp_server, "PROJECT_PATH", self.project),
+            patch.dict(os.environ, environment, clear=False),
+        ):
+            with self.assertRaisesRegex(
+                mcp_server.ToolError,
+                "already exists with different content",
+            ):
+                asyncio.run(
+                    mcp_server.mcp.call_tool(
+                        synthesis_tool_budget.INVENTORY_SUBMIT_TOOL,
+                        {"proposal": conflicting},
+                    )
+                )
+            with self.assertRaisesRegex(
+                mcp_server.ToolError,
+                "only after a correctable",
+            ):
+                asyncio.run(
+                    mcp_server.mcp.call_tool(
+                        synthesis_tool_budget.INVENTORY_SUBMIT_TOOL,
+                        {"proposal": conflicting},
+                    )
+                )
+        result = json.loads(
+            (
+                self.book
+                / "runs"
+                / "synthesis_tool_budgets"
+                / action_id
+                / "submit-01.result.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(result["outcome"], "tool_execution_rejected")
+        self.assertIsNone(result["validation_diagnostic"])
+
+    def test_corrected_inventory_write_reconciles_missing_provider_output(
+        self,
+    ) -> None:
+        staged_synthesis.prepare(
+            self.project,
+            self.book_id,
+            self.candidate,
+            self.profile,
+        )
+        task = staged_synthesis.inventory_task(
+            self.project,
+            self.book_id,
+            "CH1",
+        )
+        invalid = self.inventory_contribution("CH1")
+        invalid["canonical_claims"][0]["candidate_excerpt"] = "absent"
+        corrected = self.inventory_contribution("CH1")
+        target = (
+            staged_synthesis.staging_directory(
+                self.project,
+                self.book_id,
+            )
+            / "inventory_units"
+            / "CH1.json"
+        )
+
+        def provider_call(
+            *_args: object,
+            environment_overrides: dict[str, str],
+            **_kwargs: object,
+        ) -> tuple[list[dict], str]:
+            with patch.dict(
+                os.environ,
+                environment_overrides,
+                clear=False,
+            ):
+                asyncio.run(
+                    mcp_server.mcp.call_tool(
+                        synthesis_tool_budget.INVENTORY_READ_TOOL,
+                        {
+                            "book_id": self.book_id,
+                            "unit_id": "CH1",
+                            "input_hash": task["input_hash"],
+                        },
+                    )
+                )
+                with self.assertRaises(mcp_server.ToolError):
+                    asyncio.run(
+                        mcp_server.mcp.call_tool(
+                            synthesis_tool_budget.INVENTORY_SUBMIT_TOOL,
+                            {"proposal": invalid},
+                        )
+                    )
+                asyncio.run(
+                    mcp_server.mcp.call_tool(
+                        synthesis_tool_budget.INVENTORY_SUBMIT_TOOL,
+                        {"proposal": corrected},
+                    )
+                )
+            raise RuntimeError("provider output was unavailable")
+
+        with (
+            patch.object(backend_selector, "PROJECT_PATH", self.project),
+            patch.object(
+                backend_selector,
+                "BOOKS_PATH",
+                self.project / "data" / "books",
+            ),
+            patch.object(mcp_server, "PROJECT_PATH", self.project),
+            patch.object(
+                backend_selector,
+                "capture_backend_response",
+                side_effect=provider_call,
+            ),
+        ):
+            result = backend_selector.run_staged_provider_action(
+                "codex",
+                "/bin/codex",
+                self.book_id,
+                "inventory-CH1",
+                target,
+                "bounded inventory prompt",
+                "book_synthesis",
+                maximum_stage_calls=2,
+                capability_preflight={
+                    "input_hash": task["input_hash"],
+                    "capability_sha256": "a" * 64,
+                },
+            )
+
+        self.assertTrue(target.is_file())
+        self.assertTrue(result["reconciled_after_provider_error"])
+        ledger = [
+            json.loads(line)
+            for line in (
+                self.book / "runs" / "synthesis.controller.jsonl"
+            ).read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(
+            [event["event"] for event in ledger][-1],
+            "contract_completed",
+        )
+        self.assertNotIn(
+            "contract_failed",
+            [event["event"] for event in ledger],
+        )
 
     def test_inventory_failures_have_typed_diagnostics(self) -> None:
         cases = {
