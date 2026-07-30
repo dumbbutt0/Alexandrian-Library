@@ -1619,19 +1619,18 @@ def preflight_staged_capabilities(
                 + ", ".join(missing_permissions)
             )
     else:
-        config_path = PROJECT_PATH / ".codex" / "config.toml"
-        try:
-            config_text = config_path.read_text(encoding="utf-8")
-        except OSError as error:
-            raise CapabilityPreflightError(
-                "Codex MCP configuration is unavailable."
-            ) from error
+        readiness = environment_check.codex_project_readiness(
+            PROJECT_PATH,
+            check_runtime=True,
+        )
         if (
-            "[mcp_servers.alexandrian_library]" not in config_text
-            or str(PROJECT_PATH / "mcp_server.py") not in config_text
+            readiness.status != "available"
+            or not readiness.detail.startswith(
+                environment_check.CODEX_READY + ":"
+            )
         ):
             raise CapabilityPreflightError(
-                "Codex MCP configuration does not target this Library."
+                "Codex project readiness failed: " + readiness.detail
             )
 
     read_result = None

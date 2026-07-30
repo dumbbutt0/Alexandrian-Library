@@ -1830,6 +1830,15 @@ class StagedSynthesisTests(unittest.TestCase):
             backend_selector,
             "PROJECT_PATH",
             self.project,
+        ), patch.object(
+            backend_selector.environment_check,
+            "codex_project_readiness",
+            return_value=backend_selector.environment_check.CheckResult(
+                "Codex project readiness",
+                "available",
+                "codex_ready: Effective project MCP verified.",
+                required=False,
+            ),
         ):
             codex = backend_selector.preflight_staged_capabilities(
                 "codex",
@@ -1852,6 +1861,54 @@ class StagedSynthesisTests(unittest.TestCase):
             "read_staged_synthesis_plan_shard_input",
             codex["required_tools"],
         )
+        self.assertEqual(ledger.read_bytes(), prior_ledger)
+
+    def test_codex_preflight_rejects_ineffective_project_mcp(
+        self,
+    ) -> None:
+        self.authorize_and_prepare_sharded_cycle()
+        plan_input = staged_synthesis.load_plan_shard_input(
+            self.project,
+            self.book_id,
+            "CH1",
+        )
+        ledger = self.book / "runs" / "synthesis.controller.jsonl"
+        prior_ledger = ledger.read_bytes()
+
+        with (
+            patch.object(
+                backend_selector,
+                "PROJECT_PATH",
+                self.project,
+            ),
+            patch.object(
+                backend_selector.environment_check,
+                "codex_project_readiness",
+                return_value=(
+                    backend_selector.environment_check.CheckResult(
+                        "Codex project readiness",
+                        "missing",
+                        (
+                            "codex_mcp_not_effective: Codex did not load "
+                            "the project server."
+                        ),
+                        required=False,
+                    )
+                ),
+            ),
+            self.assertRaisesRegex(
+                backend_selector.CapabilityPreflightError,
+                "codex_mcp_not_effective",
+            ),
+        ):
+            backend_selector.preflight_staged_capabilities(
+                "codex",
+                "plan_shard",
+                self.book_id,
+                "CH1",
+                plan_input["input_hash"],
+            )
+
         self.assertEqual(ledger.read_bytes(), prior_ledger)
 
     def test_failed_preflight_does_not_open_a_controller_contract(

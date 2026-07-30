@@ -645,6 +645,19 @@ def _codex_readiness_result(
     )
 
 
+def codex_project_readiness(
+    project_path: Path,
+    *,
+    check_runtime: bool = True,
+) -> CheckResult:
+    """Verify effective Codex readiness for one exact project worktree."""
+    return _codex_readiness_result(
+        project_path.resolve(),
+        shutil.which("codex"),
+        check_runtime,
+    )
+
+
 def _json_object(path: Path, label: str) -> tuple[CheckResult, dict | None]:
     """Read a required JSON object without modifying it."""
     try:
