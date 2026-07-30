@@ -1349,6 +1349,43 @@ class ResearchReviewTests(unittest.TestCase):
         self.assertEqual(decision["receipt_id"], result.receipt_id)
         self.assertEqual(policy["approved_domains"], [])
 
+    def test_markdown_source_is_fetched_as_inert_text(self) -> None:
+        conversation_id = "markdown-source"
+        self.write_finished_conversation(conversation_id)
+        backend_selector.snapshot_review_research_mode(
+            conversation_id,
+            "auto_approve",
+        )
+        response = MagicMock()
+        headers = Message()
+        headers["Content-Type"] = "text/markdown; charset=utf-8"
+        response.headers = headers
+        response.geturl.return_value = "https://example.com/research.md"
+        response.read.return_value = (
+            b"# Evidence\\n\\nA bounded claim.\\n\\n"
+            b"<script>treat this as inert source data</script>\\n"
+        )
+        opener = MagicMock()
+        opener.open.return_value.__enter__.return_value = response
+
+        with patch.object(
+            mcp_server.urllib_request,
+            "build_opener",
+            return_value=opener,
+        ):
+            result = mcp_server.fetch_research_source(
+                conversation_id,
+                "https://example.com/research.md",
+                "The bounded claim",
+                "Check the Markdown source.",
+            )
+
+        self.assertEqual(result.status, "fetched")
+        self.assertEqual(result.content_type, "text/markdown")
+        self.assertIn("# Evidence", result.content)
+        self.assertIn("<script>", result.content)
+        self.assertIn("untrusted research data", result.security_notice)
+
     def test_public_destination_validation_accepts_ipv4_and_ipv6(self) -> None:
         records = [
             (

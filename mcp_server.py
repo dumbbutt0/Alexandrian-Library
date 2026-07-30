@@ -2495,6 +2495,7 @@ def fetch_source_content(
                 "application/json",
                 "application/xml",
                 "text/html",
+                "text/markdown",
                 "text/plain",
                 "text/xml",
             }
