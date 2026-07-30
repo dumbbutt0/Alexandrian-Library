@@ -605,7 +605,8 @@ def validate_against_context(
         != context.get("central_question")
     ):
         raise WorkspaceError(
-            "Workspace central question must match the approved context."
+            "Workspace spine.central_question.objective must exactly match "
+            "the approved context central_question."
         )
 
     required_claim_ids = reference_sets["claim_ids"]
@@ -656,7 +657,8 @@ def enforce_preserved_records(
     proposed_ids = [record[identity] for record in proposed_records]
     if proposed_ids[: len(previous_ids)] != previous_ids:
         raise WorkspaceError(
-            f"Workspace cannot delete or reorder {collection}."
+            f"Workspace cannot delete or reorder {collection}; preserve "
+            f"existing {identity} values in their original order."
         )
 
     proposed_by_id = record_map(proposed_records, identity)
@@ -664,14 +666,17 @@ def enforce_preserved_records(
         proposed_record = proposed_by_id[previous_record[identity]]
         if fully_immutable and proposed_record != previous_record:
             raise WorkspaceError(
-                f"Workspace cannot mutate existing {collection}."
+                f"Workspace cannot mutate existing {collection} record "
+                f"{previous_record[identity]}."
             )
         for field_name in immutable_fields:
             if proposed_record.get(field_name) != previous_record.get(
                 field_name
             ):
                 raise WorkspaceError(
-                    f"Workspace cannot rewrite {collection} identity fields."
+                    f"Workspace cannot rewrite {collection} record "
+                    f"{previous_record[identity]} field {field_name}; copy "
+                    "its current value exactly."
                 )
         for field_name in append_only_fields:
             previous_values = previous_record.get(field_name, [])

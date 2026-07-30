@@ -528,10 +528,28 @@ class ChapterWorkspaceTests(unittest.TestCase):
 
         rewritten_data = self.make_proposal().model_dump(mode="json")
         rewritten_data["branches"][0]["question"] = "A rewritten question"
-        with self.assertRaises(ToolError):
+        with self.assertRaisesRegex(
+            ToolError,
+            "branches record BR1 field question",
+        ):
             mcp_server.revise_chapter_workspace(
                 chapter_workspace.ChapterWorkspaceProposal.model_validate(
                     rewritten_data
+                ),
+                1,
+            )
+
+        rewritten_requirement = self.make_proposal().model_dump(mode="json")
+        rewritten_requirement["development_requirements"][0][
+            "description"
+        ] = "An enriched but impermissible replacement description."
+        with self.assertRaisesRegex(
+            ToolError,
+            "development_requirements record REQ1 field description",
+        ):
+            mcp_server.revise_chapter_workspace(
+                chapter_workspace.ChapterWorkspaceProposal.model_validate(
+                    rewritten_requirement
                 ),
                 1,
             )

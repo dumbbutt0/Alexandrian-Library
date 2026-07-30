@@ -160,6 +160,35 @@ Select the highest-value unresolved branch or requirement. Prefer work that
 blocks the chapter's central lesson. Use only evidence present in the approved
 context or wrapper-supplied validated research packets during this transition.
 
+### Revision preservation contract
+
+Build a revision from the current workspace, not from memory or a paraphrased
+reconstruction. Before changing content, copy these values exactly:
+
+- The complete frozen completion contract
+- `spine.central_question.objective`, which must remain identical to the
+  approved context's `central_question`
+- The order and identity of every existing branch
+- Every existing branch's `origin`, `question`, `reason_required`, and
+  `question_kind`
+- Every existing belief-evolution event in full
+- Every existing requirement's `category`, `description`, `why_required`, and
+  `related_branch_ids`
+- Every existing falsification condition's `proposed_mechanism`,
+  `comparison_or_baseline`, `observable_failure`, and `claim_ids`
+- Every existing draft-version reference in full
+- Every existing targeted revision's `source_draft_id`,
+  `target_spine_sections`, `reason`, and `related_branch_ids`
+
+Do not enrich an immutable branch question, requirement description, or
+falsification statement when closing it. Put the developed explanation in
+`current_position` and the applicable spine sections. Change only the
+record's allowed state, routing, destination, closure, or append-only reference
+fields. New adjacent material may be appended only as nonblocking routed work.
+
+If `revise_chapter_workspace` rejects a field, re-read the current workspace
+and restore that exact field. Do not guess at its prior wording.
+
 Revise the workspace to:
 
 - Refine the current position without presenting inference as fact
