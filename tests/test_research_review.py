@@ -481,6 +481,159 @@ class ResearchReviewTests(unittest.TestCase):
         self.assertIsNone(result)
         self.assertEqual(len(observed_receipt), 1)
 
+    def test_terminal_finish_activates_exact_linked_continuation(self) -> None:
+        reviews_path = self.project_path / "data" / "reviews"
+        decisions_path = self.project_path / "data" / "review_decisions"
+        captured_prompts = []
+        continuation_paths = []
+
+        def capture(
+            _backend: str,
+            _program_path: str,
+            prompt: str,
+        ) -> tuple[list[dict], str]:
+            captured_prompts.append(prompt)
+            return [], "Answer"
+
+        def continue_workflow(
+            _backend: str,
+            _program_path: str,
+            conversation_path: Path,
+        ) -> dict:
+            review_id = f"review-{conversation_path.stem}"
+            review_path = reviews_path / f"{conversation_path.stem}.json"
+            decision_path = (
+                decisions_path / f"{conversation_path.stem}.json"
+            )
+            review_path.parent.mkdir(parents=True, exist_ok=True)
+            decision_path.parent.mkdir(parents=True, exist_ok=True)
+            review_path.write_text(
+                json.dumps(
+                    {
+                        "review_id": review_id,
+                        "conversation_id": conversation_path.stem,
+                        "review": {
+                            "core_question": {
+                                "text": "What survives a provider timeout?"
+                            },
+                            "claims": [],
+                            "checked_sources": [],
+                            "evidence_gaps": [],
+                            "experiments": [],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            decision_path.write_text(
+                json.dumps(
+                    {
+                        "review_id": review_id,
+                        "conversation_id": conversation_path.stem,
+                        "decision": "needs_research_or_revision",
+                        "confirmed_core_question_or_thesis": (
+                            "Durable state must control recovery."
+                        ),
+                        "accepted_belief_revisions": [
+                            "Count physical attempts separately."
+                        ],
+                        "disputed_points": [],
+                        "excluded_material": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            continuation_path = (
+                backend_selector.create_research_continuation(
+                    conversation_path,
+                    decision_path,
+                )
+            )
+            continuation_paths.append(continuation_path)
+            return {
+                "status": "research_continuation",
+                "conversation_path": str(continuation_path),
+            }
+
+        with (
+            patch.object(
+                backend_selector,
+                "PROJECT_PATH",
+                self.project_path,
+            ),
+            patch.object(
+                backend_selector,
+                "CONVERSATIONS_PATH",
+                self.conversations_path,
+            ),
+            patch.object(
+                backend_selector,
+                "REVIEWS_PATH",
+                reviews_path,
+            ),
+            patch.object(
+                backend_selector,
+                "REVIEW_DECISIONS_PATH",
+                decisions_path,
+            ),
+            patch.object(
+                backend_selector,
+                "load_skill_instructions",
+                return_value="Librarian instructions",
+            ),
+            patch.object(
+                backend_selector,
+                "capture_backend_response",
+                side_effect=capture,
+            ),
+            patch.object(
+                backend_selector,
+                "continue_book_workflow",
+                side_effect=continue_workflow,
+            ),
+            patch(
+                "builtins.input",
+                side_effect=[
+                    "Initial question",
+                    "/finish",
+                    "Continue with the missing evidence.",
+                    "/bye",
+                ],
+            ),
+        ):
+            result = backend_selector.run_capture_prompt_loop(
+                "codex",
+                "/usr/bin/codex",
+                None,
+            )
+
+        self.assertEqual(result, continuation_paths[0])
+        self.assertEqual(
+            len(list(self.conversations_path.glob("*.jsonl"))),
+            2,
+        )
+        continuation_messages = [
+            message["content"]
+            for message in conversation_store.visible_messages(result)
+        ]
+        self.assertEqual(
+            continuation_messages,
+            ["Continue with the missing evidence.", "Answer"],
+        )
+        self.assertEqual(len(captured_prompts), 2)
+        self.assertIn(
+            '"research_continuation_context"',
+            captured_prompts[1],
+        )
+        self.assertIn(
+            '"parent_review_id"',
+            captured_prompts[1],
+        )
+        self.assertIn(
+            "Count physical attempts separately.",
+            captured_prompts[1],
+        )
+
     def test_mcp_rejects_tampered_v1_conversation(self) -> None:
         conversation_path = conversation_store.create_conversation(
             self.conversations_path,

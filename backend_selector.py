@@ -10681,6 +10681,42 @@ def continue_book_workflow(
         raise RuntimeError(f"Unsupported workflow stage: {stage}.")
 
 
+def validate_research_continuation_path(
+    continuation_path: object,
+) -> Path:
+    """Validate one workflow-returned continuation before making it active."""
+    if not isinstance(continuation_path, str):
+        raise RuntimeError(
+            "Research continuation returned no conversation path."
+        )
+
+    candidate = Path(continuation_path)
+    try:
+        resolved_candidate = candidate.resolve(strict=True)
+        conversations_root = CONVERSATIONS_PATH.resolve()
+    except OSError as error:
+        raise RuntimeError(
+            "Research continuation path could not be resolved."
+        ) from error
+    if (
+        resolved_candidate.parent != conversations_root
+        or resolved_candidate.suffix != ".jsonl"
+        or not resolved_candidate.is_file()
+    ):
+        raise RuntimeError(
+            "Research continuation returned an invalid conversation path."
+        )
+    if continuation_lineage(resolved_candidate) is None:
+        raise RuntimeError(
+            "Research continuation returned an unlinked conversation."
+        )
+    if conversation_is_finished(resolved_candidate):
+        raise RuntimeError(
+            "Research continuation returned a finished conversation."
+        )
+    return resolved_candidate
+
+
 def run_capture_prompt_loop(
     backend: str,
     program_path: str,
@@ -10747,12 +10783,9 @@ def run_capture_prompt_loop(
                 json.dumps(result, ensure_ascii=False, indent=2),
             )
             if result.get("status") == "research_continuation":
-                continuation_path = result.get("conversation_path")
-                if not isinstance(continuation_path, str):
-                    raise RuntimeError(
-                        "Research continuation returned no conversation path."
-                    )
-                conversation_path = Path(continuation_path)
+                conversation_path = validate_research_continuation_path(
+                    result.get("conversation_path")
+                )
                 print(
                     "\nContinued research is now the active conversation. "
                     "Its parent review and human checkpoint will be supplied "
@@ -10792,6 +10825,16 @@ def run_capture_prompt_loop(
                 "WORKFLOW STATUS",
                 json.dumps(result, ensure_ascii=False, indent=2),
             )
+            if result.get("status") == "research_continuation":
+                conversation_path = validate_research_continuation_path(
+                    result.get("conversation_path")
+                )
+                print(
+                    "\nContinued research is now the active conversation. "
+                    "Its parent review and human checkpoint will be supplied "
+                    "as hash-bound context."
+                )
+                continue
             return None
 
         if conversation_path is None:
