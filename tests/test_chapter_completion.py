@@ -318,6 +318,99 @@ class ChapterCompletionControllerTests(unittest.TestCase):
         self.assertIsNone(self.developer_research_paths[1])
         self.assertEqual(result["final_pass_source_draft_id"], "D1")
 
+    def test_final_pass_human_question_remains_answerable(self) -> None:
+        self.state["version"] = 3
+        self.state["drafts"] = [self.draft("D1"), self.draft("D2")]
+        question = "Approve the narrow artifact-authority interpretation?"
+        human_assessment = self.assessment_document(
+            "human_input_required",
+            "The final interpretation requires human approval.",
+            draft_id="D2",
+            statuses="satisfied",
+            human_requests=[question],
+        )
+        run = {
+            "book_id": self.book_id,
+            "chapter_id": self.chapter_id,
+            "status": "final_pass_closeout",
+            "developer_passes_total": 4,
+            "evaluator_passes_total": 3,
+            "researcher_passes_total": 0,
+            "final_pass_requested": True,
+            "final_closeout_source_draft_id": "D1",
+            "final_closeout_baseline_agent_calls_total": 6,
+            "final_closeout_developer_call_started_at": "started",
+            "final_closeout_developer_call_completed_at": "completed",
+            "final_closeout_evaluator_call_started_at": None,
+            "final_closeout_evaluator_call_completed_at": None,
+        }
+
+        with ExitStack() as stack:
+            for controller_patch in self.controller_patches():
+                stack.enter_context(controller_patch)
+            stack.enter_context(
+                patch.object(
+                    backend_selector,
+                    "evaluate_chapter_once",
+                    return_value=human_assessment,
+                )
+            )
+            result = backend_selector.run_final_pass_closeout(
+                "codex",
+                "/usr/bin/codex",
+                self.book_id,
+                self.chapter_id,
+                run,
+            )
+
+        self.assertEqual(result["status"], "human_input_required")
+        self.assertEqual(
+            result["last_assessment_outcome"],
+            "human_input_required",
+        )
+        self.assertEqual(result["human_input_requests"], [question])
+
+    def test_final_pass_answer_routes_to_no_research_closeout(self) -> None:
+        question = "Approve the narrow artifact-authority interpretation?"
+        with ExitStack() as stack:
+            for controller_patch in self.controller_patches():
+                stack.enter_context(controller_patch)
+            run = backend_selector.load_or_create_chapter_run(
+                self.book_id,
+                self.chapter_id,
+            )
+            run.update(
+                {
+                    "status": "human_input_required",
+                    "developer_passes_total": 4,
+                    "evaluator_passes_total": 4,
+                    "final_pass_requested": True,
+                    "final_closeout_evaluator_call_completed_at": "completed",
+                    "last_assessment_id": "A4",
+                    "last_assessment_sha256": "a" * 64,
+                    "last_assessment_outcome": "human_input_required",
+                    "human_input_requests": [question],
+                }
+            )
+            backend_selector.save_chapter_run(run)
+            path = backend_selector.record_chapter_human_input(
+                self.book_id,
+                self.chapter_id,
+                ["Approved within the stated evidence boundary."],
+                "Test authorization.",
+            )
+            routed = backend_selector.load_or_create_chapter_run(
+                self.book_id,
+                self.chapter_id,
+            )
+
+        self.assertTrue(path.is_file())
+        self.assertEqual(
+            routed["status"],
+            "human_input_closeout_required",
+        )
+        self.assertIn("six-call", routed["stop_reason"])
+
     def test_chapter_blocked_stops_without_another_developer_pass(
         self,
     ) -> None:
@@ -2156,6 +2249,142 @@ class ChapterRecoveryAuthorizationTests(unittest.TestCase):
 
         self.assertEqual(result, expected_path)
         authorize.assert_called_once()
+
+    def test_final_pass_human_closeout_binds_draft_without_recovery(
+        self,
+    ) -> None:
+        assessment_id = "A4"
+        question = "Approve the narrow commitment wording?"
+        assessment_path = (
+            self.book_directory
+            / "assessments"
+            / self.chapter_id
+            / f"{assessment_id}.json"
+        )
+        workspace_path = (
+            self.book_directory
+            / "workspaces"
+            / self.chapter_id
+            / "versions"
+            / "v004.json"
+        )
+        draft_path = (
+            self.book_directory
+            / "drafts"
+            / self.chapter_id
+            / "D2.md"
+        )
+        draft_path.parent.mkdir(parents=True, exist_ok=True)
+        draft_path.write_text("Final draft\n", encoding="utf-8")
+        self.write_json(
+            assessment_path,
+            {
+                "assessment_id": assessment_id,
+                "assessment_sha256": "a" * 64,
+                "assessment": {
+                    "outcome": "human_input_required",
+                    "draft_id": "D2",
+                },
+            },
+        )
+        self.write_json(workspace_path, {"workspace": "bound"})
+        workspace_state = {
+            "current_version": 4,
+            "current_json_path": str(
+                workspace_path.relative_to(self.project_path)
+            ),
+        }
+        workspace_document = {
+            "workspace_sha256": "w" * 64,
+            "workspace": {
+                "draft_versions": [
+                    {
+                        "draft_id": "D2",
+                        "relative_path": str(
+                            draft_path.relative_to(self.project_path)
+                        ),
+                        "sha256": backend_selector.file_sha256(
+                            draft_path
+                        ),
+                    }
+                ]
+            },
+        }
+
+        with (
+            patch.object(
+                backend_selector,
+                "PROJECT_PATH",
+                self.project_path,
+            ),
+            patch.object(
+                backend_selector,
+                "BOOKS_PATH",
+                self.books_path,
+            ),
+            patch.object(
+                backend_selector,
+                "load_chapter_workspace_state",
+                return_value=workspace_state,
+            ),
+            patch.object(
+                backend_selector,
+                "load_workspace_document",
+                return_value=workspace_document,
+            ),
+            patch.object(
+                backend_selector,
+                "load_chapter_recovery_authorization",
+                return_value=None,
+            ),
+        ):
+            run = backend_selector.load_or_create_chapter_run(
+                self.book_id,
+                self.chapter_id,
+            )
+            run.update(
+                {
+                    "status": "human_input_required",
+                    "developer_passes_total": 4,
+                    "evaluator_passes_total": 4,
+                    "final_pass_requested": True,
+                    "final_closeout_evaluator_call_completed_at": "completed",
+                    "last_assessment_id": assessment_id,
+                    "last_assessment_path": str(
+                        assessment_path.relative_to(self.project_path)
+                    ),
+                    "last_assessment_sha256": "a" * 64,
+                    "last_assessment_outcome": "human_input_required",
+                    "human_input_requests": [question],
+                }
+            )
+            backend_selector.save_chapter_run(run)
+            backend_selector.record_chapter_human_input(
+                self.book_id,
+                self.chapter_id,
+                ["Approved within the stated evidence boundary."],
+                "Test authorization.",
+            )
+            closeout_path = (
+                backend_selector.authorize_chapter_human_input_closeout(
+                    self.book_id,
+                    self.chapter_id,
+                    "Approve one bounded no-research closeout.",
+                )
+            )
+            loaded = backend_selector.load_chapter_human_input_closeout(
+                self.book_id,
+                self.chapter_id,
+            )
+
+        self.assertTrue(closeout_path.is_file())
+        self.assertEqual(
+            loaded["authority_kind"],
+            "final_pass_human_input",
+        )
+        self.assertEqual(loaded["source_final_draft_id"], "D2")
+        self.assertEqual(loaded["baseline_agent_calls_total"], 8)
+        self.assertEqual(loaded["max_calls"], 6)
 
     def test_revision_recovery_binds_pending_draft_without_research_session(
         self,

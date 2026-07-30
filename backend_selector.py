@@ -3425,9 +3425,14 @@ def load_chapter_human_input_closeout(
         raise RuntimeError(
             "Chapter human-input closeout could not be read."
         ) from error
+    if not isinstance(document, dict):
+        raise RuntimeError("Chapter human-input closeout is invalid.")
+    authority_kind = document.get(
+        "authority_kind",
+        "research_access_recovery",
+    )
     if (
-        not isinstance(document, dict)
-        or document.get("schema_version") != "1.0"
+        document.get("schema_version") != "1.0"
         or document.get("book_id") != book_id
         or document.get("chapter_id") != chapter_id
         or document.get("assessment_id") != assessment_id
@@ -3463,16 +3468,57 @@ def load_chapter_human_input_closeout(
         or not isinstance(document.get("assessment_file_sha256"), str)
         or not isinstance(document.get("human_input_path"), str)
         or not isinstance(document.get("human_input_file_sha256"), str)
-        or not isinstance(document.get("recovery_path"), str)
-        or not isinstance(document.get("recovery_file_sha256"), str)
+        or authority_kind
+        not in {
+            "research_access_recovery",
+            "final_pass_human_input",
+        }
     ):
         raise RuntimeError("Chapter human-input closeout is invalid.")
     book_directory = (BOOKS_PATH / book_id).resolve()
     for path_field, hash_field, label in (
         ("assessment_path", "assessment_file_sha256", "assessment"),
         ("human_input_path", "human_input_file_sha256", "human input"),
-        ("recovery_path", "recovery_file_sha256", "recovery"),
     ):
+        bound_path = (PROJECT_PATH / document[path_field]).resolve()
+        try:
+            bound_path.relative_to(book_directory)
+        except ValueError as error:
+            raise RuntimeError(
+                f"Bound human closeout {label} is outside its book."
+            ) from error
+        if (
+            not bound_path.is_file()
+            or file_sha256(bound_path) != document[hash_field]
+        ):
+            raise RuntimeError(
+                f"Bound human closeout {label} changed after approval."
+            )
+    if authority_kind == "research_access_recovery":
+        bound_fields = (
+            ("recovery_path", "recovery_file_sha256", "recovery"),
+        )
+    else:
+        if (
+            not isinstance(document.get("source_final_draft_id"), str)
+            or not isinstance(document.get("source_final_draft_path"), str)
+            or not isinstance(
+                document.get("source_final_draft_file_sha256"),
+                str,
+            )
+            or not isinstance(document.get("workspace_path"), str)
+            or not isinstance(document.get("workspace_file_sha256"), str)
+        ):
+            raise RuntimeError("Chapter human-input closeout is invalid.")
+        bound_fields = (
+            (
+                "source_final_draft_path",
+                "source_final_draft_file_sha256",
+                "source final draft",
+            ),
+            ("workspace_path", "workspace_file_sha256", "workspace"),
+        )
+    for path_field, hash_field, label in bound_fields:
         bound_path = (PROJECT_PATH / document[path_field]).resolve()
         try:
             bound_path.relative_to(book_directory)
@@ -3556,6 +3602,22 @@ def record_chapter_human_input(
         "human_input_sha256",
     )
     atomic_write_json(path, document)
+    if (
+        run.get("status") == "human_input_required"
+        and run.get("last_assessment_outcome")
+        == "human_input_required"
+        and run.get("final_pass_requested") is True
+        and isinstance(
+            run.get("final_closeout_evaluator_call_completed_at"),
+            str,
+        )
+    ):
+        run["status"] = "human_input_closeout_required"
+        run["stop_reason"] = (
+            "The recorded final-pass decision requires one separate "
+            "six-call no-research closeout authorization."
+        )
+        save_chapter_run(run)
     return path
 
 
@@ -3667,35 +3729,113 @@ def authorize_chapter_human_input_closeout(
             "decision."
         )
     recovery = load_chapter_recovery_authorization(book_id, chapter_id)
-    if (
+    research_access_authority = (
+        recovery is not None
+        and recovery.get("recovery_kind") == "research_access_retry"
+    )
+    final_pass_authority = (
         recovery is None
-        or recovery.get("recovery_kind") != "research_access_retry"
-    ):
+        and run.get("status") == "human_input_closeout_required"
+        and run.get("last_assessment_outcome")
+        == "human_input_required"
+        and run.get("final_pass_requested") is True
+        and isinstance(
+            run.get("final_closeout_evaluator_call_completed_at"),
+            str,
+        )
+    )
+    if not research_access_authority and not final_pass_authority:
         raise RuntimeError(
-            "Human-input closeout requires a recorded decision inside the "
-            "bounded research-access recovery."
+            "Human-input closeout requires either bounded research-access "
+            "recovery or a completed final-pass human assessment."
         )
     assessment_path = (PROJECT_PATH / assessment_path_value).resolve()
-    recovery_path = chapter_recovery_authorization_path(
-        book_id,
-        chapter_id,
-    ).resolve()
     book_directory = (BOOKS_PATH / book_id).resolve()
     try:
         assessment_path.relative_to(book_directory)
-        recovery_path.relative_to(book_directory)
     except ValueError as error:
         raise RuntimeError(
             "Human-input closeout basis is outside its book."
         ) from error
-    if (
-        not assessment_path.is_file()
-        or not recovery_path.is_file()
-        or chapter_agent_calls_total(run)
-        > recovery["baseline_agent_calls_total"]
-        + recovery["max_recovery_agent_calls"]
-    ):
+    if not assessment_path.is_file():
         raise RuntimeError("Human-input closeout basis is invalid.")
+    authority_fields = {}
+    if research_access_authority:
+        recovery_path = chapter_recovery_authorization_path(
+            book_id,
+            chapter_id,
+        ).resolve()
+        try:
+            recovery_path.relative_to(book_directory)
+        except ValueError as error:
+            raise RuntimeError(
+                "Human-input closeout basis is outside its book."
+            ) from error
+        if (
+            not recovery_path.is_file()
+            or chapter_agent_calls_total(run)
+            > recovery["baseline_agent_calls_total"]
+            + recovery["max_recovery_agent_calls"]
+        ):
+            raise RuntimeError("Human-input closeout basis is invalid.")
+        authority_fields = {
+            "authority_kind": "research_access_recovery",
+            "recovery_path": str(
+                recovery_path.relative_to(PROJECT_PATH)
+            ),
+            "recovery_authorization_sha256": recovery[
+                "recovery_authorization_sha256"
+            ],
+            "recovery_file_sha256": file_sha256(recovery_path),
+        }
+    else:
+        workspace_state = load_chapter_workspace_state(
+            book_id,
+            chapter_id,
+        )
+        if workspace_state is None:
+            raise RuntimeError("Human-input closeout has no workspace.")
+        workspace_document = load_workspace_document(workspace_state)
+        newest_draft = newest_registered_draft(workspace_document)
+        try:
+            assessment_document = json.loads(
+                assessment_path.read_text(encoding="utf-8")
+            )
+        except (json.JSONDecodeError, OSError) as error:
+            raise RuntimeError(
+                "Human-input closeout assessment is invalid."
+            ) from error
+        assessment = assessment_document.get("assessment")
+        if (
+            not isinstance(assessment, dict)
+            or newest_draft is None
+            or assessment.get("outcome") != "human_input_required"
+            or assessment.get("draft_id") != newest_draft["draft_id"]
+        ):
+            raise RuntimeError(
+                "Human-input closeout final-pass basis is invalid."
+            )
+        draft_path = (PROJECT_PATH / newest_draft["relative_path"]).resolve()
+        workspace_path = (
+            PROJECT_PATH / workspace_state["current_json_path"]
+        ).resolve()
+        try:
+            draft_path.relative_to(book_directory)
+            workspace_path.relative_to(book_directory)
+        except ValueError as error:
+            raise RuntimeError(
+                "Human-input closeout basis is outside its book."
+            ) from error
+        if not draft_path.is_file() or not workspace_path.is_file():
+            raise RuntimeError("Human-input closeout basis is invalid.")
+        authority_fields = {
+            "authority_kind": "final_pass_human_input",
+            "source_final_draft_id": newest_draft["draft_id"],
+            "source_final_draft_path": newest_draft["relative_path"],
+            "source_final_draft_file_sha256": file_sha256(draft_path),
+            "workspace_path": workspace_state["current_json_path"],
+            "workspace_file_sha256": file_sha256(workspace_path),
+        }
     path = chapter_human_input_closeout_path(
         book_id,
         chapter_id,
@@ -3707,8 +3847,10 @@ def authorize_chapter_human_input_closeout(
     calls_already_consumed = 2 if reconciled_after_input else 0
     baseline_calls = authorized_at_calls - calls_already_consumed
     if (
-        baseline_calls < recovery["baseline_agent_calls_total"]
-        or baseline_calls
+        research_access_authority
+        and baseline_calls < recovery["baseline_agent_calls_total"]
+    ) or (
+        baseline_calls
         + MAX_HUMAN_INPUT_CLOSEOUT_CALLS_TOTAL
         < authorized_at_calls
     ):
@@ -3732,11 +3874,7 @@ def authorize_chapter_human_input_closeout(
         ),
         "human_input_sha256": human_input_document["human_input_sha256"],
         "human_input_file_sha256": file_sha256(human_input_path),
-        "recovery_path": str(recovery_path.relative_to(PROJECT_PATH)),
-        "recovery_authorization_sha256": recovery[
-            "recovery_authorization_sha256"
-        ],
-        "recovery_file_sha256": file_sha256(recovery_path),
+        **authority_fields,
         "allowed_sequence": [
             "apply_human_input",
             "evaluate",
@@ -6374,6 +6512,15 @@ def run_final_pass_closeout(
         run["status"] = "chapter_complete"
         run["stop_reason"] = None
         run["human_input_requests"] = []
+    elif (
+        assessment["outcome"] == "human_input_required"
+        and not human_closeout_active
+    ):
+        run["status"] = "human_input_required"
+        run["stop_reason"] = assessment["most_important_gap"]
+        run["human_input_requests"] = assessment[
+            "human_input_requests"
+        ]
     else:
         run["status"] = (
             "human_input_closeout_failed"
