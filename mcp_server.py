@@ -2310,6 +2310,18 @@ def validate_source_url(url: str, policy: SourcePolicy) -> tuple[str, str]:
     return normalized_url, domain
 
 
+class SourceRedirectApprovalRequired(ToolError):
+    """Signal that a redirect target needs its own source decision."""
+
+    def __init__(self, url: str, domain: str) -> None:
+        super().__init__(
+            "Research source redirected to an unapproved domain: "
+            f"{domain}"
+        )
+        self.url = url
+        self.domain = domain
+
+
 class GuardedRedirectHandler(urllib_request.HTTPRedirectHandler):
     """Reject redirects that leave the approved source boundary."""
 
@@ -2327,7 +2339,12 @@ class GuardedRedirectHandler(urllib_request.HTTPRedirectHandler):
         new_url: str,
     ) -> urllib_request.Request | None:
         resolved_url = urljoin(request.full_url, new_url)
-        validate_source_url(resolved_url, self.policy)
+        normalized_url, domain = parse_source_url(resolved_url)
+        if not source_domain_is_approved(domain, self.policy):
+            raise SourceRedirectApprovalRequired(
+                normalized_url,
+                domain,
+            )
         return super().redirect_request(
             request,
             file_pointer,
@@ -6093,6 +6110,26 @@ def fetch_research_source(
                 normalized_url,
                 policy,
             )
+        )
+    except SourceRedirectApprovalRequired as error:
+        if automatic_decision is not None:
+            automatic_decision["fetch_status"] = (
+                "redirect_approval_required"
+            )
+            automatic_decision["redirect_url"] = error.url
+            automatic_decision["redirect_domain"] = error.domain
+            write_review_session(conversation_id, session)
+        return request_source_approval(
+            conversation_id,
+            error.url,
+            error.domain,
+            claim_under_review,
+            (
+                f"{reason_for_source} The approved source redirected from "
+                f"{normalized_url}; the redirect target requires its own "
+                "trust decision before any request is sent to it."
+            ),
+            session,
         )
     except ToolError as error:
         if automatic_decision is not None:

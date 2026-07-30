@@ -1484,7 +1484,9 @@ class ResearchReviewTests(unittest.TestCase):
             "https://example.com/start"
         )
 
-        with self.assertRaises(ToolError):
+        with self.assertRaises(
+            mcp_server.SourceRedirectApprovalRequired
+        ) as raised:
             handler.redirect_request(
                 request,
                 None,
@@ -1493,6 +1495,49 @@ class ResearchReviewTests(unittest.TestCase):
                 {},
                 "https://other.example/target",
             )
+        self.assertEqual(
+            raised.exception.url,
+            "https://other.example/target",
+        )
+        self.assertEqual(raised.exception.domain, "other.example")
+
+    def test_redirect_stages_its_own_source_decision(self) -> None:
+        conversation_id = "redirect-approval"
+        self.write_finished_conversation(conversation_id)
+        self.write_source_policy(["example.com"])
+
+        with patch.object(
+            mcp_server,
+            "fetch_source_content",
+            side_effect=mcp_server.SourceRedirectApprovalRequired(
+                "https://docs.example.net/target",
+                "docs.example.net",
+            ),
+        ):
+            result = mcp_server.fetch_research_source(
+                conversation_id,
+                "https://example.com/start",
+                "The claim under review",
+                "Check the official source.",
+            )
+
+        session = json.loads(
+            (
+                self.review_sessions_path / f"{conversation_id}.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(result.status, "approval_required")
+        self.assertEqual(result.url, "https://docs.example.net/target")
+        self.assertEqual(result.domain, "docs.example.net")
+        self.assertEqual(
+            session["pending_requests"][0]["url"],
+            "https://docs.example.net/target",
+        )
+        self.assertIn(
+            "redirect target requires its own trust decision",
+            session["pending_requests"][0]["reason_for_source"],
+        )
+        self.assertEqual(mcp_server.SOURCE_RECEIPTS, {})
 
     def test_wrapper_records_allow_once_without_changing_domain_policy(self) -> None:
         conversation_id = "allow-once"
