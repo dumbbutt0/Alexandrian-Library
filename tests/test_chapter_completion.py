@@ -610,6 +610,161 @@ class ChapterCompletionControllerTests(unittest.TestCase):
             "6" * 64,
         )
 
+    def test_exhausted_human_checkpoint_can_accept_exact_draft(
+        self,
+    ) -> None:
+        assessment_id = "A6"
+        question = "Accept D2 as the final chapter?"
+        book_directory = self.books_path / self.book_id
+        draft_path = book_directory / "drafts" / self.chapter_id / "D2.md"
+        draft_path.parent.mkdir(parents=True, exist_ok=True)
+        draft_path.write_text("# Final chapter\n", encoding="utf-8")
+        draft_sha256 = backend_selector.file_sha256(draft_path)
+        workspace_path = (
+            book_directory / "workspaces" / self.chapter_id / "v006.json"
+        )
+        workspace_document = {
+            "schema_version": "1.0",
+            "workspace_version": 6,
+            "workspace": {
+                "draft_versions": [
+                    {
+                        "draft_id": "D2",
+                        "relative_path": str(
+                            draft_path.relative_to(self.project_path)
+                        ),
+                        "sha256": draft_sha256,
+                    }
+                ],
+            },
+        }
+        workspace_document["workspace_sha256"] = (
+            backend_selector.canonical_json_sha256(
+                workspace_document,
+                "workspace_sha256",
+            )
+        )
+        workspace_path.parent.mkdir(parents=True, exist_ok=True)
+        workspace_path.write_text(
+            json.dumps(workspace_document, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        workspace_state = {
+            "current_version": 6,
+            "current_json_path": str(
+                workspace_path.relative_to(self.project_path)
+            ),
+        }
+        assessment_path = (
+            book_directory
+            / "assessments"
+            / self.chapter_id
+            / f"{assessment_id}.json"
+        )
+        assessment_document = {
+            "schema_version": "1.0",
+            "assessment_id": assessment_id,
+            "assessment": {
+                "book_id": self.book_id,
+                "chapter_id": self.chapter_id,
+                "workspace_version": 6,
+                "workspace_sha256": workspace_document[
+                    "workspace_sha256"
+                ],
+                "draft_id": "D2",
+                "outcome": "human_input_required",
+                "human_input_requests": [question],
+                "research_request": None,
+            },
+        }
+        assessment_document["assessment_sha256"] = (
+            backend_selector.canonical_json_sha256(
+                assessment_document,
+                "assessment_sha256",
+            )
+        )
+        assessment_path.parent.mkdir(parents=True, exist_ok=True)
+        assessment_path.write_text(
+            json.dumps(assessment_document, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        with (
+            patch.object(
+                backend_selector,
+                "PROJECT_PATH",
+                self.project_path,
+            ),
+            patch.object(
+                backend_selector,
+                "BOOKS_PATH",
+                self.books_path,
+            ),
+            patch.object(
+                backend_selector,
+                "load_chapter_workspace_state",
+                return_value=workspace_state,
+            ),
+        ):
+            run = backend_selector.load_or_create_chapter_run(
+                self.book_id,
+                self.chapter_id,
+            )
+            run.update(
+                {
+                    "status": "human_input_required",
+                    "developer_passes_total": 6,
+                    "evaluator_passes_total": 6,
+                    "last_assessment_id": assessment_id,
+                    "last_assessment_path": str(
+                        assessment_path.relative_to(self.project_path)
+                    ),
+                    "last_assessment_sha256": assessment_document[
+                        "assessment_sha256"
+                    ],
+                    "last_assessment_outcome": "human_input_required",
+                    "human_input_requests": [question],
+                }
+            )
+            backend_selector.save_chapter_run(run)
+            backend_selector.record_chapter_human_input(
+                self.book_id,
+                self.chapter_id,
+                ["Accept D2 without another provider call."],
+                "Record the exact decision.",
+            )
+            run = backend_selector.load_or_create_chapter_run(
+                self.book_id,
+                self.chapter_id,
+            )
+            run["status"] = "agent_call_limit_reached"
+            backend_selector.save_chapter_run(run)
+
+            acceptance_path = (
+                backend_selector
+                .authorize_chapter_human_draft_acceptance(
+                    self.book_id,
+                    self.chapter_id,
+                    "Accept the exact assessed draft.",
+                )
+            )
+            completed = backend_selector.load_or_create_chapter_run(
+                self.book_id,
+                self.chapter_id,
+            )
+
+        self.assertTrue(acceptance_path.is_file())
+        self.assertEqual(completed["status"], "chapter_complete")
+        self.assertEqual(
+            completed["completion_authority_kind"],
+            "human_draft_acceptance",
+        )
+        self.assertEqual(completed["accepted_final_draft_id"], "D2")
+        self.assertEqual(
+            backend_selector.chapter_agent_calls_total(completed),
+            12,
+        )
+
     def test_chapter_blocked_stops_without_another_developer_pass(
         self,
     ) -> None:

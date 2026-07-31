@@ -3317,6 +3317,20 @@ def chapter_human_input_closeout_path(
     )
 
 
+def chapter_human_draft_acceptance_path(
+    book_id: str,
+    chapter_id: str,
+    assessment_id: str,
+) -> Path:
+    """Return one immutable assessment-bound draft acceptance path."""
+    return (
+        BOOKS_PATH
+        / book_id
+        / "runs"
+        / f"{chapter_id}.{assessment_id}.draft-acceptance.json"
+    )
+
+
 def load_chapter_human_input(
     book_id: str,
     chapter_id: str,
@@ -3625,6 +3639,242 @@ def record_chapter_human_input(
         )
         save_chapter_run(run)
     return path
+
+
+def authorize_chapter_human_draft_acceptance(
+    book_id: str,
+    chapter_id: str,
+    approval_note: str,
+) -> Path:
+    """Accept an assessed draft without opening another provider budget."""
+    if not approval_note.strip():
+        raise ValueError("Draft-acceptance note cannot be empty.")
+    run = load_or_create_chapter_run(book_id, chapter_id)
+    assessment_id = run.get("last_assessment_id")
+    assessment_path_value = run.get("last_assessment_path")
+    assessment_sha256 = run.get("last_assessment_sha256")
+    if (
+        run.get("status") != "agent_call_limit_reached"
+        or run.get("last_assessment_outcome") != "human_input_required"
+        or not isinstance(assessment_id, str)
+        or not isinstance(assessment_path_value, str)
+        or not isinstance(assessment_sha256, str)
+    ):
+        raise RuntimeError(
+            "Draft acceptance requires an exhausted assessment-bound "
+            "human checkpoint."
+        )
+    human_input = load_chapter_human_input(
+        book_id,
+        chapter_id,
+        assessment_id,
+    )
+    if human_input is None:
+        raise RuntimeError(
+            "Draft acceptance requires the recorded human answers."
+        )
+    human_input_path, human_input_document = human_input
+    if (
+        human_input_document.get("assessment_sha256")
+        != assessment_sha256
+        or [
+            item["question"]
+            for item in human_input_document["decisions"]
+        ]
+        != run.get("human_input_requests")
+    ):
+        raise RuntimeError(
+            "Draft acceptance does not match the pending checkpoint."
+        )
+
+    book_directory = (BOOKS_PATH / book_id).resolve()
+    assessment_path = (PROJECT_PATH / assessment_path_value).resolve()
+    try:
+        assessment_path.relative_to(book_directory)
+        assessment_document = json.loads(
+            assessment_path.read_text(encoding="utf-8")
+        )
+    except (
+        ValueError,
+        json.JSONDecodeError,
+        OSError,
+    ) as error:
+        raise RuntimeError(
+            "Draft acceptance assessment basis is invalid."
+        ) from error
+    assessment = assessment_document.get("assessment")
+    if (
+        assessment_document.get("assessment_id") != assessment_id
+        or assessment_document.get("assessment_sha256")
+        != assessment_sha256
+        or assessment_sha256
+        != canonical_json_sha256(
+            assessment_document,
+            "assessment_sha256",
+        )
+        or not isinstance(assessment, dict)
+        or assessment.get("book_id") != book_id
+        or assessment.get("chapter_id") != chapter_id
+        or assessment.get("outcome") != "human_input_required"
+        or assessment.get("research_request") is not None
+        or assessment.get("human_input_requests")
+        != run.get("human_input_requests")
+        or not isinstance(assessment.get("draft_id"), str)
+    ):
+        raise RuntimeError(
+            "Draft acceptance assessment basis is invalid."
+        )
+
+    workspace_state = load_chapter_workspace_state(book_id, chapter_id)
+    if workspace_state is None:
+        raise RuntimeError("Draft acceptance has no workspace basis.")
+    workspace_path = (
+        PROJECT_PATH / workspace_state["current_json_path"]
+    ).resolve()
+    workspace_document = load_workspace_document(workspace_state)
+    newest_draft = newest_registered_draft(workspace_document)
+    if (
+        newest_draft is None
+        or newest_draft.get("draft_id") != assessment["draft_id"]
+        or assessment.get("workspace_version")
+        != workspace_state["current_version"]
+        or assessment.get("workspace_sha256")
+        != workspace_document.get("workspace_sha256")
+    ):
+        raise RuntimeError(
+            "Draft acceptance is not bound to the current assessed draft."
+        )
+    draft_path = (PROJECT_PATH / newest_draft["relative_path"]).resolve()
+    try:
+        draft_path.relative_to(book_directory)
+    except ValueError as error:
+        raise RuntimeError(
+            "Accepted chapter draft is outside its book."
+        ) from error
+    if (
+        not draft_path.is_file()
+        or file_sha256(draft_path) != newest_draft.get("sha256")
+    ):
+        raise RuntimeError(
+            "Accepted chapter draft changed after assessment."
+        )
+
+    path = chapter_human_draft_acceptance_path(
+        book_id,
+        chapter_id,
+        assessment_id,
+    )
+    if path.exists():
+        raise RuntimeError("Chapter draft acceptance already exists.")
+    document = {
+        "schema_version": "1.0",
+        "book_id": book_id,
+        "chapter_id": chapter_id,
+        "assessment_id": assessment_id,
+        "assessment_sha256": assessment_sha256,
+        "assessment_path": assessment_path_value,
+        "human_input_path": str(
+            human_input_path.relative_to(PROJECT_PATH)
+        ),
+        "human_input_sha256": human_input_document[
+            "human_input_sha256"
+        ],
+        "workspace_path": workspace_state["current_json_path"],
+        "workspace_sha256": workspace_document["workspace_sha256"],
+        "workspace_file_sha256": file_sha256(workspace_path),
+        "accepted_draft_id": newest_draft["draft_id"],
+        "accepted_draft_path": newest_draft["relative_path"],
+        "accepted_draft_sha256": newest_draft["sha256"],
+        "accepted_at": current_utc_time(),
+        "approval_note": approval_note.strip(),
+        "provider_calls_added": 0,
+        "new_research_allowed": False,
+    }
+    document["draft_acceptance_sha256"] = canonical_json_sha256(
+        document,
+        "draft_acceptance_sha256",
+    )
+    atomic_write_json(path, document)
+
+    run["status"] = "chapter_complete"
+    run["stop_reason"] = None
+    run["human_input_requests"] = []
+    run["last_human_input_path"] = document["human_input_path"]
+    run["last_human_input_sha256"] = document["human_input_sha256"]
+    run["completion_authority_kind"] = "human_draft_acceptance"
+    run["completion_authority_path"] = str(
+        path.relative_to(PROJECT_PATH)
+    )
+    run["completion_authority_sha256"] = document[
+        "draft_acceptance_sha256"
+    ]
+    run["accepted_final_draft_id"] = newest_draft["draft_id"]
+    run["accepted_final_draft_sha256"] = newest_draft["sha256"]
+    save_chapter_run(run)
+    return path
+
+
+def record_chapter_human_draft_acceptance_checkpoint(
+    book_id: str,
+    chapter_id: str,
+) -> Path | None:
+    """Ask whether to close on the exact assessed draft without a call."""
+    run = load_or_create_chapter_run(book_id, chapter_id)
+    assessment_id = run.get("last_assessment_id")
+    if (
+        run.get("status") != "agent_call_limit_reached"
+        or run.get("last_assessment_outcome") != "human_input_required"
+        or not isinstance(assessment_id, str)
+        or load_chapter_human_input(
+            book_id,
+            chapter_id,
+            assessment_id,
+        )
+        is None
+    ):
+        raise RuntimeError(
+            "This chapter stop has no assessed-draft acceptance."
+        )
+    workspace_state = load_chapter_workspace_state(book_id, chapter_id)
+    if workspace_state is None:
+        raise RuntimeError("Draft acceptance has no workspace.")
+    workspace_document = load_workspace_document(workspace_state)
+    newest_draft = newest_registered_draft(workspace_document)
+    if newest_draft is None:
+        raise RuntimeError("Draft acceptance has no registered draft.")
+
+    print("\nExact chapter-draft acceptance checkpoint")
+    print(
+        f"{chapter_id} exhausted its provider budget after assessment "
+        f"{assessment_id} requested only human decisions."
+    )
+    print(
+        f"Candidate: {newest_draft['draft_id']} "
+        f"({newest_draft['sha256']})"
+    )
+    print(
+        "Acceptance binds the recorded answers and this exact draft hash, "
+        "marks the chapter complete, and adds zero provider calls."
+    )
+    print("No new research, revision, or final-pass claim is created.")
+    print("1. Accept this exact draft as the final chapter")
+    print("2. Keep the chapter open")
+    while True:
+        choice = input("Select draft status: ").strip()
+        if choice in {"1", "2"}:
+            break
+        print("Invalid selection. Please enter 1 or 2.")
+    if choice == "2":
+        return None
+    return authorize_chapter_human_draft_acceptance(
+        book_id,
+        chapter_id,
+        (
+            "The user accepted the exact assessed draft after answering "
+            "the assessment-bound checkpoint and explicitly declined a "
+            "new provider-call budget."
+        ),
+    )
 
 
 def record_chapter_human_input_checkpoint(
@@ -10739,6 +10989,52 @@ def continue_book_workflow(
                         )
                         is None
                     ):
+                        if (
+                            chapter_result.get("last_assessment_outcome")
+                            == "human_input_required"
+                            and isinstance(
+                                chapter_result.get("last_assessment_id"),
+                                str,
+                            )
+                            and load_chapter_human_input(
+                                book_id,
+                                chapter_id,
+                                chapter_result["last_assessment_id"],
+                            )
+                            is not None
+                        ):
+                            acceptance_path = (
+                                record_chapter_human_draft_acceptance_checkpoint(
+                                    book_id,
+                                    chapter_id,
+                                )
+                            )
+                            if acceptance_path is None:
+                                return {
+                                    "status": "draft_acceptance_held",
+                                    "conversation_id": conversation_id,
+                                    "chapter_id": chapter_id,
+                                    "run_path": str(
+                                        chapter_run_path(
+                                            book_id,
+                                            chapter_id,
+                                        )
+                                    ),
+                                }
+                            print(
+                                "\nExact chapter draft accepted:"
+                                f"\n{acceptance_path}"
+                                "\nResume this workflow to continue."
+                            )
+                            return {
+                                "status": "chapter_draft_accepted",
+                                "conversation_id": conversation_id,
+                                "chapter_id": chapter_id,
+                                "acceptance_path": str(
+                                    acceptance_path
+                                ),
+                                "max_additional_provider_calls": 0,
+                            }
                         recovery_path = (
                             record_chapter_recovery_checkpoint(
                                 book_id,
