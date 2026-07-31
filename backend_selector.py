@@ -14,6 +14,7 @@ from pathlib import Path
 
 import book_assembler
 import book_synthesis
+import bookshelf
 import chapter_controller
 import chapter_workspace
 import conversation_store
@@ -10315,6 +10316,80 @@ def manifest_chapter_is_draft_ready(chapter: dict) -> bool:
     return chapter.get("readiness") == "ready_to_draft"
 
 
+def bookshelf_projection_is_current(
+    project_path: Path,
+    book_id: str,
+    assembly: dict,
+) -> bool:
+    """Return whether the derived shelf includes this exact final assembly."""
+    bookshelf_path = project_path / "data" / "bookshelf"
+    catalog_path = bookshelf_path / "catalog.json"
+    index_path = bookshelf_path / "index.md"
+    if not catalog_path.is_file() or not index_path.is_file():
+        return False
+    try:
+        catalog = bookshelf.read_json_object(
+            catalog_path,
+            "Bookshelf catalog",
+        )
+        books = catalog.get("books")
+        if (
+            catalog.get("schema_version") != "1.0"
+            or not isinstance(books, list)
+            or catalog.get("book_count") != len(books)
+        ):
+            return False
+        expected_book_ids = sorted(
+            path.parent.name
+            for path in (project_path / "data" / "books").glob(
+                "*/assembly.json"
+            )
+        )
+        actual_book_ids = sorted(
+            record.get("book_id")
+            for record in books
+            if isinstance(record, dict)
+            and isinstance(record.get("book_id"), str)
+        )
+        matches = [
+            record
+            for record in books
+            if isinstance(record, dict)
+            and record.get("book_id") == book_id
+        ]
+        if (
+            actual_book_ids != expected_book_ids
+            or len(matches) != 1
+        ):
+            return False
+        entry = matches[0]
+        assembly_path = (
+            project_path
+            / "data"
+            / "books"
+            / book_id
+            / "assembly.json"
+        )
+        if (
+            entry.get("artifact_status") != "final"
+            or entry.get("book_sha256") != assembly.get("book_sha256")
+            or entry.get("assembly_sha256")
+            != bookshelf.file_sha256(assembly_path)
+        ):
+            return False
+        return index_path.read_text(encoding="utf-8") == bookshelf.render_index(
+            catalog
+        )
+    except (
+        bookshelf.BookshelfError,
+        KeyError,
+        OSError,
+        TypeError,
+        UnicodeError,
+    ):
+        return False
+
+
 def workflow_stage(conversation_path: Path) -> str:
     """Derive the next action from canonical artifacts instead of RAM state."""
     if not conversation_is_finished(conversation_path):
@@ -10400,11 +10475,17 @@ def workflow_stage(conversation_path: Path) -> str:
     if assembly_path.exists() != book_path.exists():
         raise RuntimeError("Final book output is only partially present.")
     if assembly_path.exists():
-        book_assembler.verify_existing_assembly(
+        assembly = book_assembler.verify_existing_assembly(
             PROJECT_PATH,
             book_directory,
             book_id,
         )
+        if not bookshelf_projection_is_current(
+            PROJECT_PATH,
+            book_id,
+            assembly,
+        ):
+            return "bookshelf_projection"
         return "complete"
 
     included_chapters = [
@@ -10614,6 +10695,7 @@ WORKFLOW_STAGE_LABELS = {
     "editorial_revision_recovery": "editorial revision recovery",
     "editorial_held": "held at final editorial review",
     "book_finalization": "immutable final book assembly",
+    "bookshelf_projection": "bookshelf catalog projection",
     "complete": "complete",
 }
 
@@ -11576,6 +11658,20 @@ def continue_book_workflow(
                 f"\n{PROJECT_PATH / receipt['book_path']}"
                 "\n\nFinal assembly receipt saved to:"
                 f"\n{book_directory / 'assembly.json'}"
+            )
+            continue
+
+        if stage == "bookshelf_projection":
+            print("\nUpdating the verified bookshelf projection...")
+            try:
+                shelf = bookshelf.build_bookshelf(PROJECT_PATH)
+            except bookshelf.BookshelfError as error:
+                raise RuntimeError(str(error)) from error
+            print(
+                "\nBookshelf catalog saved to:"
+                f"\n{shelf['catalog_path']}"
+                "\n\nReadable bookshelf saved to:"
+                f"\n{shelf['index_path']}"
             )
             continue
 

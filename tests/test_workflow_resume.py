@@ -233,6 +233,127 @@ class WorkflowResumeTests(unittest.TestCase):
                 "candidate_assembly",
             )
 
+    def test_final_book_waits_for_exact_bookshelf_projection(self) -> None:
+        book_directory = self.write_ready_completed_book_state()
+        book_path = book_directory / "book.md"
+        book_path.write_text("# Final book\n", encoding="utf-8")
+        book_sha256 = hashlib.sha256(book_path.read_bytes()).hexdigest()
+        assembly_path = book_directory / "assembly.json"
+        assembly = {
+            "book_id": self.book_id,
+            "book_path": str(book_path.relative_to(self.project_path)),
+            "book_sha256": book_sha256,
+        }
+        self.write_json(assembly_path, assembly)
+
+        with ExitStack() as stack:
+            for active_patch in self.patches():
+                stack.enter_context(active_patch)
+            stack.enter_context(
+                patch.object(
+                    backend_selector.book_assembler,
+                    "verify_existing_assembly",
+                    return_value=assembly,
+                )
+            )
+            self.assertEqual(
+                backend_selector.workflow_stage(self.conversation_path),
+                "bookshelf_projection",
+            )
+
+            entry = {
+                "book_id": self.book_id,
+                "artifact_status": "final",
+                "shelf_status": "internal_smoke_test",
+                "title": "A Final Book",
+                "central_question": "Can the shelf remain derived?",
+                "book_mode": "exploratory",
+                "book_path": str(book_path.relative_to(self.project_path)),
+                "book_sha256": book_sha256,
+                "assembly_sha256": hashlib.sha256(
+                    assembly_path.read_bytes()
+                ).hexdigest(),
+                "edition": 1,
+                "chapter_count": 0,
+                "chapters": [],
+                "source_count": 0,
+            }
+            catalog = {
+                "schema_version": "1.0",
+                "generated_at": "2026-01-01T00:00:00+00:00",
+                "book_count": 1,
+                "books": [entry],
+            }
+            bookshelf_path = self.project_path / "data" / "bookshelf"
+            self.write_json(bookshelf_path / "catalog.json", catalog)
+            (bookshelf_path / "index.md").write_text(
+                backend_selector.bookshelf.render_index(catalog),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                backend_selector.workflow_stage(self.conversation_path),
+                "complete",
+            )
+
+            catalog["books"][0]["book_sha256"] = "0" * 64
+            self.write_json(bookshelf_path / "catalog.json", catalog)
+            (bookshelf_path / "index.md").write_text(
+                backend_selector.bookshelf.render_index(catalog),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                backend_selector.workflow_stage(self.conversation_path),
+                "bookshelf_projection",
+            )
+
+    def test_bookshelf_projection_is_rebuilt_without_provider_work(self) -> None:
+        book_directory = self.books_path / self.book_id
+        assembly_path = book_directory / "assembly.json"
+        self.write_json(
+            assembly_path,
+            {
+                "book_id": self.book_id,
+                "book_path": str(
+                    (book_directory / "book.md").relative_to(
+                        self.project_path
+                    )
+                ),
+            },
+        )
+        catalog_path = self.project_path / "data" / "bookshelf" / "catalog.json"
+        index_path = self.project_path / "data" / "bookshelf" / "index.md"
+
+        with ExitStack() as stack:
+            for active_patch in self.patches():
+                stack.enter_context(active_patch)
+            stage = stack.enter_context(
+                patch.object(
+                    backend_selector,
+                    "workflow_stage",
+                    side_effect=["bookshelf_projection", "complete"],
+                )
+            )
+            build = stack.enter_context(
+                patch.object(
+                    backend_selector.bookshelf,
+                    "build_bookshelf",
+                    return_value={
+                        "catalog_path": catalog_path,
+                        "index_path": index_path,
+                    },
+                )
+            )
+            result = backend_selector.continue_book_workflow(
+                "claude",
+                "/usr/bin/claude",
+                self.conversation_path,
+            )
+
+        self.assertEqual(result["status"], "complete")
+        build.assert_called_once_with(self.project_path)
+        self.assertEqual(stage.call_count, 2)
+
     def test_approved_plan_can_be_reopened_without_mutation(self) -> None:
         self.write_review()
         self.write_ready_decision()
