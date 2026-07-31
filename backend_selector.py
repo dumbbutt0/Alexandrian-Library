@@ -3653,12 +3653,23 @@ def authorize_chapter_human_draft_acceptance(
     assessment_id = run.get("last_assessment_id")
     assessment_path_value = run.get("last_assessment_path")
     assessment_sha256 = run.get("last_assessment_sha256")
+    failed_closeout_contract_id = (
+        pending_failed_human_closeout_contract_id(
+            book_id,
+            chapter_id,
+        )
+    )
     if (
         run.get("status")
         not in {
+            "active",
             "agent_call_limit_reached",
             "human_input_closeout_failed",
         }
+        or (
+            run.get("status") == "active"
+            and failed_closeout_contract_id is None
+        )
         or run.get("last_assessment_outcome") != "human_input_required"
         or not isinstance(assessment_id, str)
         or not isinstance(assessment_path_value, str)
@@ -3678,14 +3689,26 @@ def authorize_chapter_human_draft_acceptance(
             "Draft acceptance requires the recorded human answers."
         )
     human_input_path, human_input_document = human_input
+    decision_questions = tuple(
+        item["question"]
+        for item in human_input_document["decisions"]
+    )
+    assessment_questions = tuple(
+        load_workflow_json(
+            PROJECT_PATH / assessment_path_value,
+            "Draft-acceptance assessment",
+        )
+        .get("assessment", {})
+        .get("human_input_requests", [])
+    )
     if (
         human_input_document.get("assessment_sha256")
         != assessment_sha256
-        or [
-            item["question"]
-            for item in human_input_document["decisions"]
-        ]
-        != run.get("human_input_requests")
+        or decision_questions
+        not in {
+            tuple(run.get("human_input_requests", [])),
+            assessment_questions,
+        }
     ):
         raise RuntimeError(
             "Draft acceptance does not match the pending checkpoint."
@@ -3793,6 +3816,7 @@ def authorize_chapter_human_draft_acceptance(
         "approval_note": approval_note.strip(),
         "provider_calls_added": 0,
         "new_research_allowed": False,
+        "failed_closeout_contract_id": failed_closeout_contract_id,
     }
     document["draft_acceptance_sha256"] = canonical_json_sha256(
         document,
@@ -3825,12 +3849,23 @@ def record_chapter_human_draft_acceptance_checkpoint(
     """Ask whether to close on the exact assessed draft without a call."""
     run = load_or_create_chapter_run(book_id, chapter_id)
     assessment_id = run.get("last_assessment_id")
+    failed_closeout_contract_id = (
+        pending_failed_human_closeout_contract_id(
+            book_id,
+            chapter_id,
+        )
+    )
     if (
         run.get("status")
         not in {
+            "active",
             "agent_call_limit_reached",
             "human_input_closeout_failed",
         }
+        or (
+            run.get("status") == "active"
+            and failed_closeout_contract_id is None
+        )
         or run.get("last_assessment_outcome") != "human_input_required"
         or not isinstance(assessment_id, str)
         or load_chapter_human_input(
@@ -3853,8 +3888,8 @@ def record_chapter_human_draft_acceptance_checkpoint(
 
     print("\nExact chapter-draft acceptance checkpoint")
     print(
-        f"{chapter_id} exhausted its provider budget after assessment "
-        f"{assessment_id} requested only human decisions."
+        f"{chapter_id} stopped after assessment {assessment_id} requested "
+        "only human decisions."
     )
     print(
         f"Candidate: {newest_draft['draft_id']} "
@@ -3883,6 +3918,38 @@ def record_chapter_human_draft_acceptance_checkpoint(
             "new provider-call budget."
         ),
     )
+
+
+def pending_failed_human_closeout_contract_id(
+    book_id: str,
+    chapter_id: str,
+) -> str | None:
+    """Return the one un-retried failed human-closeout contract, if any."""
+    snapshot = build_chapter_controller_snapshot(book_id, chapter_id)
+    decision = chapter_controller.decide_next_action(snapshot)
+    if (
+        decision.action
+        != chapter_controller.ActionKind.RUN_HUMAN_INPUT_CLOSEOUT
+    ):
+        return None
+    ledger = chapter_controller.ChapterEventLedger(
+        chapter_controller_ledger_path(book_id, chapter_id)
+    )
+    requirement = ledger.retry_requirement(snapshot, decision)
+    if (
+        requirement is None
+        or requirement.get("status") != "authorization_required"
+        or not isinstance(requirement.get("failed_contract_id"), str)
+    ):
+        return None
+    contract_id = requirement["failed_contract_id"]
+    contract = ledger.contract_record(contract_id)
+    if (
+        contract.get("action")
+        != chapter_controller.ActionKind.RUN_HUMAN_INPUT_CLOSEOUT.value
+    ):
+        return None
+    return contract_id
 
 
 def record_chapter_human_input_checkpoint(
@@ -10892,6 +10959,45 @@ def continue_book_workflow(
                             ),
                         }
                     if status == "retry_authorization_required":
+                        if (
+                            pending_failed_human_closeout_contract_id(
+                                book_id,
+                                chapter_id,
+                            )
+                            is not None
+                        ):
+                            acceptance_path = (
+                                record_chapter_human_draft_acceptance_checkpoint(
+                                    book_id,
+                                    chapter_id,
+                                )
+                            )
+                            if acceptance_path is None:
+                                return {
+                                    "status": "draft_acceptance_held",
+                                    "conversation_id": conversation_id,
+                                    "chapter_id": chapter_id,
+                                    "run_path": str(
+                                        chapter_run_path(
+                                            book_id,
+                                            chapter_id,
+                                        )
+                                    ),
+                                }
+                            print(
+                                "\nExact chapter draft accepted:"
+                                f"\n{acceptance_path}"
+                                "\nResume this workflow to continue."
+                            )
+                            return {
+                                "status": "chapter_draft_accepted",
+                                "conversation_id": conversation_id,
+                                "chapter_id": chapter_id,
+                                "acceptance_path": str(
+                                    acceptance_path
+                                ),
+                                "max_additional_provider_calls": 0,
+                            }
                         authorization = record_chapter_retry_checkpoint(
                             book_id,
                             chapter_id,
