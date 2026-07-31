@@ -36,7 +36,7 @@
     },
     "terminology": {
       "type": "array",
-      "description": "Chapter-local terminology with authority references from the same typed namespace."
+      "description": "Chapter-local terminology with authority references from the same typed namespace. For candidate authority, term or canonical_form must be an exact substring of candidate_excerpt in at least one cited occurrence; authoritative_text alone does not satisfy the support check."
     },
     "unresolved_decisions": {"type": "array"},
     "cross_chapter_dependencies": {"type": "array"}

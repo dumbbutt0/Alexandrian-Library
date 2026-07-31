@@ -102,6 +102,9 @@ Authority references use one exact namespace:
 
 Evidence receipt IDs, canonical review IDs, prose locations, and JSON paths
 are provenance carried by an occurrence. They are not authority references.
+For candidate-authority terminology, the `term` or `canonical_form` must be an
+exact substring of `candidate_excerpt` in at least one cited occurrence.
+`authoritative_text` alone does not satisfy that support rule.
 
 A chapter shard must not rename the public profile, settle a global question,
 move material into another chapter, change attribution or evidence

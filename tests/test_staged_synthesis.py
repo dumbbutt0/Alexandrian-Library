@@ -2577,6 +2577,14 @@ class StagedSynthesisTests(unittest.TestCase):
             'for example "CH2"; it is not a section name or prose locator',
             prompt,
         )
+        self.assertIn(
+            "must be an exact substring of candidate_excerpt",
+            prompt,
+        )
+        self.assertIn(
+            "authoritative_text does not satisfy this check",
+            prompt,
+        )
 
     def test_shard_rejects_foreign_missing_and_unsupported_content(self) -> None:
         self.authorize_and_prepare_sharded_cycle()

@@ -847,6 +847,8 @@ class SynthesisPlanShardTerminology(StrictModel):
         default_factory=list,
         description=(
             "Candidate authority uses this shard's CO/SC occurrence IDs only; "
+            "the term or canonical_form must occur exactly in a cited "
+            "occurrence's candidate_excerpt, not only its authoritative_text. "
             "human authority uses supplied decision IDs only; editorial "
             "mechanics uses an empty list."
         ),
