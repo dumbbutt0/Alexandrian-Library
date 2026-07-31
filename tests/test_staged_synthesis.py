@@ -2146,11 +2146,18 @@ class StagedSynthesisTests(unittest.TestCase):
             "CH1",
             plan_input["input_hash"],
         )
+        task = staged_synthesis.plan_shard_task(
+            self.project,
+            self.book_id,
+            "CH1",
+        )
 
         self.assertEqual(result["chapter_id"], "CH1")
         self.assertEqual(result["input_hash"], plan_input["input_hash"])
         self.assertEqual(result["plan_input"], plan_input)
         self.assertEqual(result["chapter_markdown"], self.chapters["CH1"])
+        self.assertEqual(task["maximum_provider_calls"], 2)
+        self.assertIn("same provider is allowed", task["retry_rule"])
         self.assertNotIn(self.chapters["CH2"], result["chapter_markdown"])
         with self.assertRaisesRegex(
             book_synthesis.BookSynthesisError,

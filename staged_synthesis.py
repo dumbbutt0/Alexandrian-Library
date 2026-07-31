@@ -1670,7 +1670,9 @@ def plan_shard_task(
         ),
         "input_hash": input_document["input_hash"],
         "maximum_provider_calls": 2,
-        "retry_rule": "one retry only with a different provider",
+        "retry_rule": (
+            "one fresh-process retry; the same provider is allowed"
+        ),
     }
 
 

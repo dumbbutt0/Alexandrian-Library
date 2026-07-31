@@ -9822,7 +9822,6 @@ def run_next_staged_synthesis_action(
             build_staged_plan_shard_prompt(instructions, task),
             BOOK_SYNTHESIS_CALL,
             maximum_stage_calls=2,
-            require_changed_provider=True,
             capability_preflight=capability_preflight,
         )
 
