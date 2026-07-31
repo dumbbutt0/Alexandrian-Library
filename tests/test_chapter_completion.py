@@ -737,7 +737,7 @@ class ChapterCompletionControllerTests(unittest.TestCase):
                 self.book_id,
                 self.chapter_id,
             )
-            run["status"] = "agent_call_limit_reached"
+            run["status"] = "human_input_closeout_failed"
             backend_selector.save_chapter_run(run)
 
             acceptance_path = (

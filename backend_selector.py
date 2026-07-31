@@ -3654,7 +3654,11 @@ def authorize_chapter_human_draft_acceptance(
     assessment_path_value = run.get("last_assessment_path")
     assessment_sha256 = run.get("last_assessment_sha256")
     if (
-        run.get("status") != "agent_call_limit_reached"
+        run.get("status")
+        not in {
+            "agent_call_limit_reached",
+            "human_input_closeout_failed",
+        }
         or run.get("last_assessment_outcome") != "human_input_required"
         or not isinstance(assessment_id, str)
         or not isinstance(assessment_path_value, str)
@@ -3822,7 +3826,11 @@ def record_chapter_human_draft_acceptance_checkpoint(
     run = load_or_create_chapter_run(book_id, chapter_id)
     assessment_id = run.get("last_assessment_id")
     if (
-        run.get("status") != "agent_call_limit_reached"
+        run.get("status")
+        not in {
+            "agent_call_limit_reached",
+            "human_input_closeout_failed",
+        }
         or run.get("last_assessment_outcome") != "human_input_required"
         or not isinstance(assessment_id, str)
         or load_chapter_human_input(
@@ -10980,6 +10988,51 @@ def continue_book_workflow(
                             "max_additional_provider_calls": (
                                 MAX_HUMAN_INPUT_CLOSEOUT_CALLS_TOTAL
                             ),
+                        }
+                    if (
+                        status == "human_input_closeout_failed"
+                        and chapter_result.get("last_assessment_outcome")
+                        == "human_input_required"
+                        and isinstance(
+                            chapter_result.get("last_assessment_id"),
+                            str,
+                        )
+                        and load_chapter_human_input(
+                            book_id,
+                            chapter_id,
+                            chapter_result["last_assessment_id"],
+                        )
+                        is not None
+                    ):
+                        acceptance_path = (
+                            record_chapter_human_draft_acceptance_checkpoint(
+                                book_id,
+                                chapter_id,
+                            )
+                        )
+                        if acceptance_path is None:
+                            return {
+                                "status": "draft_acceptance_held",
+                                "conversation_id": conversation_id,
+                                "chapter_id": chapter_id,
+                                "run_path": str(
+                                    chapter_run_path(
+                                        book_id,
+                                        chapter_id,
+                                    )
+                                ),
+                            }
+                        print(
+                            "\nExact chapter draft accepted:"
+                            f"\n{acceptance_path}"
+                            "\nResume this workflow to continue."
+                        )
+                        return {
+                            "status": "chapter_draft_accepted",
+                            "conversation_id": conversation_id,
+                            "chapter_id": chapter_id,
+                            "acceptance_path": str(acceptance_path),
+                            "max_additional_provider_calls": 0,
                         }
                     if (
                         status == "agent_call_limit_reached"
