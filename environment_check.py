@@ -86,6 +86,7 @@ REQUIRED_MCP_TOOLS = {
     "submit_staged_synthesis_plan_shard",
     "submit_staged_synthesis_plan",
     "submit_staged_synthesis_plan_audit",
+    "read_staged_synthesis_global_plan_audit_input",
     "submit_staged_synthesis_global_plan_audit",
     "save_staged_synthesis_edition_unit",
     "submit_staged_synthesis_audit_unit",

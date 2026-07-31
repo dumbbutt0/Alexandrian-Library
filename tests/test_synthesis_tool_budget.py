@@ -325,6 +325,100 @@ class SynthesisToolBudgetTests(unittest.TestCase):
         self.assertEqual(summary["maximum_submissions"], 1)
         self.assertEqual(summary["second_submission_rule"], "none")
 
+    def test_global_plan_audit_has_one_read_and_one_submission(self) -> None:
+        action_id = "global-plan-audit-A1-test"
+        stage = "global-plan-audit-A1"
+        event = {
+            "schema_version": "1.0",
+            "event": "contract_opened",
+            "book_id": self.book_id,
+            "cycle_id": self.cycle_id,
+            "action_id": action_id,
+            "stage": stage,
+            "backend": self.backend,
+            "input_hash": self.input_hash,
+            "tool_budget": {
+                "controlled_tools": [
+                    synthesis_tool_budget.PLAN_AUDIT_READ_TOOL,
+                    synthesis_tool_budget.PLAN_AUDIT_SUBMIT_TOOL,
+                ]
+            },
+        }
+        with self.ledger.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(event) + "\n")
+        environment = {
+            synthesis_tool_budget.CONTEXT_ENV[field]: value
+            for field, value in {
+                "book_id": self.book_id,
+                "cycle_id": self.cycle_id,
+                "action_id": action_id,
+                "stage": stage,
+                "backend": self.backend,
+                "input_hash": self.input_hash,
+            }.items()
+        }
+
+        with self.assertRaisesRegex(
+            synthesis_tool_budget.SynthesisToolBudgetError,
+            "must be read successfully",
+        ):
+            synthesis_tool_budget.reserve_tool_attempt(
+                self.project,
+                synthesis_tool_budget.PLAN_AUDIT_SUBMIT_TOOL,
+                {},
+                environment,
+            )
+        read = synthesis_tool_budget.reserve_tool_attempt(
+            self.project,
+            synthesis_tool_budget.PLAN_AUDIT_READ_TOOL,
+            {},
+            environment,
+        )
+        synthesis_tool_budget.record_tool_result(
+            self.project,
+            read,
+            "success",
+        )
+        submission = synthesis_tool_budget.reserve_tool_attempt(
+            self.project,
+            synthesis_tool_budget.PLAN_AUDIT_SUBMIT_TOOL,
+            {},
+            environment,
+        )
+        synthesis_tool_budget.record_tool_result(
+            self.project,
+            submission,
+            "success",
+        )
+        with self.assertRaisesRegex(
+            synthesis_tool_budget.SynthesisToolBudgetError,
+            "read budget is exhausted",
+        ):
+            synthesis_tool_budget.reserve_tool_attempt(
+                self.project,
+                synthesis_tool_budget.PLAN_AUDIT_READ_TOOL,
+                {},
+                environment,
+            )
+        with self.assertRaisesRegex(
+            synthesis_tool_budget.SynthesisToolBudgetError,
+            "submission budget is exhausted",
+        ):
+            synthesis_tool_budget.reserve_tool_attempt(
+                self.project,
+                synthesis_tool_budget.PLAN_AUDIT_SUBMIT_TOOL,
+                {},
+                environment,
+            )
+
+        summary = synthesis_tool_budget.finalize_action_budget(
+            self.project,
+            self.book_id,
+            action_id,
+        )
+        self.assertEqual(summary["maximum_reads"], 1)
+        self.assertEqual(summary["maximum_submissions"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

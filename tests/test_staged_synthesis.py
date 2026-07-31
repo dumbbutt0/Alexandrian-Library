@@ -2423,6 +2423,50 @@ class StagedSynthesisTests(unittest.TestCase):
         )
         self.assertEqual(ledger.read_bytes(), prior_ledger)
 
+    def test_global_plan_audit_preflight_verifies_exact_read_tool(
+        self,
+    ) -> None:
+        self.authorize_and_prepare_sharded_cycle()
+        self.save_all_plan_shards()
+        merged = staged_synthesis.merge_plan_shards(
+            self.project,
+            self.book_id,
+        )
+        ledger = self.book / "runs" / "synthesis.controller.jsonl"
+        prior_ledger = ledger.read_bytes()
+
+        with patch.object(
+            backend_selector,
+            "PROJECT_PATH",
+            self.project,
+        ), patch.object(
+            backend_selector.environment_check,
+            "codex_project_readiness",
+            return_value=backend_selector.environment_check.CheckResult(
+                "Codex project readiness",
+                "available",
+                "codex_ready: Effective project MCP verified.",
+                required=False,
+            ),
+        ):
+            result = backend_selector.preflight_staged_capabilities(
+                "codex",
+                "global_plan_audit",
+                self.book_id,
+                input_hash=merged["plan_draft_sha256"],
+            )
+
+        self.assertTrue(result["bounded_input_verified"])
+        self.assertEqual(
+            result["input_hash"],
+            merged["plan_draft_sha256"],
+        )
+        self.assertIn(
+            "read_staged_synthesis_global_plan_audit_input",
+            result["required_tools"],
+        )
+        self.assertEqual(ledger.read_bytes(), prior_ledger)
+
     def test_codex_preflight_rejects_ineffective_project_mcp(
         self,
     ) -> None:
@@ -2686,6 +2730,54 @@ class StagedSynthesisTests(unittest.TestCase):
                 self.book_id,
             ).exists()
         )
+
+    def test_global_plan_auditor_reads_exact_hash_bound_inputs(
+        self,
+    ) -> None:
+        self.authorize_and_prepare_sharded_cycle()
+        self.save_all_plan_shards()
+        merged = staged_synthesis.merge_plan_shards(
+            self.project,
+            self.book_id,
+        )
+
+        audit_input = staged_synthesis.read_sharded_plan_audit_input(
+            self.project,
+            self.book_id,
+            merged["plan_draft_sha256"],
+        )
+
+        self.assertEqual(
+            audit_input["merged_plan"],
+            merged,
+        )
+        self.assertEqual(
+            audit_input["candidate_markdown"],
+            self.candidate_path.read_text(encoding="utf-8"),
+        )
+        self.assertEqual(
+            [item["chapter_id"] for item in audit_input["plan_shard_inputs"]],
+            ["CH1", "CH2"],
+        )
+        self.assertEqual(
+            {
+                item["shard_id"]: item["input_hash"]
+                for item in audit_input["plan_shard_inputs"]
+            },
+            {
+                item["shard_id"]: item["input_hash"]
+                for item in merged["source_shards"]
+            },
+        )
+        with self.assertRaisesRegex(
+            book_synthesis.BookSynthesisError,
+            "stale",
+        ):
+            staged_synthesis.read_sharded_plan_audit_input(
+                self.project,
+                self.book_id,
+                "0" * 64,
+            )
 
     def test_approved_global_audit_promotes_exact_merged_plan(self) -> None:
         self.authorize_and_prepare_sharded_cycle()

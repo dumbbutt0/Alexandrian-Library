@@ -2301,6 +2301,75 @@ def sharded_plan_audit_task(project_path: Path, book_id: str) -> dict:
     }
 
 
+def read_sharded_plan_audit_input(
+    project_path: Path,
+    book_id: str,
+    merged_plan_sha256: str,
+) -> dict:
+    """Return the exact hash-verified inputs for one global plan audit."""
+    project_path = project_path.resolve()
+    context, index = _load_staging(project_path, book_id)
+    inventory = finalize_inventory(project_path, book_id)
+    plan = load_plan_draft(project_path, book_id, 1)
+    if (
+        merged_plan_sha256 != plan["plan_draft_sha256"]
+        or plan.get("context_sha256") != context["context_sha256"]
+        or plan.get("inventory_staging_sha256")
+        != inventory["staging_inventory_sha256"]
+    ):
+        raise book_synthesis.BookSynthesisError(
+            "Requested global plan-audit input is stale."
+        )
+
+    candidate_path = book_synthesis.resolve_project_path(
+        project_path,
+        context["candidate_path"],
+        "Synthesis candidate",
+    )
+    if book_synthesis.file_sha256(candidate_path) != context[
+        "candidate_sha256"
+    ]:
+        raise book_synthesis.BookSynthesisError(
+            "Global plan-audit candidate hash changed."
+        )
+    try:
+        candidate_markdown = candidate_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        raise book_synthesis.BookSynthesisError(
+            "Global plan-audit candidate could not be read."
+        ) from error
+
+    plan_inputs = [
+        load_plan_shard_input(project_path, book_id, unit["unit_id"])
+        for unit in index["units"]
+    ]
+    expected_inputs = {
+        source["shard_id"]: source["input_hash"]
+        for source in plan["source_shards"]
+    }
+    actual_inputs = {
+        plan_input["shard_id"]: plan_input["input_hash"]
+        for plan_input in plan_inputs
+    }
+    if expected_inputs != actual_inputs:
+        raise book_synthesis.BookSynthesisError(
+            "Global plan-audit shard inputs do not match the merged plan."
+        )
+
+    return {
+        "schema_version": "1.0",
+        "book_id": book_id,
+        "context_sha256": context["context_sha256"],
+        "inventory_sha256": inventory["staging_inventory_sha256"],
+        "merged_plan_sha256": plan["plan_draft_sha256"],
+        "candidate_sha256": context["candidate_sha256"],
+        "candidate_markdown": candidate_markdown,
+        "merged_plan": plan,
+        "plan_shard_inputs": plan_inputs,
+        "questions": list(GLOBAL_PLAN_AUDIT_QUESTIONS),
+    }
+
+
 def save_sharded_plan_audit(project_path: Path, audit: dict) -> dict:
     """Save one terminal approve/reject global audit without a repair path."""
     project_path = project_path.resolve()

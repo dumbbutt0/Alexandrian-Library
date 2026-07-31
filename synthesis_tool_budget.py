@@ -15,6 +15,12 @@ READ_TOOL = "read_staged_synthesis_plan_shard_input"
 SUBMIT_TOOL = "submit_staged_synthesis_plan_shard"
 INVENTORY_READ_TOOL = "read_staged_synthesis_inventory_input"
 INVENTORY_SUBMIT_TOOL = "submit_staged_synthesis_inventory_unit"
+PLAN_AUDIT_READ_TOOL = (
+    "read_staged_synthesis_global_plan_audit_input"
+)
+PLAN_AUDIT_SUBMIT_TOOL = (
+    "submit_staged_synthesis_global_plan_audit"
+)
 EDITION_TOOL = "save_staged_synthesis_edition_unit"
 AUDIT_UNIT_TOOL = "submit_staged_synthesis_audit_unit"
 GLOBAL_AUDIT_TOOL = "submit_staged_synthesis_global_audit"
@@ -23,6 +29,8 @@ CONTROLLED_TOOLS = {
     SUBMIT_TOOL,
     INVENTORY_READ_TOOL,
     INVENTORY_SUBMIT_TOOL,
+    PLAN_AUDIT_READ_TOOL,
+    PLAN_AUDIT_SUBMIT_TOOL,
     EDITION_TOOL,
     AUDIT_UNIT_TOOL,
     GLOBAL_AUDIT_TOOL,
@@ -32,6 +40,8 @@ TOOL_KINDS = {
     SUBMIT_TOOL: "submit",
     INVENTORY_READ_TOOL: "read",
     INVENTORY_SUBMIT_TOOL: "submit",
+    PLAN_AUDIT_READ_TOOL: "read",
+    PLAN_AUDIT_SUBMIT_TOOL: "plan-audit-submit",
     EDITION_TOOL: "edition-submit",
     AUDIT_UNIT_TOOL: "audit-submit",
     GLOBAL_AUDIT_TOOL: "global-audit-submit",
@@ -147,6 +157,8 @@ def _stage_scope_id(stage: str, tool_name: str) -> str | None:
         if not stage.startswith("inventory-"):
             return None
         return stage.removeprefix("inventory-") or None
+    if tool_name in {PLAN_AUDIT_READ_TOOL, PLAN_AUDIT_SUBMIT_TOOL}:
+        return "GLOBAL" if stage == "global-plan-audit-A1" else None
     if tool_name == EDITION_TOOL:
         if not stage.startswith("edition-S"):
             return None
@@ -373,6 +385,27 @@ def reserve_tool_attempt(
             raise SynthesisToolBudgetError(
                 "The staged input read budget is exhausted."
             )
+    elif tool_name == PLAN_AUDIT_SUBMIT_TOOL:
+        read_reservation, read_result = _receipt_paths(root, "read", 1)
+        if (
+            not read_reservation.is_file()
+            or not read_result.is_file()
+            or _verified_result(read_result).get("outcome") != "success"
+        ):
+            raise SynthesisToolBudgetError(
+                "The global plan-audit input must be read successfully "
+                "before submission."
+            )
+        attempt_number = 1
+        reservation_path, _ = _receipt_paths(
+            root,
+            TOOL_KINDS[tool_name],
+            attempt_number,
+        )
+        if reservation_path.exists():
+            raise SynthesisToolBudgetError(
+                "The staged write submission budget is exhausted."
+            )
     elif tool_name in {SUBMIT_TOOL, INVENTORY_SUBMIT_TOOL}:
         first_reservation, first_result = _receipt_paths(root, kind, 1)
         second_reservation, _ = _receipt_paths(root, kind, 2)
@@ -580,11 +613,16 @@ def finalize_action_budget(
             INVENTORY_SUBMIT_TOOL,
         }
     )
+    global_plan_audit_budget = bool(
+        tools & {PLAN_AUDIT_READ_TOOL, PLAN_AUDIT_SUBMIT_TOOL}
+    )
     summary = {
         "schema_version": "1.0",
         "book_id": book_id,
         "action_id": action_id,
-        "maximum_reads": 1 if correction_budget else 0,
+        "maximum_reads": (
+            1 if correction_budget or global_plan_audit_budget else 0
+        ),
         "maximum_submissions": 2 if correction_budget else 1,
         "maximum_successful_writes": 1,
         "second_submission_rule": (

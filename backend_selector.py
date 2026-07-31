@@ -75,7 +75,9 @@ STAGE_TOOL_CONTRACTS = {
         "write_tools": ("submit_staged_synthesis_plan_shard",),
     },
     "global_plan_audit": {
-        "read_tools": (),
+        "read_tools": (
+            "read_staged_synthesis_global_plan_audit_input",
+        ),
         "write_tools": ("submit_staged_synthesis_global_plan_audit",),
     },
 }
@@ -1428,11 +1430,13 @@ def build_staged_global_plan_audit_prompt(
         "<claim_auditor_instructions>\n"
         f"{instructions}\n"
         "</claim_auditor_instructions>\n\n"
-        "This is one global semantic plan audit only. Inspect the exact "
-        "merged plan and its hash-bound shard inputs. Answer every supplied "
-        "question in order with pass or fail, then return only approve when "
-        "all pass, otherwise reject. Do not edit, repair, replace, regenerate, "
-        "or propose a new plan. Call "
+        "This is one global semantic plan audit only. First call "
+        "read_staged_synthesis_global_plan_audit_input exactly once with the "
+        "supplied book_id and merged_plan_sha256. Inspect the returned exact "
+        "candidate, merged plan, and hash-bound shard inputs. Answer every "
+        "supplied question in order with pass or fail, then return only "
+        "approve when all pass, otherwise reject. Do not edit, repair, "
+        "replace, regenerate, or propose a new plan. Call "
         "submit_staged_synthesis_global_plan_audit exactly once, then stop. "
         "Do not generate an edition, research, or write files directly.\n\n"
         "<staged_global_plan_audit_task>\n"
@@ -1658,6 +1662,21 @@ def preflight_staged_capabilities(
                     PROJECT_PATH,
                     book_id,
                     chapter_id,
+                    input_hash,
+                )
+            )
+        except book_synthesis.BookSynthesisError as error:
+            raise CapabilityPreflightError(str(error)) from error
+    elif stage_contract == "global_plan_audit":
+        if not isinstance(input_hash, str):
+            raise CapabilityPreflightError(
+                "Global plan-audit preflight needs the merged-plan hash."
+            )
+        try:
+            read_result = (
+                staged_synthesis.read_sharded_plan_audit_input(
+                    PROJECT_PATH,
+                    book_id,
                     input_hash,
                 )
             )
@@ -8880,6 +8899,8 @@ def controlled_write_tool_for_stage(stage: str) -> str | None:
         return synthesis_tool_budget.INVENTORY_SUBMIT_TOOL
     if stage.startswith("plan-shard-"):
         return synthesis_tool_budget.SUBMIT_TOOL
+    if stage == "global-plan-audit-A1":
+        return synthesis_tool_budget.PLAN_AUDIT_SUBMIT_TOOL
     if stage.startswith("edition-S"):
         return synthesis_tool_budget.EDITION_TOOL
     if stage.startswith("audit-S"):
@@ -9084,11 +9105,20 @@ def run_staged_provider_action(
                 }
                 if stage.startswith(("plan-shard-", "inventory-"))
                 else {
-                    "maximum_reads": 0,
+                    "maximum_reads": (
+                        1 if stage == "global-plan-audit-A1" else 0
+                    ),
                     "maximum_submissions": 1,
                     "maximum_successful_writes": 1,
                     "second_submission_rule": "none",
-                    "controlled_tools": [controlled_write_tool],
+                    "controlled_tools": (
+                        [
+                            synthesis_tool_budget.PLAN_AUDIT_READ_TOOL,
+                            synthesis_tool_budget.PLAN_AUDIT_SUBMIT_TOOL,
+                        ]
+                        if stage == "global-plan-audit-A1"
+                        else [controlled_write_tool]
+                    ),
                 }
             )
             if controlled_write_tool is not None
@@ -9538,6 +9568,7 @@ def run_next_staged_synthesis_action(
             backend,
             "global_plan_audit",
             book_id,
+            input_hash=task["merged_plan_sha256"],
         )
         target = staged_synthesis.plan_audit_path(
             staged_synthesis.staging_directory(PROJECT_PATH, book_id),

@@ -45,6 +45,11 @@ order. The audit may approve or reject. It must not edit, repair, regenerate,
 replace, or append to the plan. A rejection is terminal for that synthesis
 cycle and cannot route a shard correction or another audit.
 
+Use `read_staged_synthesis_global_plan_audit_input` exactly once to receive the
+hash-verified candidate, merged plan, and shard inputs. Do not infer their
+contents from paths or hashes alone. Then use
+`submit_staged_synthesis_global_plan_audit` exactly once.
+
 Do not receive or reconstruct the synthesizer's hidden reasoning.
 
 Do not edit prose, fetch research, search the web, run commands, write files
@@ -104,9 +109,10 @@ route one corrected P2 plan. A blocking P2 audit is terminal `plan_held`; do
 not request P3 or generate an edition.
 
 For a sharded global plan-audit transition, call
-`submit_staged_synthesis_global_plan_audit` exactly once. Use `approve` only
-when every supplied question passes. Otherwise use `reject` and stop. Do not
-create replacement plan content.
+`read_staged_synthesis_global_plan_audit_input` exactly once, inspect its
+complete result, and call `submit_staged_synthesis_global_plan_audit` exactly
+once. Use `approve` only when every supplied question passes. Otherwise use
+`reject` and stop. Do not create replacement plan content.
 
 ## Completion Response
 

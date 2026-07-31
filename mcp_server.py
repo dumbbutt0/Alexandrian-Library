@@ -7880,6 +7880,29 @@ def submit_staged_synthesis_plan_audit(
 
 @mcp.tool(
     annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    )
+)
+def read_staged_synthesis_global_plan_audit_input(
+    book_id: str,
+    merged_plan_sha256: str,
+) -> dict:
+    """Return the exact hash-verified inputs for one global plan audit."""
+    try:
+        return staged_synthesis.read_sharded_plan_audit_input(
+            PROJECT_PATH,
+            book_id,
+            merged_plan_sha256,
+        )
+    except book_synthesis.BookSynthesisError as error:
+        raise ToolError(str(error)) from error
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
         readOnlyHint=False,
         destructiveHint=False,
         idempotentHint=True,
