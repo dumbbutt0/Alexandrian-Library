@@ -2552,6 +2552,25 @@ class StagedSynthesisTests(unittest.TestCase):
 
         self.assertEqual(ledger.read_bytes(), prior_ledger)
 
+    def test_plan_shard_prompt_defines_exact_operation_target(self) -> None:
+        prompt = backend_selector.build_staged_plan_shard_prompt(
+            "# Profile",
+            {
+                "book_id": self.book_id,
+                "chapter_id": "CH2",
+                "input_hash": "a" * 64,
+            },
+        )
+
+        self.assertIn(
+            "target field must equal the supplied bare chapter_id exactly",
+            prompt,
+        )
+        self.assertIn(
+            'for example "CH2"; it is not a section name or prose locator',
+            prompt,
+        )
+
     def test_shard_rejects_foreign_missing_and_unsupported_content(self) -> None:
         self.authorize_and_prepare_sharded_cycle()
         shard = self.plan_shard("CH1")

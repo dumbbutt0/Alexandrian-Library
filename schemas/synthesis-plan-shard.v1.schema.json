@@ -27,7 +27,7 @@
     "chapter_job": {"type": "string", "minLength": 1},
     "operations": {
       "type": "array",
-      "description": "Every authority_refs list uses the authority_type namespace: assigned CO/SC IDs for candidate authority, supplied decision IDs for human authority, and no references for editorial mechanics."
+      "description": "Every operation target is the exact bare chapter_id, not a section name or prose locator. Every authority_refs list uses the authority_type namespace: assigned CO/SC IDs for candidate authority, supplied decision IDs for human authority, and no references for editorial mechanics."
     },
     "claim_dispositions": {
       "type": "array",

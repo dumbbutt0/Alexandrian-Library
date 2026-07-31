@@ -736,7 +736,13 @@ class SynthesisPlanOperation(StrictModel):
         "appendix",
         "conclusion",
     ]
-    target: str = Field(min_length=1)
+    target: str = Field(
+        min_length=1,
+        description=(
+            "The bare chapter_id that owns this operation, exactly as supplied; "
+            "not a section name or prose locator."
+        ),
+    )
     description: str = Field(min_length=1)
     protected_claim_ids: list[str] = Field(default_factory=list)
     proposed_text: str | None = None

@@ -90,6 +90,8 @@ chapter-plan input and its referenced chapter through
 `read_staged_synthesis_plan_shard_input`. Do not use a host-native filesystem
 tool or command. Give every assigned occurrence exactly one disposition in the
 supplied order. Create only operations owned by that chapter.
+Set every operation `target` to the exact bare `chapter_id` supplied by the
+wrapper, such as `CH2`. A target is not a section name or prose locator.
 
 Authority references use one exact namespace:
 
