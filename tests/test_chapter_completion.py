@@ -534,6 +534,82 @@ class ChapterCompletionControllerTests(unittest.TestCase):
         )
         self.assertIn("six-call", routed["stop_reason"])
 
+    def test_later_human_checkpoint_binds_latest_assessment(self) -> None:
+        with (
+            patch.object(
+                backend_selector,
+                "PROJECT_PATH",
+                self.project_path,
+            ),
+            patch.object(
+                backend_selector,
+                "BOOKS_PATH",
+                self.books_path,
+            ),
+        ):
+            run = backend_selector.load_or_create_chapter_run(
+                self.book_id,
+                self.chapter_id,
+            )
+            run.update(
+                {
+                    "status": "human_input_required",
+                    "last_assessment_id": "A4",
+                    "last_assessment_sha256": "4" * 64,
+                    "last_assessment_outcome": "human_input_required",
+                    "human_input_requests": ["First decision?"],
+                }
+            )
+            backend_selector.save_chapter_run(run)
+            first_path = backend_selector.record_chapter_human_input(
+                self.book_id,
+                self.chapter_id,
+                ["First answer."],
+                "First authorization.",
+            )
+            first_document = json.loads(
+                first_path.read_text(encoding="utf-8")
+            )
+
+            run = backend_selector.load_or_create_chapter_run(
+                self.book_id,
+                self.chapter_id,
+            )
+            run.update(
+                {
+                    "status": "human_input_required",
+                    "last_assessment_id": "A6",
+                    "last_assessment_sha256": "6" * 64,
+                    "last_assessment_outcome": "human_input_required",
+                    "human_input_requests": ["Later decision?"],
+                    "last_human_input_path": str(
+                        first_path.relative_to(self.project_path)
+                    ),
+                    "last_human_input_sha256": first_document[
+                        "human_input_sha256"
+                    ],
+                }
+            )
+            backend_selector.save_chapter_run(run)
+            later_path = backend_selector.record_chapter_human_input(
+                self.book_id,
+                self.chapter_id,
+                ["Later answer."],
+                "Later authorization.",
+            )
+
+        self.assertEqual(later_path.name, "CH1.A6.human-input.json")
+        self.assertTrue(first_path.is_file())
+        self.assertTrue(later_path.is_file())
+        later_document = json.loads(
+            later_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(later_document["assessment_id"], "A6")
+        self.assertEqual(
+            later_document["assessment_sha256"],
+            "6" * 64,
+        )
+
     def test_chapter_blocked_stops_without_another_developer_pass(
         self,
     ) -> None:

@@ -3559,16 +3559,7 @@ def record_chapter_human_input(
 ) -> Path:
     """Record explicit answers to the latest chapter assessment."""
     run = load_or_create_chapter_run(book_id, chapter_id)
-    human_input = load_run_chapter_human_input(
-        book_id,
-        chapter_id,
-        run,
-    )
-    assessment_id = (
-        human_input[1]["assessment_id"]
-        if human_input is not None
-        else run.get("last_assessment_id")
-    )
+    assessment_id = run.get("last_assessment_id")
     assessment_sha256 = run.get("last_assessment_sha256")
     questions = run.get("human_input_requests")
     if (
