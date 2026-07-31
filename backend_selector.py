@@ -3744,8 +3744,8 @@ def authorize_chapter_human_draft_acceptance(
         or assessment.get("chapter_id") != chapter_id
         or assessment.get("outcome") != "human_input_required"
         or assessment.get("research_request") is not None
-        or assessment.get("human_input_requests")
-        != run.get("human_input_requests")
+        or tuple(assessment.get("human_input_requests", []))
+        != decision_questions
         or not isinstance(assessment.get("draft_id"), str)
     ):
         raise RuntimeError(
