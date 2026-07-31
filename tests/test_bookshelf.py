@@ -69,7 +69,13 @@ class BookshelfTests(unittest.TestCase):
             },
         )
 
-    def create_final_book(self, book_id: str = "book-test") -> Path:
+    def create_final_book(
+        self,
+        book_id: str = "book-test",
+        source_receipt_ids: list[str] | None = None,
+    ) -> Path:
+        if source_receipt_ids is None:
+            source_receipt_ids = ["source-test"]
         book_directory = self.books_path / book_id
         book_directory.mkdir(parents=True)
         book_path = book_directory / "book.md"
@@ -129,8 +135,8 @@ class BookshelfTests(unittest.TestCase):
                 "candidate_sha256": candidate_sha256,
                 "chapter_count": 2,
                 "chapters": chapters,
-                "source_count": 1,
-                "source_receipt_ids": ["source-test"],
+                "source_count": len(source_receipt_ids),
+                "source_receipt_ids": source_receipt_ids,
                 "inputs": [
                     {
                         "role": "manifest",
@@ -178,8 +184,8 @@ class BookshelfTests(unittest.TestCase):
                 "editorial_review_sha256": self.file_sha256(editorial_path),
                 "chapter_count": 2,
                 "chapters": chapters,
-                "source_count": 1,
-                "source_receipt_ids": ["source-test"],
+                "source_count": len(source_receipt_ids),
+                "source_receipt_ids": source_receipt_ids,
             },
         )
         return assembly_path
@@ -234,6 +240,17 @@ class BookshelfTests(unittest.TestCase):
             result["catalog_path"].read_text(encoding="utf-8")
         )
         self.assertEqual(catalog["books"], [])
+
+    def test_final_book_without_sources_becomes_catalog_entry(self) -> None:
+        self.create_final_book(source_receipt_ids=[])
+
+        result = self.build()
+
+        catalog = json.loads(
+            result["catalog_path"].read_text(encoding="utf-8")
+        )
+        self.assertEqual(catalog["book_count"], 1)
+        self.assertEqual(catalog["books"][0]["source_count"], 0)
 
     def test_rebuild_is_idempotent_and_does_not_duplicate_books(self) -> None:
         self.create_final_book()

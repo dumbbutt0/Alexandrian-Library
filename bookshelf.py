@@ -44,11 +44,16 @@ def required_text(value: Any, label: str) -> str:
     return value.strip()
 
 
-def required_string_list(value: Any, label: str) -> list[str]:
+def required_string_list(
+    value: Any,
+    label: str,
+    *,
+    allow_empty: bool = False,
+) -> list[str]:
     """Return one required list of unique non-empty strings."""
     if (
         not isinstance(value, list)
-        or not value
+        or (not value and not allow_empty)
         or any(not isinstance(item, str) or not item.strip() for item in value)
     ):
         raise BookshelfError(f"{label} must contain non-empty strings.")
@@ -407,6 +412,7 @@ def project_final_book(
     source_receipt_ids = required_string_list(
         assembly.get("source_receipt_ids"),
         f"{book_id} source receipt IDs",
+        allow_empty=True,
     )
     if assembly.get("source_count") != len(source_receipt_ids):
         raise BookshelfError(f"Source count does not match for {book_id}.")
