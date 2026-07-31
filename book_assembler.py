@@ -203,8 +203,19 @@ def load_completed_chapter(
     if (
         not isinstance(final_draft, dict)
         or not isinstance(final_draft.get("draft_id"), str)
-        or run.get("final_pass_requested") is not True
-        or run.get("final_pass_source_draft_id") == final_draft.get("draft_id")
+    ):
+        raise BookAssemblyError(f"{chapter_id} final draft is invalid.")
+    human_draft_acceptance = (
+        run.get("completion_authority_kind")
+        == "human_draft_acceptance"
+    )
+    if (
+        not human_draft_acceptance
+        and (
+            run.get("final_pass_requested") is not True
+            or run.get("final_pass_source_draft_id")
+            == final_draft.get("draft_id")
+        )
     ):
         raise BookAssemblyError(
             f"{chapter_id} does not have a newer registered final-pass draft."
@@ -255,6 +266,91 @@ def load_completed_chapter(
         f"{chapter_id} final assessment",
     )
     assessment = assessment_document.get("assessment")
+    completion_authority_path = None
+    completion_authority_sha256 = None
+    completion_authority_file_sha256 = None
+    completion_human_input_path = None
+    completion_human_input_file_sha256 = None
+    if human_draft_acceptance:
+        completion_authority_path = resolve_project_file(
+            project_path,
+            run.get("completion_authority_path"),
+            book_directory,
+            f"{chapter_id} completion authority",
+        )
+        completion_authority = read_json_object(
+            completion_authority_path,
+            f"{chapter_id} completion authority",
+        )
+        completion_authority_sha256 = (
+            completion_authority.get("draft_acceptance_sha256")
+        )
+        completion_authority_file_sha256 = file_sha256(
+            completion_authority_path
+        )
+        completion_human_input_path = resolve_project_file(
+            project_path,
+            completion_authority.get("human_input_path"),
+            book_directory,
+            f"{chapter_id} human input",
+        )
+        human_input = read_json_object(
+            completion_human_input_path,
+            f"{chapter_id} human input",
+        )
+        completion_human_input_file_sha256 = file_sha256(
+            completion_human_input_path
+        )
+        if (
+            completion_authority.get("schema_version") != "1.0"
+            or completion_authority.get("book_id") != book_id
+            or completion_authority.get("chapter_id") != chapter_id
+            or completion_authority_sha256
+            != canonical_json_sha256(
+                completion_authority,
+                "draft_acceptance_sha256",
+            )
+            or run.get("completion_authority_sha256")
+            != completion_authority_sha256
+            or completion_authority.get("accepted_draft_id")
+            != final_draft["draft_id"]
+            or completion_authority.get("accepted_draft_path")
+            != final_draft["relative_path"]
+            or completion_authority.get("accepted_draft_sha256")
+            != final_draft["sha256"]
+            or run.get("accepted_final_draft_id")
+            != final_draft["draft_id"]
+            or run.get("accepted_final_draft_sha256")
+            != final_draft["sha256"]
+            or completion_authority.get("assessment_id")
+            != assessment_document.get("assessment_id")
+            or completion_authority.get("assessment_sha256")
+            != assessment_document.get("assessment_sha256")
+            or completion_authority.get("assessment_path")
+            != str(assessment_path.relative_to(project_path))
+            or completion_authority.get("workspace_sha256")
+            != workspace_document.get("workspace_sha256")
+            or completion_authority.get("workspace_path")
+            != str(workspace_path.relative_to(project_path))
+            or completion_authority.get("workspace_file_sha256")
+            != file_sha256(workspace_path)
+            or completion_authority.get("human_input_sha256")
+            != human_input.get("human_input_sha256")
+            or human_input.get("human_input_sha256")
+            != canonical_json_sha256(
+                human_input,
+                "human_input_sha256",
+            )
+            or human_input.get("assessment_id")
+            != assessment_document.get("assessment_id")
+            or human_input.get("assessment_sha256")
+            != assessment_document.get("assessment_sha256")
+            or completion_authority.get("provider_calls_added") != 0
+            or completion_authority.get("new_research_allowed") is not False
+        ):
+            raise BookAssemblyError(
+                f"{chapter_id} human draft acceptance is invalid."
+            )
     if (
         not isinstance(assessment, dict)
         or assessment_document.get("assessment_id") != assessment_path.stem
@@ -262,7 +358,14 @@ def load_completed_chapter(
         != canonical_json_sha256(assessment_document, "assessment_sha256")
         or assessment.get("book_id") != book_id
         or assessment.get("chapter_id") != chapter_id
-        or assessment.get("outcome") != "chapter_complete"
+        or (
+            assessment.get("outcome")
+            != (
+                "human_input_required"
+                if human_draft_acceptance
+                else "chapter_complete"
+            )
+        )
         or assessment.get("draft_id") != final_draft["draft_id"]
         or assessment.get("workspace_sha256")
         != workspace_document.get("workspace_sha256")
@@ -302,6 +405,15 @@ def load_completed_chapter(
         "assessment_sha256": assessment_document["assessment_sha256"],
         "run_path": run_path,
         "run_sha256": file_sha256(run_path),
+        "completion_authority_path": completion_authority_path,
+        "completion_authority_sha256": completion_authority_sha256,
+        "completion_authority_file_sha256": (
+            completion_authority_file_sha256
+        ),
+        "completion_human_input_path": completion_human_input_path,
+        "completion_human_input_file_sha256": (
+            completion_human_input_file_sha256
+        ),
         "markdown": markdown,
     }
 
@@ -667,8 +779,7 @@ def assemble_candidate_book(project_path: Path, book_id: str) -> dict:
         },
     ]
     for chapter in chapters:
-        inputs.extend(
-            [
+        chapter_inputs = [
                 {
                     "role": "chapter_draft",
                     "chapter_id": chapter["chapter_id"],
@@ -723,7 +834,36 @@ def assemble_candidate_book(project_path: Path, book_id: str) -> dict:
                     "sha256": chapter["run_sha256"],
                 },
             ]
-        )
+        if chapter["completion_authority_path"] is not None:
+            chapter_inputs.extend(
+                [
+                    {
+                        "role": "chapter_completion_authority",
+                        "chapter_id": chapter["chapter_id"],
+                        "path": str(
+                            chapter["completion_authority_path"].relative_to(
+                                project_path
+                            )
+                        ),
+                        "sha256": chapter[
+                            "completion_authority_file_sha256"
+                        ],
+                    },
+                    {
+                        "role": "chapter_human_input",
+                        "chapter_id": chapter["chapter_id"],
+                        "path": str(
+                            chapter[
+                                "completion_human_input_path"
+                            ].relative_to(project_path)
+                        ),
+                        "sha256": chapter[
+                            "completion_human_input_file_sha256"
+                        ],
+                    },
+                ]
+            )
+        inputs.extend(chapter_inputs)
     inputs.extend(
         {
             **record,

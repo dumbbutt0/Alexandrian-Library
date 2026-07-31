@@ -298,6 +298,146 @@ class BookAssemblyTests(unittest.TestCase):
         self.assertEqual(receipt["source_receipt_ids"], ["SRC1"])
         self.assertFalse((self.book_directory / "book.md").exists())
 
+    def test_assembles_exact_human_accepted_draft(self) -> None:
+        assessment_path = (
+            self.book_directory / "assessments" / "CH1" / "A2.json"
+        )
+        assessment_document = json.loads(
+            assessment_path.read_text(encoding="utf-8")
+        )
+        assessment_document["assessment"]["outcome"] = "human_input_required"
+        assessment_document["assessment"]["human_input_requests"] = [
+            "Choose whether to accept the exact assessed draft."
+        ]
+        assessment_document["assessment_sha256"] = (
+            book_assembler.canonical_json_sha256(
+                assessment_document,
+                "assessment_sha256",
+            )
+        )
+        self.write_json(assessment_path, assessment_document)
+
+        human_input_path = (
+            self.book_directory / "runs" / "CH1.A2.human-input.json"
+        )
+        human_input = {
+            "schema_version": "1.0",
+            "book_id": self.book_id,
+            "chapter_id": "CH1",
+            "assessment_id": "A2",
+            "assessment_sha256": assessment_document["assessment_sha256"],
+            "answers": [
+                {
+                    "question": (
+                        "Choose whether to accept the exact assessed draft."
+                    ),
+                    "answer": "Accept the exact assessed draft.",
+                }
+            ],
+        }
+        human_input["human_input_sha256"] = (
+            book_assembler.canonical_json_sha256(
+                human_input,
+                "human_input_sha256",
+            )
+        )
+        self.write_json(human_input_path, human_input)
+
+        workspace_path = (
+            self.book_directory
+            / "workspaces"
+            / "CH1"
+            / "versions"
+            / "v002.json"
+        )
+        workspace_document = json.loads(
+            workspace_path.read_text(encoding="utf-8")
+        )
+        final_draft = workspace_document["workspace"]["draft_versions"][-1]
+        acceptance_path = (
+            self.book_directory / "runs" / "CH1.A2.draft-acceptance.json"
+        )
+        acceptance = {
+            "schema_version": "1.0",
+            "book_id": self.book_id,
+            "chapter_id": "CH1",
+            "assessment_id": "A2",
+            "assessment_path": str(assessment_path.relative_to(self.project_path)),
+            "assessment_sha256": assessment_document["assessment_sha256"],
+            "human_input_path": str(
+                human_input_path.relative_to(self.project_path)
+            ),
+            "human_input_sha256": human_input["human_input_sha256"],
+            "workspace_path": str(workspace_path.relative_to(self.project_path)),
+            "workspace_sha256": workspace_document["workspace_sha256"],
+            "workspace_file_sha256": book_assembler.file_sha256(
+                workspace_path
+            ),
+            "accepted_draft_id": final_draft["draft_id"],
+            "accepted_draft_path": final_draft["relative_path"],
+            "accepted_draft_sha256": final_draft["sha256"],
+            "provider_calls_added": 0,
+            "new_research_allowed": False,
+        }
+        acceptance["draft_acceptance_sha256"] = (
+            book_assembler.canonical_json_sha256(
+                acceptance,
+                "draft_acceptance_sha256",
+            )
+        )
+        self.write_json(acceptance_path, acceptance)
+
+        run_path = self.book_directory / "runs" / "CH1.json"
+        run = json.loads(run_path.read_text(encoding="utf-8"))
+        run.update(
+            {
+                "final_pass_requested": False,
+                "final_pass_source_draft_id": None,
+                "last_assessment_sha256": assessment_document[
+                    "assessment_sha256"
+                ],
+                "completion_authority_kind": "human_draft_acceptance",
+                "completion_authority_path": str(
+                    acceptance_path.relative_to(self.project_path)
+                ),
+                "completion_authority_sha256": acceptance[
+                    "draft_acceptance_sha256"
+                ],
+                "accepted_final_draft_id": final_draft["draft_id"],
+                "accepted_final_draft_sha256": final_draft["sha256"],
+            }
+        )
+        self.write_json(run_path, run)
+
+        receipt = book_assembler.assemble_candidate_book(
+            self.project_path,
+            self.book_id,
+        )
+
+        chapter_one_inputs = [
+            record
+            for record in receipt["inputs"]
+            if record.get("chapter_id") == "CH1"
+        ]
+        authority_input = next(
+            record
+            for record in chapter_one_inputs
+            if record["role"] == "chapter_completion_authority"
+        )
+        human_input_record = next(
+            record
+            for record in chapter_one_inputs
+            if record["role"] == "chapter_human_input"
+        )
+        self.assertEqual(
+            authority_input["sha256"],
+            book_assembler.file_sha256(acceptance_path),
+        )
+        self.assertEqual(
+            human_input_record["sha256"],
+            book_assembler.file_sha256(human_input_path),
+        )
+
     def test_rejects_incomplete_chapter(self) -> None:
         run_path = self.book_directory / "runs" / "CH2.json"
         run = json.loads(run_path.read_text(encoding="utf-8"))
