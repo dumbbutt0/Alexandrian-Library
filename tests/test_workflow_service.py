@@ -56,6 +56,13 @@ class WorkflowServiceTests(unittest.TestCase):
         for active_patch in self.patches():
             stack.enter_context(active_patch)
         stack.enter_context(
+            patch.object(
+                backend_selector,
+                "find_backend_program",
+                return_value="/usr/bin/codex",
+            )
+        )
+        stack.enter_context(
             patch("builtins.input", side_effect=AssertionError("input() called"))
         )
         return stack
@@ -92,6 +99,81 @@ class WorkflowServiceTests(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def enter_chapter_stage(
+        self,
+        conversation_id: str,
+        *,
+        status: str,
+        assessment_id: str | None = None,
+        human_input_requests: list[dict] | None = None,
+        stop_reason: str | None = None,
+    ) -> tuple[str, dict]:
+        """Create the smallest canonical, restartable chapter workflow."""
+        self.write_ready_review(conversation_id)
+        review_id = "review-1"
+        self.decisions_path.mkdir(parents=True, exist_ok=True)
+        (self.decisions_path / f"{conversation_id}.json").write_text(
+            json.dumps(
+                {
+                    "review_id": review_id,
+                    "conversation_id": conversation_id,
+                    "book_planning_gate": "ready",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (self.knowledge_path / "nodes" / review_id).mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+        book_id = f"book-{conversation_id}"
+        book_directory = self.books_path / book_id
+        book_directory.mkdir(parents=True, exist_ok=True)
+        (book_directory / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "book_id": book_id,
+                    "chapter_plan": [
+                        {
+                            "chapter_id": "CH1",
+                            "title": "A bounded chapter",
+                            "readiness": "ready_to_draft",
+                            "material_disposition": "include",
+                            "dependencies": [],
+                        }
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (book_directory / "outline.md").write_text(
+            "# Outline\n",
+            encoding="utf-8",
+        )
+        (book_directory / "approval.json").write_text(
+            json.dumps(
+                {
+                    "book_id": book_id,
+                    "chapter_drafting_gate": "ready",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        run = backend_selector.load_or_create_chapter_run(book_id, "CH1")
+        run.update(
+            {
+                "status": status,
+                "last_assessment_id": assessment_id,
+                "human_input_requests": human_input_requests or [],
+                "stop_reason": stop_reason,
+            }
+        )
+        backend_selector.save_chapter_run(run)
+        return book_id, run
+
     def test_create_binds_provider_and_returns_structured_active_hold(self) -> None:
         with self.active_patches():
             created = self.create()
@@ -110,6 +192,20 @@ class WorkflowServiceTests(unittest.TestCase):
             [event["type"] for event in events],
             ["conversation_started", "backend_selected"],
         )
+
+    def test_create_rejects_unavailable_provider_before_writing(self) -> None:
+        with self.active_patches(), patch.object(
+            backend_selector,
+            "find_backend_program",
+            return_value=None,
+        ):
+            with self.assertRaises(
+                workflow_service.WorkflowOperationError
+            ) as caught:
+                workflow_service.create_conversation("codex", "safe")
+
+        self.assertEqual(caught.exception.code, "provider_unavailable")
+        self.assertEqual(list(self.conversations_path.glob("*.jsonl")), [])
 
     def test_submit_turn_reuses_bound_provider_and_saves_one_turn(self) -> None:
         with self.active_patches(), patch.object(
@@ -501,6 +597,166 @@ class WorkflowServiceTests(unittest.TestCase):
             "research_source_permissions",
         )
         capture.assert_not_called()
+
+    def test_chapter_source_checkpoint_is_reconstructed_after_restart(self) -> None:
+        with self.active_patches(), patch.object(
+            backend_selector,
+            "capture_backend_response",
+        ) as capture:
+            created = self.create()
+            conversation_id = created["conversation_id"]
+            workflow_service.finish_conversation(conversation_id)
+            book_id, _ = self.enter_chapter_stage(
+                conversation_id,
+                status="source_approval_required",
+                assessment_id="A1",
+                stop_reason="A source requires permission.",
+            )
+            session_path = backend_selector.chapter_research_session_path(
+                book_id,
+                "CH1",
+                "A1",
+            )
+            session_path.parent.mkdir(parents=True, exist_ok=True)
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "book_id": book_id,
+                        "chapter_id": "CH1",
+                        "assessment_id": "A1",
+                        "research_mode": "safe",
+                        "pending_requests": [
+                            {
+                                "request_id": "SRC1",
+                                "domain": "example.org",
+                                "url": "https://example.org/source",
+                            }
+                        ],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            inspected = workflow_service.inspect_workflow(conversation_id)
+            restarted = workflow_service.inspect_workflow(conversation_id)
+
+        self.assertEqual(inspected, restarted)
+        self.assertEqual(inspected["stage"], "chapter_development")
+        self.assertEqual(
+            inspected["pending_action"]["decision_kind"],
+            "chapter_source_permissions",
+        )
+        self.assertEqual(
+            inspected["pending_action"]["context"]["pending_requests"][0][
+                "request_id"
+            ],
+            "SRC1",
+        )
+        capture.assert_not_called()
+
+    def test_chapter_human_input_is_reconstructed_with_exact_questions(self) -> None:
+        questions = ["Which meaning should the chapter preserve?"]
+        with self.active_patches():
+            created = self.create()
+            conversation_id = created["conversation_id"]
+            workflow_service.finish_conversation(conversation_id)
+            self.enter_chapter_stage(
+                conversation_id,
+                status="human_input_required",
+                assessment_id="A2",
+                human_input_requests=questions,
+            )
+            inspected = workflow_service.inspect_workflow(conversation_id)
+
+        self.assertEqual(
+            inspected["pending_action"]["decision_kind"],
+            "chapter_human_input",
+        )
+        self.assertEqual(
+            inspected["pending_action"]["context"]["questions"],
+            questions,
+        )
+
+    def test_reconstructed_chapter_hold_blocks_advance_and_wrong_decision(self) -> None:
+        with self.active_patches(), patch.object(
+            backend_selector,
+            "find_backend_program",
+            return_value="/usr/bin/codex",
+        ), patch.object(
+            backend_selector,
+            "continue_book_workflow",
+        ) as controller:
+            created = self.create()
+            conversation_id = created["conversation_id"]
+            workflow_service.finish_conversation(conversation_id)
+            book_id, _ = self.enter_chapter_stage(
+                conversation_id,
+                status="human_input_required",
+                assessment_id="A3",
+                human_input_requests=["Clarify this."],
+            )
+            current = workflow_service.inspect_workflow(conversation_id)
+            with self.assertRaises(
+                workflow_service.WorkflowConflictError
+            ) as advance_error:
+                workflow_service.advance_workflow(
+                    conversation_id,
+                    expected_stage=current["stage"],
+                    expected_revision=current["revision"],
+                )
+            with self.assertRaises(
+                workflow_service.WorkflowConflictError
+            ) as decision_error:
+                workflow_service.submit_checkpoint_decision(
+                    conversation_id,
+                    {
+                        "kind": "chapter_recovery",
+                        "book_id": book_id,
+                        "chapter_id": "CH1",
+                        "approval_note": "This is not the pending authority.",
+                    },
+                    expected_stage=current["stage"],
+                    expected_revision=current["revision"],
+                )
+
+        self.assertEqual(advance_error.exception.code, "advance_not_allowed")
+        self.assertEqual(
+            decision_error.exception.code,
+            "checkpoint_not_pending",
+        )
+        controller.assert_not_called()
+
+    def test_terminal_chapter_status_is_a_non_runnable_hold(self) -> None:
+        with self.active_patches(), patch.object(
+            backend_selector,
+            "continue_book_workflow",
+        ) as controller:
+            created = self.create()
+            conversation_id = created["conversation_id"]
+            workflow_service.finish_conversation(conversation_id)
+            self.enter_chapter_stage(
+                conversation_id,
+                status="research_limit_reached",
+                stop_reason="The bounded research budget was exhausted.",
+            )
+            current = workflow_service.inspect_workflow(conversation_id)
+            with self.assertRaises(
+                workflow_service.WorkflowConflictError
+            ) as caught:
+                workflow_service.advance_workflow(
+                    conversation_id,
+                    expected_stage=current["stage"],
+                    expected_revision=current["revision"],
+                )
+
+        self.assertEqual(current["pending_action"]["kind"], "terminal_hold")
+        self.assertEqual(
+            current["pending_action"]["status"],
+            "research_limit_reached",
+        )
+        self.assertEqual(caught.exception.code, "advance_not_allowed")
+        controller.assert_not_called()
 
 
 if __name__ == "__main__":

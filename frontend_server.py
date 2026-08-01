@@ -21,10 +21,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
+import environment_check
 import workflow_service
 
 
-FRONTEND_VERSION = "0.1.0"
+FRONTEND_VERSION = "1.0.0"
 API_VERSION = "v1"
 MAX_JSON_REQUEST_BYTES = 1_048_576
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
@@ -35,6 +36,10 @@ TURN_ROUTE = re.compile(rf"^/api/v1/conversations/{CONVERSATION_ID}/turns$")
 FINISH_ROUTE = re.compile(rf"^/api/v1/conversations/{CONVERSATION_ID}/finish$")
 DECISION_ROUTE = re.compile(rf"^/api/v1/workflows/{CONVERSATION_ID}/decisions$")
 ADVANCE_ROUTE = re.compile(rf"^/api/v1/workflows/{CONVERSATION_ID}/advance$")
+BOOK_ROUTE = re.compile(r"^/api/v1/books/([A-Za-z0-9][A-Za-z0-9._-]{0,199})$")
+PROVENANCE_ROUTE = re.compile(
+    r"^/api/v1/books/([A-Za-z0-9][A-Za-z0-9._-]{0,199})/provenance$"
+)
 STATIC_FILES = {
     "/": "index.html",
     "/index.html": "index.html",
@@ -93,6 +98,21 @@ def _file_hash(path: Path) -> str:
 def load_catalog(project_path: Path) -> dict[str, Any]:
     """Load the existing deterministic bookshelf projection without rebuilding it."""
     catalog_path = project_path / "data" / "bookshelf" / "catalog.json"
+    assembly_paths = sorted(
+        (project_path / "data" / "books").glob("*/assembly.json")
+    )
+    if not catalog_path.is_file():
+        if assembly_paths:
+            raise FrontendDataError(
+                "Final assemblies exist, but the bookshelf catalog is missing."
+            )
+        return {
+            "schema_version": "1.0",
+            "generated_at": None,
+            "book_count": 0,
+            "books": [],
+            "projection_status": "empty_bookshelf",
+        }
     catalog = _json_object(catalog_path, "Bookshelf catalog")
     if catalog.get("schema_version") != "1.0":
         raise FrontendDataError("Unsupported bookshelf schema.")
@@ -113,6 +133,11 @@ def load_catalog(project_path: Path) -> dict[str, Any]:
             raise FrontendDataError(f"Bookshelf contains a non-final book: {book_id}")
         _required_text(book.get("title"), f"Title for {book_id}")
         seen_ids.add(book_id)
+    assembly_ids = {path.parent.name for path in assembly_paths}
+    if seen_ids != assembly_ids:
+        raise FrontendDataError(
+            "Bookshelf entries do not exactly match finalized assemblies."
+        )
     return catalog
 
 
@@ -145,6 +170,30 @@ def load_book(project_path: Path, book_id: str) -> dict[str, Any]:
     expected_hash = _required_text(entry.get("book_sha256"), "Book SHA-256")
     if len(expected_hash) != 64 or _file_hash(book_path) != expected_hash:
         raise FrontendDataError("Final book hash does not match the bookshelf.")
+    assembly_path = _resolve_book_path(
+        project_path,
+        entry.get("assembly_path"),
+    )
+    expected_assembly_hash = _required_text(
+        entry.get("assembly_sha256"),
+        "Assembly SHA-256",
+    )
+    if (
+        len(expected_assembly_hash) != 64
+        or _file_hash(assembly_path) != expected_assembly_hash
+    ):
+        raise FrontendDataError(
+            "Final assembly hash does not match the bookshelf."
+        )
+    assembly = _json_object(assembly_path, "Final assembly")
+    if (
+        assembly.get("book_id") != book_id
+        or assembly.get("lifecycle_status") != "final"
+        or assembly.get("book_sha256") != expected_hash
+    ):
+        raise FrontendDataError(
+            "Final assembly identity does not match the bookshelf."
+        )
     try:
         markdown = book_path.read_text(encoding="utf-8")
     except OSError as error:
@@ -155,6 +204,160 @@ def load_book(project_path: Path, book_id: str) -> dict[str, Any]:
         "book": entry,
         "markdown": markdown,
         "verified_sha256": expected_hash,
+        "assembly": {
+            "assembly_id": assembly.get("assembly_id"),
+            "assembled_at": assembly.get("assembled_at"),
+            "source_count": assembly.get("source_count"),
+            "source_receipt_ids": assembly.get("source_receipt_ids", []),
+            "verified_sha256": expected_assembly_hash,
+        },
+    }
+
+
+def _source_receipt_identity(document: dict[str, Any]) -> str | None:
+    receipt = document.get("receipt")
+    if isinstance(receipt, dict):
+        value = receipt.get("receipt_id")
+    else:
+        value = document.get("receipt_id")
+    return value if isinstance(value, str) and value else None
+
+
+def _source_receipt_summary(document: dict[str, Any]) -> dict[str, Any]:
+    nested = document.get("receipt")
+    source = nested if isinstance(nested, dict) else document
+    return {
+        "receipt_id": _source_receipt_identity(document),
+        "title": source.get("title"),
+        "domain": source.get("domain"),
+        "requested_url": source.get("requested_url"),
+        "final_url": source.get("final_url"),
+        "retrieved_at": source.get("retrieved_at"),
+        "content_type": source.get("content_type"),
+        "content_sha256": source.get("content_sha256")
+        or source.get("source_content_sha256"),
+        "content_truncated": source.get("content_truncated")
+        if "content_truncated" in source
+        else source.get("source_content_truncated"),
+        "claim_checked": source.get("claim_checked"),
+        "finding": source.get("finding"),
+        "assessment": source.get("assessment"),
+        "limitations": source.get("limitations"),
+        "research_question": source.get("research_question"),
+    }
+
+
+def load_book_provenance(project_path: Path, book_id: str) -> dict[str, Any]:
+    """Resolve exact source IDs for one already verified final publication."""
+    book = load_book(project_path, book_id)
+    source_ids = book["assembly"]["source_receipt_ids"]
+    if not isinstance(source_ids, list) or any(
+        not isinstance(receipt_id, str) or not receipt_id
+        for receipt_id in source_ids
+    ):
+        raise FrontendDataError("Final assembly source IDs are invalid.")
+    if book["assembly"]["source_count"] != len(source_ids):
+        raise FrontendDataError("Final assembly source count is invalid.")
+
+    candidate_paths = list(
+        (project_path / "data" / "evidence").glob("**/*.json")
+    ) + list(
+        (project_path / "data" / "books" / book_id / "research").glob(
+            "**/source_receipts/**/*.json"
+        )
+    )
+    by_id: dict[str, list[dict[str, Any]]] = {}
+    for path in candidate_paths:
+        document = _json_object(path, "Source receipt")
+        receipt_id = _source_receipt_identity(document)
+        if receipt_id in source_ids:
+            by_id.setdefault(receipt_id, []).append(document)
+
+    # Early V1 runs embedded some complete source records in immutable chapter
+    # research packets before the dedicated receipt directory was introduced.
+    # Use that structured record only when no standalone canonical receipt
+    # exists. The final assembly's exact receipt ID remains authoritative.
+    missing_ids = set(source_ids) - set(by_id)
+    if missing_ids:
+        packet_paths = sorted(
+            (project_path / "data" / "books" / book_id / "research").glob(
+                "*/R*.json"
+            )
+        )
+        for path in packet_paths:
+            packet = _json_object(path, "Chapter research packet")
+            sources = packet.get("sources")
+            if not isinstance(sources, list):
+                continue
+            for source in sources:
+                if not isinstance(source, dict):
+                    continue
+                receipt_id = _source_receipt_identity(source)
+                if receipt_id in missing_ids:
+                    by_id.setdefault(receipt_id, []).append(source)
+
+    records = []
+    for receipt_id in source_ids:
+        matches = by_id.get(receipt_id, [])
+        if len(matches) != 1:
+            raise FrontendDataError(
+                f"Source receipt {receipt_id} did not resolve exactly once."
+            )
+        records.append(_source_receipt_summary(matches[0]))
+    return {
+        "schema_version": "1.0",
+        "book_id": book_id,
+        "book_sha256": book["verified_sha256"],
+        "assembly": book["assembly"],
+        "source_count": len(records),
+        "sources": records,
+    }
+
+
+def build_frontend_readiness(
+    project_path: Path,
+    *,
+    check_runtime: bool,
+) -> dict[str, Any]:
+    """Return provider and full-workflow readiness without changing state."""
+    results = environment_check.collect_environment_results(
+        project_path,
+        check_runtime=check_runtime,
+    )
+    result_by_label = {result.label: result for result in results}
+    runnable = result_by_label.get("Runnable full-workflow host")
+    configured = set()
+    if runnable is not None and runnable.status == "available":
+        prefix = "Configured: "
+        if runnable.detail.startswith(prefix):
+            configured = {
+                value.strip()
+                for value in runnable.detail.removeprefix(prefix).split(",")
+                if value.strip()
+            }
+    providers = {}
+    for provider in environment_check.SUPPORTED_BACKENDS:
+        result = result_by_label.get(f"Backend: {provider}")
+        installed = result is not None and result.status == "available"
+        providers[provider] = {
+            "installed": installed,
+            "full_workflow_ready": provider in configured,
+            "detail": result.detail if result is not None else "Not checked.",
+        }
+    required_failures = [
+        result.label
+        for result in results
+        if result.required and result.status == "missing"
+    ]
+    return {
+        "schema_version": "1.0",
+        "status": "ready" if configured and not required_failures else "degraded",
+        "frontend_version": FRONTEND_VERSION,
+        "api_version": API_VERSION,
+        "providers": providers,
+        "runnable_providers": sorted(configured),
+        "required_failures": required_failures,
+        "runtime_checked": check_runtime,
     }
 
 
@@ -163,9 +366,9 @@ class FrontendRequestHandler(BaseHTTPRequestHandler):
 
     project_path: Path
     frontend_path: Path
-    mutation_locks: dict[str, threading.Lock]
-    mutation_locks_guard: threading.Lock
+    mutation_lock: threading.Lock
     allowed_hosts: set[str]
+    readiness: dict[str, Any]
 
     def log_message(self, format: str, *args: object) -> None:
         return
@@ -181,7 +384,12 @@ class FrontendRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; img-src 'self' data:; style-src 'self'; "
+            "script-src 'self'; connect-src 'self'; frame-ancestors 'none'",
+        )
         self.end_headers()
         self.wfile.write(body)
 
@@ -309,21 +517,15 @@ class FrontendRequestHandler(BaseHTTPRequestHandler):
 
     def _run_mutation(
         self,
-        conversation_id: str,
         operation: Any,
         *,
         success_status: HTTPStatus = HTTPStatus.OK,
     ) -> None:
-        with self.mutation_locks_guard:
-            lock = self.mutation_locks.setdefault(
-                conversation_id,
-                threading.Lock(),
-            )
-        if not lock.acquire(blocking=False):
+        if not self.mutation_lock.acquire(blocking=False):
             self._error(
                 HTTPStatus.CONFLICT,
                 "mutation_in_progress",
-                "Another mutation is already active for this conversation.",
+                "Another Library mutation is already active.",
             )
             return
         try:
@@ -333,21 +535,15 @@ class FrontendRequestHandler(BaseHTTPRequestHandler):
         else:
             self._send_json(result, success_status)
         finally:
-            lock.release()
+            self.mutation_lock.release()
 
     def do_GET(self) -> None:
         if not self._request_context_is_valid():
             return
         path = unquote(urlsplit(self.path).path)
         try:
-            if path == "/api/health":
-                self._send_json(
-                    {
-                        "status": "ready",
-                        "frontend_version": FRONTEND_VERSION,
-                        "backend_mode": "workflow_service_v1",
-                    }
-                )
+            if path in {"/api/health", "/api/v1/readiness"}:
+                self._send_json(self.readiness)
                 return
             if path == "/api/v1/workflows":
                 self._send_json(workflow_service.list_resumable_workflows())
@@ -363,11 +559,22 @@ class FrontendRequestHandler(BaseHTTPRequestHandler):
                     return
                 self._send_json(workflow)
                 return
-            if path == "/api/catalog":
+            if path == "/api/v1/catalog":
                 self._send_json(load_catalog(self.project_path))
                 return
-            if path.startswith("/api/books/"):
-                book_id = path.removeprefix("/api/books/")
+            provenance_match = PROVENANCE_ROUTE.fullmatch(path)
+            if provenance_match:
+                book_id = provenance_match.group(1)
+                try:
+                    payload = load_book_provenance(self.project_path, book_id)
+                except KeyError:
+                    self._error(HTTPStatus.NOT_FOUND, "book_not_found", "That finalized book is not on the shelf.")
+                    return
+                self._send_json(payload)
+                return
+            book_match = BOOK_ROUTE.fullmatch(path)
+            if book_match:
+                book_id = book_match.group(1)
                 try:
                     payload = load_book(self.project_path, book_id)
                 except KeyError:
@@ -401,15 +608,24 @@ class FrontendRequestHandler(BaseHTTPRequestHandler):
                 {"provider", "research_mode"},
             ):
                 return
-            try:
-                result = workflow_service.create_conversation(
-                    payload["provider"],
-                    payload["research_mode"],
+            provider = payload["provider"]
+            provider_state = self.readiness.get("providers", {}).get(provider)
+            if not isinstance(provider_state, dict) or not provider_state.get(
+                "full_workflow_ready"
+            ):
+                self._error(
+                    HTTPStatus.CONFLICT,
+                    "provider_not_ready",
+                    "The selected provider has no verified full-workflow MCP configuration.",
                 )
-            except workflow_service.WorkflowServiceError as error:
-                self._service_error(error)
                 return
-            self._send_json(result, HTTPStatus.CREATED)
+            self._run_mutation(
+                lambda: workflow_service.create_conversation(
+                    provider,
+                    payload["research_mode"],
+                ),
+                success_status=HTTPStatus.CREATED,
+            )
             return
 
         turn_match = TURN_ROUTE.fullmatch(path)
@@ -422,7 +638,6 @@ class FrontendRequestHandler(BaseHTTPRequestHandler):
                 return
             conversation_id = turn_match.group(1)
             self._run_mutation(
-                conversation_id,
                 lambda: workflow_service.submit_conversation_turn(
                     conversation_id,
                     payload["content"],
@@ -443,7 +658,6 @@ class FrontendRequestHandler(BaseHTTPRequestHandler):
                 return
             conversation_id = finish_match.group(1)
             self._run_mutation(
-                conversation_id,
                 lambda: workflow_service.finish_conversation(
                     conversation_id,
                     payload.get("research_mode"),
@@ -463,7 +677,6 @@ class FrontendRequestHandler(BaseHTTPRequestHandler):
                 return
             conversation_id = decision_match.group(1)
             self._run_mutation(
-                conversation_id,
                 lambda: workflow_service.submit_checkpoint_decision(
                     conversation_id,
                     payload["decision"],
@@ -483,7 +696,6 @@ class FrontendRequestHandler(BaseHTTPRequestHandler):
                 return
             conversation_id = advance_match.group(1)
             self._run_mutation(
-                conversation_id,
                 lambda: workflow_service.advance_workflow(
                     conversation_id,
                     expected_stage=payload["expected_stage"],
@@ -492,18 +704,6 @@ class FrontendRequestHandler(BaseHTTPRequestHandler):
             )
             return
 
-        if path == "/api/inquiries":
-            self._send_json(
-                {
-                    "status": "backend_handoff_not_wired",
-                    "message": (
-                        "The current CLI research workflow remains authoritative. "
-                        "Frontend launch will be enabled only after its durable handoff contract is approved."
-                    ),
-                },
-                HTTPStatus.NOT_IMPLEMENTED,
-            )
-            return
         self._error(HTTPStatus.NOT_FOUND, "not_found", "The requested action does not exist.")
 
 
@@ -511,6 +711,8 @@ def make_server(
     project_path: Path,
     host: str = "127.0.0.1",
     port: int = 8765,
+    *,
+    check_runtime: bool = False,
 ) -> ThreadingHTTPServer:
     """Create a local-only server rooted at one repository."""
     allowed_hosts = local_bind_hosts()
@@ -530,9 +732,12 @@ def make_server(
         {
             "project_path": resolved_project,
             "frontend_path": frontend_path,
-            "mutation_locks": {},
-            "mutation_locks_guard": threading.Lock(),
+            "mutation_lock": threading.Lock(),
             "allowed_hosts": allowed_hosts,
+            "readiness": build_frontend_readiness(
+                resolved_project,
+                check_runtime=check_runtime,
+            ),
         },
     )
     return ThreadingHTTPServer((host, port), handler)
@@ -549,7 +754,12 @@ def parse_arguments() -> argparse.Namespace:
 def main() -> int:
     arguments = parse_arguments()
     project_path = Path(__file__).resolve().parent
-    server = make_server(project_path, arguments.host, arguments.port)
+    server = make_server(
+        project_path,
+        arguments.host,
+        arguments.port,
+        check_runtime=True,
+    )
     host, port = server.server_address[:2]
     url = f"http://{host}:{port}"
     print(f"Inquirion Library frontend: {url}", flush=True)

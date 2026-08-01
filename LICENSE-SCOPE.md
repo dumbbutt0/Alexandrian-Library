@@ -25,6 +25,8 @@ Attribution-ShareAlike 4.0 International license:
 - Material under `docs/`
 - `next_steps.txt`
 - Public primers and example books intentionally placed under `examples/`
+- Project-authored cover art under `frontend/assets/`
+- Project-authored image-generation prompts under `frontend/assets/`
 
 When sharing or adapting this material, credit the Alexandrian Library
 contributors, link to the source when reasonably practical, identify changes,

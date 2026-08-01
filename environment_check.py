@@ -57,6 +57,14 @@ REQUIRED_LICENSE_FILES = (
     "LICENSE-SCOPE.md",
     "LICENSES/CC-BY-SA-4.0.txt",
 )
+REQUIRED_APPLICATION_FILES = (
+    "backend_selector.py",
+    "workflow_service.py",
+    "frontend_server.py",
+    "frontend/index.html",
+    "frontend/styles.css",
+    "frontend/app.js",
+)
 REQUIRED_POLICY_FIELDS = {
     "approved_domains",
     "allow_subdomains",
@@ -103,7 +111,7 @@ CODEX_READY = "codex_ready"
 
 @dataclass(frozen=True)
 class CheckResult:
-    """One environment fact and whether it blocks the V0.1 workflow."""
+    """One environment fact and whether it blocks the V1 workflow."""
 
     label: str
     status: str
@@ -146,7 +154,7 @@ def _dependency_result(
             f"Python dependency: {distribution}",
             "missing",
             (
-                f"Installed {version}; V0.1 requires "
+                f"Installed {version}; V1 requires "
                 f">={'.'.join(str(part) for part in minimum)},"
                 f"<{maximum_major}."
             ),
@@ -677,7 +685,7 @@ def collect_environment_results(
     project_path: Path,
     check_runtime: bool = False,
 ) -> list[CheckResult]:
-    """Collect V0.1 readiness facts without network or model calls."""
+    """Collect V1 readiness facts without network or model calls."""
     project_path = project_path.resolve()
     results: list[CheckResult] = []
 
@@ -695,6 +703,13 @@ def collect_environment_results(
     results.append(
         _required_file(project_path / "pyproject.toml", "Project metadata")
     )
+    for relative_path in REQUIRED_APPLICATION_FILES:
+        results.append(
+            _required_file(
+                project_path / relative_path,
+                f"Application file: {relative_path}",
+            )
+        )
     missing_license_files = [
         relative_path
         for relative_path in REQUIRED_LICENSE_FILES
@@ -888,7 +903,7 @@ def collect_environment_results(
 
 def print_environment_report(results: list[CheckResult]) -> int:
     """Print one report and return nonzero only for required failures."""
-    print("Alexandrian Library V0.1 environment check\n")
+    print("Alexandrian Library V1 environment check\n")
     for result in results:
         print(f"[{result.status.upper()}] {result.label}: {result.detail}")
 
@@ -901,12 +916,12 @@ def print_environment_report(results: list[CheckResult]) -> int:
         print(f"\nResult: not ready ({len(failures)} required check(s) failed).")
         return 1
 
-    print("\nResult: ready for the supported local V0.1 workflow.")
+    print("\nResult: ready for the supported local V1 workflow.")
     return 0
 
 
 def run_environment_check(project_path: Path) -> int:
-    """Run and display the complete V0.1 environment and startup check."""
+    """Run and display the complete V1 environment and startup check."""
     return print_environment_report(
         collect_environment_results(project_path, check_runtime=True)
     )

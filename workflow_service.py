@@ -56,6 +56,19 @@ TERMINAL_HOLD_STAGES = {
     "editorial_held",
 }
 
+CHAPTER_TERMINAL_STATUSES = {
+    "assessment_extension_consumed",
+    "controller_no_progress",
+    "controller_retry_exhausted",
+    "final_pass_repair_failed",
+    "insufficient_closeout_budget",
+    "recovery_call_limit_reached",
+    "research_access_recovery_failed",
+    "research_incomplete",
+    "research_limit_reached",
+    "stalled",
+}
+
 
 def _conversation_path(conversation_id: str) -> Path:
     if (
@@ -223,7 +236,266 @@ def _checkpoint_pending_action(
             "decision_mode": "automatic",
             "workflow_policy_version": backend.WORKFLOW_POLICY_VERSION,
         }
+    elif stage == "chapter_development":
+        chapter_action = _chapter_pending_action(conversation_id)
+        if chapter_action is not None:
+            return chapter_action
     return action
+
+
+def _active_chapter_run(
+    conversation_id: str,
+) -> tuple[str, str, dict[str, Any]] | None:
+    """Find the first dependency-ready, incomplete chapter with durable state."""
+    book_id = f"book-{conversation_id}"
+    manifest = backend.load_workflow_json(
+        backend.BOOKS_PATH / book_id / "manifest.json",
+        "Book manifest",
+    )
+    completed: set[str] = set()
+    for chapter in manifest.get("chapter_plan", []):
+        if (
+            not isinstance(chapter, dict)
+            or chapter.get("material_disposition")
+            not in {"include", "appendix"}
+        ):
+            continue
+        chapter_id = chapter.get("chapter_id")
+        if not isinstance(chapter_id, str):
+            raise RuntimeError("Approved book plan has an invalid chapter.")
+        run_path = backend.chapter_run_path(book_id, chapter_id)
+        if run_path.is_file():
+            run = backend.load_workflow_json(
+                run_path,
+                f"{chapter_id} run state",
+            )
+            if run.get("status") == "chapter_complete":
+                completed.add(chapter_id)
+                continue
+        else:
+            run = None
+        if not backend.manifest_chapter_is_draft_ready(chapter):
+            continue
+        dependencies = chapter.get("dependencies", [])
+        if (
+            not isinstance(dependencies, list)
+            or any(not isinstance(item, str) for item in dependencies)
+        ):
+            raise RuntimeError(
+                f"{chapter_id} has invalid chapter dependencies."
+            )
+        if not set(dependencies).issubset(completed):
+            continue
+        if run is None:
+            return None
+        return book_id, chapter_id, run
+    return None
+
+
+def _human_chapter_action(
+    decision_kind: str,
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "kind": "human_checkpoint",
+        "stage": "chapter_development",
+        "decision_kind": decision_kind,
+        "command_available": True,
+        "context": context,
+    }
+
+
+def _chapter_retry_action(
+    book_id: str,
+    chapter_id: str,
+) -> dict[str, Any] | None:
+    """Project a durable retry or artifact-review hold from the ledger."""
+    snapshot = backend.build_chapter_controller_snapshot(
+        book_id,
+        chapter_id,
+    )
+    decision = backend.chapter_controller.decide_next_action(snapshot)
+    ledger = backend.chapter_controller.ChapterEventLedger(
+        backend.chapter_controller_ledger_path(book_id, chapter_id)
+    )
+    events = ledger.read() if ledger.path.is_file() else []
+    active = ledger.active_contract(events)
+    if active is not None:
+        contract_id = active["payload"]["contract_id"]
+        review = ledger.artifact_review_requirement(contract_id)
+        if review is not None:
+            return _human_chapter_action(
+                "chapter_artifact_review",
+                {
+                    "book_id": book_id,
+                    "chapter_id": chapter_id,
+                    "failed_contract_id": contract_id,
+                    "call_kind": review.get("call_kind"),
+                    "reason": review.get("message"),
+                    "artifact_changes": review.get(
+                        "artifact_changes",
+                        [],
+                    ),
+                },
+            )
+    requirement = ledger.retry_requirement(snapshot, decision)
+    if requirement is None:
+        return None
+    if requirement.get("status") == "authorization_required":
+        failed_contract_id = requirement["failed_contract_id"]
+        failure = next(
+            (
+                event
+                for event in reversed(events)
+                if event.get("event_type")
+                in {"contract_failed", "contract_reconciled"}
+                and event.get("payload", {}).get("contract_id")
+                == failed_contract_id
+            ),
+            None,
+        )
+        payload = failure.get("payload", {}) if failure else {}
+        return _human_chapter_action(
+            "chapter_retry",
+            {
+                "book_id": book_id,
+                "chapter_id": chapter_id,
+                "failed_contract_id": failed_contract_id,
+                "reason": payload.get("message")
+                or payload.get("note")
+                or "The prior chapter action failed.",
+            },
+        )
+    return {
+        "kind": "terminal_hold",
+        "stage": "chapter_development",
+        "status": "controller_retry_exhausted",
+        "reason": "The chapter action exhausted its one authorized retry.",
+        "command_available": False,
+    }
+
+
+def _chapter_pending_action(
+    conversation_id: str,
+) -> dict[str, Any] | None:
+    """Reconstruct one chapter hold from canonical files without mutation."""
+    active = _active_chapter_run(conversation_id)
+    if active is None:
+        return None
+    book_id, chapter_id, run = active
+    retry_action = _chapter_retry_action(book_id, chapter_id)
+    if retry_action is not None:
+        return retry_action
+
+    status = run.get("status")
+    reason = run.get("stop_reason")
+    base = {
+        "book_id": book_id,
+        "chapter_id": chapter_id,
+        "reason": reason,
+    }
+    assessment_id = run.get("last_assessment_id")
+
+    if status == "source_approval_required":
+        if not isinstance(assessment_id, str):
+            raise RuntimeError("Source approval has no bound assessment.")
+        session = backend.load_workflow_json(
+            backend.chapter_research_session_path(
+                book_id,
+                chapter_id,
+                assessment_id,
+            ),
+            "Chapter research approval state",
+        )
+        return _human_chapter_action(
+            "chapter_source_permissions",
+            {
+                **base,
+                "assessment_id": assessment_id,
+                "research_mode": session["research_mode"],
+                "pending_requests": list(session["pending_requests"]),
+            },
+        )
+    if (
+        status == "human_input_required"
+        and isinstance(assessment_id, str)
+        and backend.load_chapter_human_input(
+            book_id,
+            chapter_id,
+            assessment_id,
+        )
+        is None
+    ):
+        return _human_chapter_action(
+            "chapter_human_input",
+            {
+                **base,
+                "questions": run.get("human_input_requests", []),
+            },
+        )
+    if (
+        status == "human_input_closeout_required"
+        and backend.load_chapter_human_input_closeout(
+            book_id,
+            chapter_id,
+        )
+        is None
+    ):
+        return _human_chapter_action(
+            "chapter_human_input_closeout",
+            base,
+        )
+
+    human_input_exists = (
+        isinstance(assessment_id, str)
+        and backend.load_chapter_human_input(
+            book_id,
+            chapter_id,
+            assessment_id,
+        )
+        is not None
+    )
+    if (
+        status == "human_input_closeout_failed"
+        and run.get("last_assessment_outcome") == "human_input_required"
+        and human_input_exists
+    ) or (
+        status == "agent_call_limit_reached"
+        and run.get("last_assessment_outcome") == "human_input_required"
+        and human_input_exists
+    ):
+        return _human_chapter_action(
+            "chapter_draft_acceptance",
+            base,
+        )
+    recovery = backend.load_chapter_recovery_authorization(
+        book_id,
+        chapter_id,
+    )
+    if status == "agent_call_limit_reached" and recovery is None:
+        return _human_chapter_action("chapter_recovery", base)
+    if (
+        status == "chapter_blocked"
+        and run.get("last_assessment_outcome") == "chapter_blocked"
+        and isinstance(run.get("last_research_packet_id"), str)
+        and recovery is None
+    ):
+        return _human_chapter_action("research_access_recovery", base)
+    if (
+        status == "final_pass_failed"
+        and run.get("last_assessment_outcome") == "revise_draft"
+        and recovery is None
+    ):
+        return _human_chapter_action("final_pass_repair", base)
+    if status in CHAPTER_TERMINAL_STATUSES:
+        return {
+            "kind": "terminal_hold",
+            "stage": "chapter_development",
+            "status": status,
+            "reason": reason,
+            "command_available": False,
+        }
+    return None
 
 
 def _workflow_files(conversation_id: str) -> list[Path]:
@@ -387,6 +659,11 @@ def create_conversation(
         raise WorkflowServiceError(
             "unsupported_research_mode",
             f"Unsupported research mode: {research_mode}",
+        )
+    if backend.find_backend_program(provider) is None:
+        raise WorkflowOperationError(
+            "provider_unavailable",
+            f"{provider} was not found on PATH; no conversation was created.",
         )
     try:
         path = backend.create_conversation(research_mode=research_mode)
@@ -826,6 +1103,16 @@ def submit_checkpoint_decision(
         expected_stage,
         expected_revision,
     )
+    pending_action = current["pending_action"]
+    if current["stage"] == "chapter_development":
+        if (
+            pending_action.get("kind") != "human_checkpoint"
+            or pending_action.get("decision_kind") != decision.get("kind")
+        ):
+            raise WorkflowConflictError(
+                "checkpoint_not_pending",
+                "This exact chapter decision is not pending in canonical state.",
+            )
     try:
         result = _record_checkpoint_decision(
             conversation_id,
@@ -860,7 +1147,10 @@ def advance_workflow(
         expected_stage,
         expected_revision,
     )
-    if current["stage"] in (
+    if current["pending_action"].get("kind") in {
+        "human_checkpoint",
+        "terminal_hold",
+    } or current["stage"] in (
         {"conversation_active", "complete", "workflow_error"}
         | HUMAN_CHECKPOINT_STAGES
         | TERMINAL_HOLD_STAGES

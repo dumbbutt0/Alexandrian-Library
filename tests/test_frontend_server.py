@@ -32,6 +32,8 @@ class FrontendServerTests(unittest.TestCase):
         )
         self.book_path.parent.mkdir(parents=True)
         self.book_path.write_text("# Verified\n\nThe final text.\n", encoding="utf-8")
+        self.assembly_path = self.book_path.parent / "assembly.json"
+        self.write_assembly()
         self.write_catalog()
 
     def tearDown(self) -> None:
@@ -64,7 +66,9 @@ class FrontendServerTests(unittest.TestCase):
             "book_path": self.book_path.relative_to(self.project_path).as_posix(),
             "book_sha256": hashlib.sha256(self.book_path.read_bytes()).hexdigest(),
             "assembly_path": f"data/books/{self.book_id}/assembly.json",
-            "assembly_sha256": "a" * 64,
+            "assembly_sha256": hashlib.sha256(
+                self.assembly_path.read_bytes()
+            ).hexdigest(),
             "finalized_at": "2026-01-01T00:00:00+00:00",
             "chapter_count": 1,
             "chapters": [],
@@ -83,6 +87,29 @@ class FrontendServerTests(unittest.TestCase):
         catalog_path.parent.mkdir(parents=True, exist_ok=True)
         catalog_path.write_text(
             json.dumps(catalog, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    def write_assembly(self, source_receipt_ids: list[str] | None = None) -> None:
+        source_receipt_ids = source_receipt_ids or []
+        self.assembly_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "1.0",
+                    "assembly_id": "assembly-test",
+                    "book_id": self.book_id,
+                    "assembled_at": "2026-01-01T00:00:00+00:00",
+                    "lifecycle_status": "final",
+                    "book_sha256": hashlib.sha256(
+                        self.book_path.read_bytes()
+                    ).hexdigest(),
+                    "source_count": len(source_receipt_ids),
+                    "source_receipt_ids": source_receipt_ids,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
             encoding="utf-8",
         )
 
@@ -123,19 +150,111 @@ class FrontendServerTests(unittest.TestCase):
         ):
             frontend_server.load_book(self.project_path, self.book_id)
 
-    def test_http_endpoints_serve_verified_data_and_hold_inquiries(self) -> None:
+    def test_empty_clean_clone_has_a_valid_empty_bookshelf(self) -> None:
+        empty_project = self.project_path / "empty"
+        empty_project.mkdir()
+        catalog = frontend_server.load_catalog(empty_project)
+        self.assertEqual(catalog["book_count"], 0)
+        self.assertEqual(catalog["projection_status"], "empty_bookshelf")
+
+    def test_catalog_missing_with_final_assembly_is_verification_failure(self) -> None:
+        catalog_path = self.project_path / "data" / "bookshelf" / "catalog.json"
+        catalog_path.unlink()
+        with self.assertRaisesRegex(
+            frontend_server.FrontendDataError,
+            "catalog is missing",
+        ):
+            frontend_server.load_catalog(self.project_path)
+
+    def test_book_provenance_resolves_exact_source_receipts(self) -> None:
+        receipt_id = "chapter-source-test"
+        self.write_assembly([receipt_id])
+        self.write_catalog()
+        receipt_path = (
+            self.book_path.parent
+            / "research"
+            / "CH1"
+            / "source_receipts"
+            / "A1"
+            / f"{receipt_id}.json"
+        )
+        receipt_path.parent.mkdir(parents=True)
+        receipt_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "1.0",
+                    "receipt": {
+                        "receipt_id": receipt_id,
+                        "title": "Primary source",
+                        "domain": "example.org",
+                        "final_url": "https://example.org/source",
+                        "content_sha256": "b" * 64,
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        provenance = frontend_server.load_book_provenance(
+            self.project_path,
+            self.book_id,
+        )
+
+        self.assertEqual(provenance["source_count"], 1)
+        self.assertEqual(provenance["sources"][0]["receipt_id"], receipt_id)
+        self.assertNotIn("content", provenance["sources"][0])
+
+    def test_book_provenance_supports_immutable_legacy_packet_source(self) -> None:
+        receipt_id = "chapter-source-legacy"
+        self.write_assembly([receipt_id])
+        self.write_catalog()
+        packet_path = self.book_path.parent / "research" / "CH1" / "R1.json"
+        packet_path.parent.mkdir(parents=True)
+        packet_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "1.0",
+                    "research": {},
+                    "sources": [
+                        {
+                            "receipt_id": receipt_id,
+                            "title": "Legacy packet source",
+                            "domain": "example.org",
+                            "final_url": "https://example.org/legacy",
+                            "source_content_sha256": "c" * 64,
+                        }
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        provenance = frontend_server.load_book_provenance(
+            self.project_path,
+            self.book_id,
+        )
+
+        self.assertEqual(provenance["sources"][0]["receipt_id"], receipt_id)
+        self.assertEqual(
+            provenance["sources"][0]["title"],
+            "Legacy packet source",
+        )
+
+    def test_http_endpoints_serve_only_versioned_verified_data(self) -> None:
         server = frontend_server.make_server(self.project_path, port=0)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         host, port = server.server_address[:2]
         base_url = f"http://{host}:{port}"
         try:
-            with urllib.request.urlopen(f"{base_url}/api/catalog") as response:
+            with urllib.request.urlopen(f"{base_url}/api/v1/catalog") as response:
                 catalog = json.loads(response.read())
             self.assertEqual(catalog["book_count"], 1)
 
             with urllib.request.urlopen(
-                f"{base_url}/api/books/{self.book_id}"
+                f"{base_url}/api/v1/books/{self.book_id}"
             ) as response:
                 book = json.loads(response.read())
             self.assertIn("The final text.", book["markdown"])
@@ -156,9 +275,7 @@ class FrontendServerTests(unittest.TestCase):
             )
             with self.assertRaises(urllib.error.HTTPError) as raised:
                 urllib.request.urlopen(request)
-            self.assertEqual(raised.exception.code, 501)
-            hold = json.loads(raised.exception.read())
-            self.assertEqual(hold["status"], "backend_handoff_not_wired")
+            self.assertEqual(raised.exception.code, 404)
         finally:
             server.shutdown()
             server.server_close()
@@ -166,6 +283,11 @@ class FrontendServerTests(unittest.TestCase):
 
     def test_v1_workflow_api_is_versioned_and_rejects_stale_actions(self) -> None:
         server = frontend_server.make_server(self.project_path, port=0)
+        server.RequestHandlerClass.readiness["providers"]["codex"] = {
+            "installed": True,
+            "full_workflow_ready": True,
+            "detail": "Test provider ready.",
+        }
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         host, port = server.server_address[:2]
@@ -315,15 +437,45 @@ class FrontendServerTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=2)
 
-    def test_v1_workflow_api_allows_only_one_mutation_per_conversation(self) -> None:
+    def test_v1_conversation_rejects_provider_without_workflow_readiness(self) -> None:
+        server = frontend_server.make_server(self.project_path, port=0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        host, port = server.server_address[:2]
+        request = urllib.request.Request(
+            f"http://{host}:{port}/api/v1/conversations",
+            data=json.dumps(
+                {"provider": "codex", "research_mode": "safe"}
+            ).encode(),
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with patch.object(
+                frontend_server.workflow_service,
+                "create_conversation",
+            ) as create:
+                with self.assertRaises(urllib.error.HTTPError) as raised:
+                    urllib.request.urlopen(request)
+                self.assertEqual(raised.exception.code, 409)
+                self.assertEqual(
+                    json.loads(raised.exception.read())["error"],
+                    "provider_not_ready",
+                )
+                create.assert_not_called()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_v1_workflow_api_allows_only_one_global_mutation(self) -> None:
         server = frontend_server.make_server(self.project_path, port=0)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         host, port = server.server_address[:2]
         base_url = f"http://{host}:{port}"
-        held_lock = threading.Lock()
+        held_lock = server.RequestHandlerClass.mutation_lock
         held_lock.acquire()
-        server.RequestHandlerClass.mutation_locks["conversation-test"] = held_lock
         try:
             with patch.object(
                 frontend_server.workflow_service,
@@ -378,6 +530,8 @@ class FrontendPresentationContractTests(unittest.TestCase):
         ):
             self.assertIn(f'id="{element_id}"', html)
         for endpoint in (
+            '"/api/v1/readiness"',
+            '"/api/v1/catalog"',
             '"/api/v1/workflows"',
             '"/api/v1/conversations"',
             "/turns`",
@@ -387,6 +541,10 @@ class FrontendPresentationContractTests(unittest.TestCase):
         ):
             self.assertIn(endpoint, app)
         self.assertNotIn('fetchJson("/api/inquiries"', app)
+        self.assertNotIn("workflowHold", app)
+        self.assertIn("state.workflow.pending_action || {}", app)
+        self.assertIn("DEMO_VISUAL_REFERENCES", app)
+        self.assertIn("full_workflow_ready", app)
         self.assertIn("expected_stage: state.workflow.stage", app)
         self.assertIn("expected_revision: state.workflow.revision", app)
         self.assertIn("function renderReviewCheckpoint(action)", app)
@@ -510,6 +668,30 @@ class FrontendPresentationContractTests(unittest.TestCase):
             "transform: translateZ(calc(var(--book-half-depth) - 3px));",
             styles,
         )
+
+    def test_reader_preserves_evidence_tables_and_presentation_state(self) -> None:
+        project_path = Path(frontend_server.__file__).resolve().parent
+        app = (project_path / "frontend" / "app.js").read_text(
+            encoding="utf-8"
+        )
+        html = (project_path / "frontend" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        styles = (project_path / "frontend" / "styles.css").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertNotIn("[Evidence record]", app)
+        self.assertIn("function appendEvidenceText", app)
+        self.assertIn('type: "table"', app)
+        self.assertIn("/provenance`", app)
+        self.assertIn("alexandrian-reader:", app)
+        self.assertIn("alexandrian-selected-book", app)
+        self.assertIn('id="provenance-panel"', html)
+        self.assertIn('id="evidence-toggle"', html)
+        self.assertIn(".reader-table-wrap", styles)
+        self.assertIn(".evidence-marker", styles)
+        self.assertIn("@media print", styles)
 
 
 if __name__ == "__main__":

@@ -12,10 +12,13 @@ const state = {
   plain: false,
   headings: [],
   workflow: null,
-  workflowHold: null,
   workflows: [],
   workflowBusy: false,
   worktableLoaded: false,
+  readiness: null,
+  provenance: null,
+  readerBookId: null,
+  readerBookHash: null,
 };
 
 const VISUAL_REFERENCE_BOOKS = [
@@ -65,6 +68,8 @@ const VISUAL_REFERENCE_BOOKS = [
   },
 ];
 const SHELF_DISPLAY_MINIMUM = 5;
+const DEMO_VISUAL_REFERENCES = new URLSearchParams(window.location.search)
+  .get("demo") === "1";
 
 const views = {
   library: document.querySelector("#library-view"),
@@ -85,6 +90,9 @@ const tocPanel = document.querySelector("#toc-panel");
 const tocList = document.querySelector("#toc-list");
 const tocToggle = document.querySelector("#toc-toggle");
 const plainToggle = document.querySelector("#plain-toggle");
+const evidenceToggle = document.querySelector("#evidence-toggle");
+const provenancePanel = document.querySelector("#provenance-panel");
+const provenanceList = document.querySelector("#provenance-list");
 const previousVolumeButton = document.querySelector("#previous-volume");
 const nextVolumeButton = document.querySelector("#next-volume");
 const catalogTrack = document.querySelector("#catalog-track");
@@ -115,6 +123,7 @@ function routeTo(route) {
   });
   tocPanel.classList.remove("is-open");
   tocToggle.setAttribute("aria-expanded", "false");
+  if (route !== "reader") hideProvenance();
   if (route === "library") {
     document.title = "The Library — Inquirion Labs";
   } else if (route === "worktable") {
@@ -174,6 +183,13 @@ function coverAssetForBook(book) {
 }
 
 function catalogWithVisualReferences(catalog) {
+  if (!DEMO_VISUAL_REFERENCES) {
+    return {
+      ...catalog,
+      verified_book_count: catalog.book_count,
+      reference_book_count: 0,
+    };
+  }
   const fillerCount = Math.max(
     0,
     SHELF_DISPLAY_MINIMUM - catalog.books.length,
@@ -492,6 +508,11 @@ function selectVolumeAt(index, options = {}) {
   const book = state.catalog.books[boundedIndex];
   state.selectedBook = book;
   state.selectedIndex = boundedIndex;
+  try {
+    localStorage.setItem("alexandrian-selected-book", book.book_id);
+  } catch {
+    // Shelf selection is optional presentation state.
+  }
   shelf.classList.add("has-selection");
   document.querySelectorAll(".shelf-book").forEach((item) => {
     const highlighted = item === bookObject;
@@ -613,7 +634,15 @@ function renderShelf(catalog) {
     tick.addEventListener("click", () => selectVolumeAt(index));
     catalogTrack.append(tick);
   });
-  selectVolumeAt(0);
+  let restoredIndex = 0;
+  try {
+    const restoredId = localStorage.getItem("alexandrian-selected-book");
+    const match = catalog.books.findIndex((book) => book.book_id === restoredId);
+    if (match >= 0) restoredIndex = match;
+  } catch {
+    restoredIndex = 0;
+  }
+  selectVolumeAt(restoredIndex);
 }
 
 function createElement(tag, className = "", text = "") {
@@ -623,9 +652,115 @@ function createElement(tag, className = "", text = "") {
   return element;
 }
 
+function evidenceIds(value) {
+  return value
+    .split(/[,;]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function appendEvidenceText(element, text) {
+  const pattern = /\[Evidence:\s*([^\]]+)\]/g;
+  let cursor = 0;
+  let match;
+  while ((match = pattern.exec(text)) !== null) {
+    element.append(document.createTextNode(text.slice(cursor, match.index)));
+    const button = createElement("button", "evidence-marker", match[0]);
+    button.type = "button";
+    const ids = evidenceIds(match[1]);
+    button.dataset.evidenceIds = ids.join(",");
+    button.setAttribute("aria-label", `Show ${ids.length} evidence record${ids.length === 1 ? "" : "s"}`);
+    button.addEventListener("click", () => showProvenance(ids));
+    element.append(button);
+    cursor = pattern.lastIndex;
+  }
+  element.append(document.createTextNode(text.slice(cursor)));
+}
+
+function readerStorageKey() {
+  if (!state.readerBookId || !state.readerBookHash) return null;
+  return `alexandrian-reader:${state.readerBookId}:${state.readerBookHash}`;
+}
+
+function saveReaderPosition() {
+  const key = readerStorageKey();
+  if (!key) return;
+  try {
+    localStorage.setItem(
+      key,
+      JSON.stringify({ page_index: state.pageIndex, plain: state.plain }),
+    );
+  } catch {
+    // Reading position is optional presentation state, never workflow authority.
+  }
+}
+
+function restoreReaderPosition() {
+  const key = readerStorageKey();
+  if (!key) return;
+  try {
+    const saved = JSON.parse(localStorage.getItem(key) || "null");
+    if (saved && Number.isInteger(saved.page_index)) {
+      state.pageIndex = Math.max(
+        0,
+        Math.min(state.pages.length - 1, saved.page_index),
+      );
+    }
+    state.plain = saved?.plain === true;
+  } catch {
+    state.pageIndex = 0;
+    state.plain = false;
+  }
+}
+
+function showProvenance(filterIds = []) {
+  provenancePanel.classList.add("is-open");
+  provenancePanel.setAttribute("aria-hidden", "false");
+  evidenceToggle.setAttribute("aria-expanded", "true");
+  provenanceList.replaceChildren();
+  if (!state.provenance) {
+    provenanceList.append(
+      createElement("p", "provenance-empty", "Verified source metadata is unavailable."),
+    );
+    return;
+  }
+  const requested = new Set(filterIds);
+  const records = requested.size
+    ? state.provenance.sources.filter((source) => requested.has(source.receipt_id))
+    : state.provenance.sources;
+  records.forEach((source) => {
+    const article = createElement("article", "provenance-record");
+    article.append(
+      createElement("small", "", source.receipt_id),
+      createElement("strong", "", source.title || source.domain || "Untitled source"),
+      createElement("p", "", source.final_url || source.requested_url || "URL unavailable"),
+    );
+    if (source.claim_checked) {
+      article.append(createElement("p", "", `Claim checked: ${source.claim_checked}`));
+    }
+    if (source.finding) {
+      article.append(createElement("p", "", `Finding: ${source.finding}`));
+    }
+    if (source.limitations) {
+      article.append(createElement("p", "", `Limits: ${source.limitations}`));
+    }
+    provenanceList.append(article);
+  });
+  if (!records.length) {
+    provenanceList.append(
+      createElement("p", "provenance-empty", "No source matched this evidence marker."),
+    );
+  }
+}
+
+function hideProvenance() {
+  provenancePanel.classList.remove("is-open");
+  provenancePanel.setAttribute("aria-hidden", "true");
+  evidenceToggle.setAttribute("aria-expanded", "false");
+}
+
 function inlineText(text) {
   return text
-    .replace(/\[Evidence:[^\]]+\]/g, "[Evidence record]")
     .replace(/`([^`]+)`/g, "$1")
     .replace(/\*\*([^*]+)\*\*/g, "$1")
     .replace(/\*([^*]+)\*/g, "$1")
@@ -638,6 +773,7 @@ function markdownBlocks(markdown) {
   let paragraph = [];
   let list = null;
   let code = null;
+  let table = null;
 
   function flushParagraph() {
     if (paragraph.length) {
@@ -653,10 +789,24 @@ function markdownBlocks(markdown) {
     }
   }
 
+  function flushTable() {
+    if (!table) return;
+    const rows = table.filter((row) => !row.every((cell) => /^:?-{3,}:?$/.test(cell)));
+    if (rows.length) {
+      blocks.push({
+        type: "table",
+        headers: rows[0],
+        rows: rows.slice(1),
+      });
+    }
+    table = null;
+  }
+
   lines.forEach((line) => {
     if (line.startsWith("```")) {
       flushParagraph();
       flushList();
+      flushTable();
       if (code) {
         blocks.push({ type: "code", text: code.join("\n") });
         code = null;
@@ -669,6 +819,16 @@ function markdownBlocks(markdown) {
       code.push(line);
       return;
     }
+    if (/^\|.*\|$/.test(line)) {
+      flushParagraph();
+      flushList();
+      table ||= [];
+      table.push(
+        line.split("|").slice(1, -1).map((cell) => inlineText(cell)),
+      );
+      return;
+    }
+    flushTable();
     const heading = line.match(/^(#{1,3})\s+(.+)$/);
     if (heading) {
       flushParagraph();
@@ -707,22 +867,19 @@ function markdownBlocks(markdown) {
       flushList();
       return;
     }
-    if (/^\|.*\|$/.test(line)) {
-      flushParagraph();
-      flushList();
-      blocks.push({ type: "p", text: inlineText(line.split("|").filter(Boolean).join(" · ")) });
-      return;
-    }
     paragraph.push(line.trim());
   });
   flushParagraph();
   flushList();
+  flushTable();
   if (code) blocks.push({ type: "code", text: code.join("\n") });
   return blocks.filter((block) => block.text !== "" || block.type === "rule" || block.type === "list");
 }
 
 function blockWeight(block) {
-  const length = block.type === "list"
+  const length = block.type === "table"
+    ? [...block.headers, ...block.rows.flat()].join(" ").length + block.rows.length * 70
+    : block.type === "list"
     ? block.items.join(" ").length + block.items.length * 35
     : block.text.length;
   const multiplier = block.type === "h1" ? 2.4
@@ -761,8 +918,16 @@ function renderBlock(block) {
   if (/^h[1-3]$/.test(block.type)) {
     return createElement(block.type, "", block.text);
   }
-  if (block.type === "p") return createElement("p", "", block.text);
-  if (block.type === "quote") return createElement("blockquote", "", block.text);
+  if (block.type === "p") {
+    const paragraph = document.createElement("p");
+    appendEvidenceText(paragraph, block.text);
+    return paragraph;
+  }
+  if (block.type === "quote") {
+    const quote = document.createElement("blockquote");
+    appendEvidenceText(quote, block.text);
+    return quote;
+  }
   if (block.type === "rule") return document.createElement("hr");
   if (block.type === "code") {
     const pre = document.createElement("pre");
@@ -771,8 +936,37 @@ function renderBlock(block) {
   }
   if (block.type === "list") {
     const list = document.createElement(block.ordered ? "ol" : "ul");
-    block.items.forEach((item) => list.append(createElement("li", "", item)));
+    block.items.forEach((item) => {
+      const entry = document.createElement("li");
+      appendEvidenceText(entry, item);
+      list.append(entry);
+    });
     return list;
+  }
+  if (block.type === "table") {
+    const wrapper = createElement("div", "reader-table-wrap");
+    const table = document.createElement("table");
+    const head = document.createElement("thead");
+    const headRow = document.createElement("tr");
+    block.headers.forEach((value) => {
+      const cell = document.createElement("th");
+      appendEvidenceText(cell, value);
+      headRow.append(cell);
+    });
+    head.append(headRow);
+    const body = document.createElement("tbody");
+    block.rows.forEach((row) => {
+      const tableRow = document.createElement("tr");
+      row.forEach((value) => {
+        const cell = document.createElement("td");
+        appendEvidenceText(cell, value);
+        tableRow.append(cell);
+      });
+      body.append(tableRow);
+    });
+    table.append(head, body);
+    wrapper.append(table);
+    return wrapper;
   }
   return createElement("p", "", block.text);
 }
@@ -793,6 +987,7 @@ function renderPages() {
     pagePosition.textContent = "Continuous reading";
     previousButton.disabled = true;
     nextButton.disabled = true;
+    saveReaderPosition();
     return;
   }
   const narrow = window.matchMedia("(max-width: 720px)").matches;
@@ -803,6 +998,7 @@ function renderPages() {
   pagePosition.textContent = `Pages ${state.pageIndex + 1}${shownEnd > state.pageIndex + 1 ? `–${shownEnd}` : ""} of ${state.pages.length}`;
   previousButton.disabled = state.pageIndex === 0;
   nextButton.disabled = state.pageIndex + spread >= state.pages.length;
+  saveReaderPosition();
 }
 
 function turnPage(direction) {
@@ -853,20 +1049,37 @@ async function openSelectedBook(book) {
   document.querySelector("#hash-status").textContent = "Verifying edition…";
   leftPage.replaceChildren(createElement("p", "", "Opening the verified volume…"));
   rightPage.replaceChildren();
+  hideProvenance();
+  state.provenance = null;
+  evidenceToggle.disabled = true;
+  evidenceToggle.textContent = "Evidence";
   try {
-    const payload = await fetchJson(`/api/books/${encodeURIComponent(book.book_id)}`);
+    const payload = await fetchJson(`/api/v1/books/${encodeURIComponent(book.book_id)}`);
     state.blocks = markdownBlocks(payload.markdown);
     state.pages = paginate(state.blocks);
+    state.readerBookId = book.book_id;
+    state.readerBookHash = payload.verified_sha256;
     state.pageIndex = 0;
     state.plain = false;
+    restoreReaderPosition();
     state.headings = mapHeadingPages();
-    plainToggle.setAttribute("aria-pressed", "false");
-    openBook.classList.remove("is-plain");
+    plainToggle.setAttribute("aria-pressed", String(state.plain));
+    openBook.classList.toggle("is-plain", state.plain);
     document.querySelector("#hash-status").textContent =
       `Verified · ${payload.verified_sha256.slice(0, 10)}…`;
     document.title = `${book.title} — The Library`;
     renderContents();
     renderPages();
+    try {
+      state.provenance = await fetchJson(
+        `/api/v1/books/${encodeURIComponent(book.book_id)}/provenance`,
+      );
+      evidenceToggle.disabled = false;
+      evidenceToggle.textContent = `Evidence (${state.provenance.source_count})`;
+    } catch (provenanceError) {
+      evidenceToggle.disabled = true;
+      evidenceToggle.textContent = "Evidence unavailable";
+    }
   } catch (error) {
     leftPage.replaceChildren(
       createElement("h2", "", "This edition could not be opened"),
@@ -889,7 +1102,45 @@ function setWorkflowBusy(busy, message = "") {
   ).forEach((control) => {
     control.disabled = busy;
   });
+  if (!busy) applyProviderReadiness();
   if (message) setWorkflowStatus(message, busy ? "working" : "");
+}
+
+function applyProviderReadiness() {
+  const providers = state.readiness?.providers || {};
+  const inputs = [...document.querySelectorAll('input[name="provider"]')];
+  if (!inputs.length) return;
+  inputs.forEach((input) => {
+    const provider = providers[input.value];
+    const ready = Boolean(provider?.full_workflow_ready);
+    input.disabled = !ready || state.workflowBusy;
+    const label = input.closest("label");
+    label?.classList.toggle("is-unavailable", !ready);
+    const detail = label?.querySelector("small");
+    if (detail) {
+      detail.textContent = ready
+        ? "Full local workflow ready"
+        : provider?.installed
+          ? "Installed, but MCP workflow is not ready"
+          : "Provider is not installed";
+    }
+  });
+  const selected = inputs.find((input) => input.checked && !input.disabled);
+  if (!selected) {
+    const firstReady = inputs.find((input) => !input.disabled);
+    inputs.forEach((input) => { input.checked = input === firstReady; });
+  }
+  const begin = document.querySelector("#begin-inquiry");
+  begin.disabled = state.workflowBusy || !inputs.some((input) => !input.disabled);
+}
+
+async function loadReadiness() {
+  state.readiness = await fetchJson("/api/v1/readiness");
+  applyProviderReadiness();
+  if (!state.readiness.runnable_providers?.length) {
+    document.querySelector("#inquiry-status").textContent =
+      "No provider has a verified full-workflow MCP configuration.";
+  }
 }
 
 function workflowName(workflow) {
@@ -941,7 +1192,6 @@ async function refreshWorkflowList() {
 
 function showNewInquiry() {
   state.workflow = null;
-  state.workflowHold = null;
   newInquiryPanel.hidden = false;
   activeWorkflowPanel.hidden = true;
   workflowStageBadge.hidden = true;
@@ -1355,17 +1605,7 @@ function renderChapterCheckpoint(action) {
 function renderWorkflowAction() {
   workflowActionZone.replaceChildren();
   if (!state.workflow || state.workflow.stage === "conversation_active") return;
-  const baseAction = state.workflow.pending_action || {};
-  const hold = state.workflowHold;
-  const action = hold?.checkpoint_kind
-    ? {
-      kind: "human_checkpoint",
-      stage: state.workflow.stage,
-      decision_kind: hold.checkpoint_kind,
-      command_available: true,
-      context: hold,
-    }
-    : baseAction;
+  const action = state.workflow.pending_action || {};
 
   if (action.kind === "human_checkpoint") {
     if (action.decision_kind === "research_review") {
@@ -1412,11 +1652,14 @@ function renderWorkflowAction() {
     return;
   }
 
-  const terminalStatus = hold?.status || state.workflow.stage_label;
+  const terminalStatus = action.status || state.workflow.stage_label;
+  const terminalReason = action.reason
+    ? ` ${action.reason}`
+    : "";
   workflowActionZone.append(
     actionCard(
       "Workflow held",
-      `${String(terminalStatus).replaceAll("_", " ")}. No provider call will be made automatically.`,
+      `${String(terminalStatus).replaceAll("_", " ")}.${terminalReason} No provider call will be made automatically.`,
     ),
   );
 }
@@ -1451,7 +1694,6 @@ async function selectWorkflow(conversationId) {
   setWorkflowBusy(true, "Recovering canonical workflow state…");
   try {
     state.workflow = await fetchJson(`/api/v1/workflows/${encodeURIComponent(conversationId)}`);
-    state.workflowHold = null;
     renderWorkflow();
     setWorkflowStatus("Recovered from canonical artifacts.");
   } catch (error) {
@@ -1478,7 +1720,6 @@ async function submitWorkflowDecision(decision) {
       },
     );
     state.workflow = result.workflow;
-    state.workflowHold = null;
     await refreshWorkflowList();
     renderWorkflow();
     setWorkflowStatus("Decision recorded. Canonical state advanced.");
@@ -1509,7 +1750,6 @@ async function advanceWorkflow() {
       },
     );
     state.workflow = result.workflow;
-    state.workflowHold = result.result;
     await refreshWorkflowList();
     renderWorkflow();
     setWorkflowStatus("Stopped at the next durable workflow state.");
@@ -1527,7 +1767,7 @@ async function advanceWorkflow() {
 async function initializeWorktable() {
   if (state.workflowBusy) return;
   try {
-    await refreshWorkflowList();
+    await Promise.all([refreshWorkflowList(), loadReadiness()]);
     state.worktableLoaded = true;
   } catch (error) {
     workflowList.replaceChildren(
@@ -1538,7 +1778,7 @@ async function initializeWorktable() {
 
 async function loadLibrary() {
   try {
-    const verifiedCatalog = await fetchJson("/api/catalog");
+    const verifiedCatalog = await fetchJson("/api/v1/catalog");
     const catalog = catalogWithVisualReferences(verifiedCatalog);
     state.catalog = catalog;
     renderShelf(catalog);
@@ -1575,6 +1815,19 @@ plainToggle.addEventListener("click", () => {
   renderPages();
 });
 
+evidenceToggle.addEventListener("click", () => {
+  if (provenancePanel.classList.contains("is-open")) {
+    hideProvenance();
+  } else {
+    showProvenance();
+  }
+});
+
+document.querySelector("#provenance-close").addEventListener(
+  "click",
+  hideProvenance,
+);
+
 tocToggle.addEventListener("click", () => {
   const open = !tocPanel.classList.contains("is-open");
   tocPanel.classList.toggle("is-open", open);
@@ -1588,7 +1841,14 @@ document.querySelector("#begin-inquiry").addEventListener("click", async () => {
     status.textContent = "Begin with the question you cannot leave alone.";
     return;
   }
-  const provider = document.querySelector('input[name="provider"]:checked').value;
+  const selectedProvider = document.querySelector(
+    'input[name="provider"]:checked:not(:disabled)',
+  );
+  if (!selectedProvider) {
+    status.textContent = "Choose a provider whose full local workflow is ready.";
+    return;
+  }
+  const provider = selectedProvider.value;
   const researchMode = document.querySelector('input[name="research-mode"]:checked').value;
   status.textContent = "Creating the durable inquiry…";
   setWorkflowBusy(true);
@@ -1613,7 +1873,6 @@ document.querySelector("#begin-inquiry").addEventListener("click", async () => {
       },
     );
     state.workflow = turn.workflow;
-    state.workflowHold = null;
     document.querySelector("#inquiry-input").value = "";
     await refreshWorkflowList();
     renderWorkflow();
@@ -1690,7 +1949,6 @@ document.querySelector("#finish-inquiry").addEventListener("click", async () => 
         }),
       },
     );
-    state.workflowHold = null;
     await refreshWorkflowList();
     renderWorkflow();
     setWorkflowStatus("Conversation sealed. The review stage is ready to advance.");
@@ -1747,12 +2005,38 @@ window.addEventListener("resize", () => {
   resizeTimer = window.setTimeout(() => {
     if (state.inspecting) recenterFocusedBook(selectedShelfBook());
     if (!state.blocks.length || state.plain) return;
+    const previousPage = state.pageIndex;
     state.pages = paginate(state.blocks);
-    state.pageIndex = 0;
+    state.pageIndex = Math.min(previousPage, state.pages.length - 1);
+    if (
+      !window.matchMedia("(max-width: 720px)").matches
+      && state.pageIndex % 2
+    ) {
+      state.pageIndex -= 1;
+    }
     state.headings = mapHeadingPages();
     renderContents();
     renderPages();
   }, 150);
+});
+
+let printReaderState = null;
+window.addEventListener("beforeprint", () => {
+  if (!views.reader.classList.contains("is-active")) return;
+  printReaderState = { plain: state.plain, pageIndex: state.pageIndex };
+  state.plain = true;
+  openBook.classList.add("is-plain");
+  renderPages();
+});
+
+window.addEventListener("afterprint", () => {
+  if (!printReaderState) return;
+  state.plain = printReaderState.plain;
+  state.pageIndex = printReaderState.pageIndex;
+  openBook.classList.toggle("is-plain", state.plain);
+  plainToggle.setAttribute("aria-pressed", String(state.plain));
+  printReaderState = null;
+  renderPages();
 });
 
 loadLibrary();

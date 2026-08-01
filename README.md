@@ -1,28 +1,30 @@
 # Alexandrian Library
 
-Alexandrian Library is a local research prototype that captures durable
+Alexandrian Library V1 is a local research application that captures durable
 conversations, reviews their claims and evidence, and develops validated
-material into books under a source-permissions-only human approval policy.
+material into verified books.
 
-The user is asked only when an unknown research source requires permission.
-Research routing, plan acceptance, synthesis correction, final editorial
-release, finalization, and bookshelf projection proceed automatically only when
-their deterministic or independent audit gates pass. Unresolved project
-decisions remain explicitly unresolved; the system never records them as human
-decisions. A blocking whole-book audit permits one correction and one final
-audit. There is no third autonomous attempt.
+Routine research routing, plan acceptance, synthesis correction, finalization,
+and bookshelf projection proceed automatically only when their deterministic
+or independent audit gates pass. The user remains the authority for unknown
+source access and for exceptional chapter holds that require an answer,
+changed-condition retry, recovery authorization, or exact-draft acceptance.
+These exceptions are reconstructed from durable files after restart. Unresolved
+decisions remain unresolved; the system never records them as human decisions.
+A blocking whole-book audit permits one correction and one final audit. There
+is no third autonomous attempt.
 
 The synthesis stage uses Alexandrian Plain Technical English v1, a
 project-owned readability profile. It does not claim ASD-STE100 compliance and
 does not perform new research.
 
-## V0.1 environment
+## V1 environment
 
 - Python 3.10 or newer
 - `uv`
 - Codex or Claude; only one is required
 - Linux and WSL are the currently tested environments
-- Ollama and a custom Pi harness are planned, not supported in V0.1
+- Ollama and a custom Pi harness are planned, not supported in V1
 
 Create the project environment:
 
@@ -83,6 +85,28 @@ Start the terminal workflow:
 uv run python3 backend_selector.py
 ```
 
+Start the complete local browser application:
+
+```text
+uv run python3 frontend_server.py --open
+```
+
+The frontend binds to `127.0.0.1:8765` by default. It exposes a versioned local
+API, derives workflow checkpoints from canonical artifacts, verifies final book
+and assembly hashes before reading, and resolves evidence by exact receipt ID.
+It serializes all mutations because different books share the source policy,
+knowledge graph, and bookshelf projection.
+
+When a Windows browser cannot reach WSL loopback, bind only to the exact private
+WSL address reported for the current process:
+
+```text
+uv run python3 frontend_server.py --host <exact-wsl-ipv4> --port 8765
+```
+
+The server rejects `0.0.0.0` and any address other than loopback or that exact
+private WSL interface. Do not expose this V1 server to a public network.
+
 If a chapter provider call ends after only part of its required MCP transition,
 the Library lists the exact canonical artifact changes and pauses for review.
 The user can keep the hold or reject the incomplete transition. Rejection does
@@ -98,6 +122,10 @@ uv run python3 -m unittest discover -s tests
 Private conversations, research artifacts, books, settings, and source
 approvals are stored under `data/`, which is excluded from Git.
 
+The ordinary bookshelf contains only verified catalog entries. Add `?demo=1`
+to the local frontend URL only when you intentionally want the four visual
+reference volumes used to judge shelf composition.
+
 ## Licensing
 
 Alexandrian Library uses a split license:
@@ -105,6 +133,7 @@ Alexandrian Library uses a split license:
 - Software, tests, schemas, configuration, and agent skills use MPL-2.0.
 - Documentation, primers, and intentionally public example books use
   CC BY-SA 4.0.
+- Project-authored cover art and its generation prompt use CC BY-SA 4.0.
 - Private conversations and generated user books under `data/` are not
   automatically licensed by this repository.
 

@@ -83,10 +83,22 @@
           <strong id="reader-title">Loading book…</strong>
         </div>
         <div class="reader-tools">
+          <button id="evidence-toggle" class="tool-button" type="button" aria-expanded="false" disabled>Evidence</button>
           <button id="plain-toggle" class="tool-button" type="button" aria-pressed="false">Plain view</button>
           <button id="toc-toggle" class="tool-button" type="button" aria-expanded="false">Contents</button>
         </div>
       </div>
+
+      <aside id="provenance-panel" class="provenance-panel" aria-label="Verified evidence records" aria-hidden="true">
+        <div class="provenance-heading">
+          <div>
+            <p class="eyebrow">Publication provenance</p>
+            <h2>Verified evidence records</h2>
+          </div>
+          <button id="provenance-close" class="icon-button" type="button" aria-label="Close evidence records">×</button>
+        </div>
+        <div id="provenance-list" class="provenance-list"></div>
+      </aside>
 
       <aside id="toc-panel" class="toc-panel" aria-label="Table of contents">
         <p class="eyebrow">Contents</p>
@@ -156,11 +168,11 @@
                   <legend>Research host</legend>
                   <div class="segmented-options">
                     <label class="segmented-option">
-                      <input type="radio" name="provider" value="codex" checked>
+                      <input type="radio" name="provider" value="codex" checked disabled>
                       <span><strong>Codex</strong><small>OpenAI research host</small></span>
                     </label>
                     <label class="segmented-option">
-                      <input type="radio" name="provider" value="claude">
+                      <input type="radio" name="provider" value="claude" disabled>
                       <span><strong>Claude</strong><small>Anthropic research host</small></span>
                     </label>
                   </div>
@@ -180,7 +192,7 @@
                   </div>
                 </fieldset>
 
-                <button id="begin-inquiry" class="primary-button" type="button">Create and ask <span>→</span></button>
+                <button id="begin-inquiry" class="primary-button" type="button" disabled>Create and ask <span>→</span></button>
                 <p id="inquiry-status" class="inquiry-status" role="status">The opening question becomes the first durable conversation turn.</p>
               </div>
             </div>

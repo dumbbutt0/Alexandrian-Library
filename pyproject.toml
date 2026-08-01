@@ -1,6 +1,6 @@
 [project]
 name = "alexandrian-library"
-version = "0.1.0"
+version = "1.0.0"
 description = "A local research workflow that turns durable conversations into evidence-grounded books."
 requires-python = ">=3.10"
 license = "MPL-2.0"

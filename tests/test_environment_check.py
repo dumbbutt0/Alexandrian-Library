@@ -30,6 +30,12 @@ class EnvironmentCheckTests(unittest.TestCase):
             "mcp_server.py": "",
             ".mcp.json": "{}\n",
             ".codex/config.example.toml": "",
+            "backend_selector.py": "",
+            "workflow_service.py": "",
+            "frontend_server.py": "",
+            "frontend/index.html": "",
+            "frontend/styles.css": "",
+            "frontend/app.js": "",
         }
         for relative_path, content in files.items():
             path = self.project_path / relative_path
