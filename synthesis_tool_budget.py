@@ -396,16 +396,55 @@ def reserve_tool_attempt(
                 "The global plan-audit input must be read successfully "
                 "before submission."
             )
-        attempt_number = 1
-        reservation_path, _ = _receipt_paths(
-            root,
-            TOOL_KINDS[tool_name],
-            attempt_number,
-        )
-        if reservation_path.exists():
-            raise SynthesisToolBudgetError(
-                "The staged write submission budget is exhausted."
-            )
+        kind = TOOL_KINDS[tool_name]
+        first_reservation, first_result = _receipt_paths(root, kind, 1)
+        second_reservation, _ = _receipt_paths(root, kind, 2)
+        if not first_reservation.exists():
+            attempt_number = 1
+            reservation_path = first_reservation
+        else:
+            if second_reservation.exists():
+                raise SynthesisToolBudgetError(
+                    "The staged write submission budget is exhausted."
+                )
+            if not first_result.is_file():
+                raise SynthesisToolBudgetError(
+                    "The first plan-audit submission slot was consumed "
+                    "without a completed result; recovery cannot retry it."
+                )
+            result = _verified_result(first_result)
+            if result.get("outcome") != "correctable_validation_rejected":
+                raise SynthesisToolBudgetError(
+                    "A second plan-audit submission is allowed only after "
+                    "a correctable deterministic validation rejection."
+                )
+            attempt_number = 2
+            reservation_path = second_reservation
+    elif tool_name == GLOBAL_AUDIT_TOOL:
+        kind = TOOL_KINDS[tool_name]
+        first_reservation, first_result = _receipt_paths(root, kind, 1)
+        second_reservation, _ = _receipt_paths(root, kind, 2)
+        if not first_reservation.exists():
+            attempt_number = 1
+            reservation_path = first_reservation
+        else:
+            if second_reservation.exists():
+                raise SynthesisToolBudgetError(
+                    "The staged write submission budget is exhausted."
+                )
+            if not first_result.is_file():
+                raise SynthesisToolBudgetError(
+                    "The first global-audit submission slot was consumed "
+                    "without a completed result; recovery cannot retry it."
+                )
+            result = _verified_result(first_result)
+            if result.get("outcome") != "correctable_validation_rejected":
+                raise SynthesisToolBudgetError(
+                    "A second global-audit submission is allowed only after "
+                    "a correctable deterministic validation rejection."
+                )
+            attempt_number = 2
+            reservation_path = second_reservation
     elif tool_name in {SUBMIT_TOOL, INVENTORY_SUBMIT_TOOL}:
         first_reservation, first_result = _receipt_paths(root, kind, 1)
         second_reservation, _ = _receipt_paths(root, kind, 2)
@@ -616,6 +655,12 @@ def finalize_action_budget(
     global_plan_audit_budget = bool(
         tools & {PLAN_AUDIT_READ_TOOL, PLAN_AUDIT_SUBMIT_TOOL}
     )
+    global_audit_budget = GLOBAL_AUDIT_TOOL in tools
+    multiple_submission_budget = bool(
+        correction_budget
+        or global_plan_audit_budget
+        or global_audit_budget
+    )
     summary = {
         "schema_version": "1.0",
         "book_id": book_id,
@@ -623,12 +668,14 @@ def finalize_action_budget(
         "maximum_reads": (
             1 if correction_budget or global_plan_audit_budget else 0
         ),
-        "maximum_submissions": 2 if correction_budget else 1,
+        "maximum_submissions": (
+            2 if multiple_submission_budget else 1
+        ),
         "maximum_successful_writes": 1,
         "second_submission_rule": (
             (
                 "correctable_validation_rejected_only"
-                if correction_budget
+                if multiple_submission_budget
                 else "none"
             )
         ),

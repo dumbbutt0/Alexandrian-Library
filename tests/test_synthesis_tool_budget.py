@@ -3,6 +3,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from pydantic import ValidationError
+
+import mcp_server
 import synthesis_tool_budget
 
 
@@ -325,7 +328,7 @@ class SynthesisToolBudgetTests(unittest.TestCase):
         self.assertEqual(summary["maximum_submissions"], 1)
         self.assertEqual(summary["second_submission_rule"], "none")
 
-    def test_global_plan_audit_has_one_read_and_one_submission(self) -> None:
+    def test_global_plan_audit_allows_one_correctable_submission(self) -> None:
         action_id = "global-plan-audit-A1-test"
         stage = "global-plan-audit-A1"
         event = {
@@ -388,6 +391,25 @@ class SynthesisToolBudgetTests(unittest.TestCase):
         synthesis_tool_budget.record_tool_result(
             self.project,
             submission,
+            "correctable_validation_rejected",
+            "removable extra field",
+            safe_diagnostic={
+                "code": "schema_extra_forbidden",
+                "claim_id": None,
+                "field_path": "level",
+                "correctable": True,
+            },
+        )
+        correction = synthesis_tool_budget.reserve_tool_attempt(
+            self.project,
+            synthesis_tool_budget.PLAN_AUDIT_SUBMIT_TOOL,
+            {},
+            environment,
+        )
+        self.assertEqual(correction["attempt_number"], 2)
+        synthesis_tool_budget.record_tool_result(
+            self.project,
+            correction,
             "success",
         )
         with self.assertRaisesRegex(
@@ -417,7 +439,254 @@ class SynthesisToolBudgetTests(unittest.TestCase):
             action_id,
         )
         self.assertEqual(summary["maximum_reads"], 1)
-        self.assertEqual(summary["maximum_submissions"], 1)
+        self.assertEqual(summary["maximum_submissions"], 2)
+        self.assertEqual(
+            summary["second_submission_rule"],
+            "correctable_validation_rejected_only",
+        )
+
+    def test_global_plan_audit_noncorrectable_rejection_is_terminal(self) -> None:
+        action_id = "global-plan-audit-A1-terminal-test"
+        stage = "global-plan-audit-A1"
+        event = {
+            "schema_version": "1.0",
+            "event": "contract_opened",
+            "book_id": self.book_id,
+            "cycle_id": self.cycle_id,
+            "action_id": action_id,
+            "stage": stage,
+            "backend": self.backend,
+            "input_hash": self.input_hash,
+            "tool_budget": {
+                "controlled_tools": [
+                    synthesis_tool_budget.PLAN_AUDIT_READ_TOOL,
+                    synthesis_tool_budget.PLAN_AUDIT_SUBMIT_TOOL,
+                ]
+            },
+        }
+        with self.ledger.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(event) + "\n")
+        environment = {
+            synthesis_tool_budget.CONTEXT_ENV[field]: value
+            for field, value in {
+                "book_id": self.book_id,
+                "cycle_id": self.cycle_id,
+                "action_id": action_id,
+                "stage": stage,
+                "backend": self.backend,
+                "input_hash": self.input_hash,
+            }.items()
+        }
+        read = synthesis_tool_budget.reserve_tool_attempt(
+            self.project,
+            synthesis_tool_budget.PLAN_AUDIT_READ_TOOL,
+            {},
+            environment,
+        )
+        synthesis_tool_budget.record_tool_result(
+            self.project,
+            read,
+            "success",
+        )
+        submission = synthesis_tool_budget.reserve_tool_attempt(
+            self.project,
+            synthesis_tool_budget.PLAN_AUDIT_SUBMIT_TOOL,
+            {},
+            environment,
+        )
+        synthesis_tool_budget.record_tool_result(
+            self.project,
+            submission,
+            "argument_validation_rejected",
+            "identity field invalid",
+        )
+        with self.assertRaisesRegex(
+            synthesis_tool_budget.SynthesisToolBudgetError,
+            "only after a correctable",
+        ):
+            synthesis_tool_budget.reserve_tool_attempt(
+                self.project,
+                synthesis_tool_budget.PLAN_AUDIT_SUBMIT_TOOL,
+                {},
+                environment,
+            )
+
+    def test_global_audit_allows_one_correctable_submission(self) -> None:
+        action_id = "global-audit-S1-correction-test"
+        stage = "global-audit-S1"
+        event = {
+            "schema_version": "1.0",
+            "event": "contract_opened",
+            "book_id": self.book_id,
+            "cycle_id": self.cycle_id,
+            "action_id": action_id,
+            "stage": stage,
+            "backend": self.backend,
+            "input_hash": self.input_hash,
+            "tool_budget": {
+                "controlled_tools": [
+                    synthesis_tool_budget.GLOBAL_AUDIT_TOOL,
+                ]
+            },
+        }
+        with self.ledger.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(event) + "\n")
+        environment = {
+            synthesis_tool_budget.CONTEXT_ENV[field]: value
+            for field, value in {
+                "book_id": self.book_id,
+                "cycle_id": self.cycle_id,
+                "action_id": action_id,
+                "stage": stage,
+                "backend": self.backend,
+                "input_hash": self.input_hash,
+            }.items()
+        }
+
+        submission = synthesis_tool_budget.reserve_tool_attempt(
+            self.project,
+            synthesis_tool_budget.GLOBAL_AUDIT_TOOL,
+            {},
+            environment,
+        )
+        synthesis_tool_budget.record_tool_result(
+            self.project,
+            submission,
+            "correctable_validation_rejected",
+            "removable extra field",
+            safe_diagnostic={
+                "code": "schema_extra_forbidden",
+                "claim_id": None,
+                "field_path": "curiosity_preservation.extra_field",
+                "correctable": True,
+            },
+        )
+        correction = synthesis_tool_budget.reserve_tool_attempt(
+            self.project,
+            synthesis_tool_budget.GLOBAL_AUDIT_TOOL,
+            {},
+            environment,
+        )
+        self.assertEqual(correction["attempt_number"], 2)
+        synthesis_tool_budget.record_tool_result(
+            self.project,
+            correction,
+            "success",
+        )
+        with self.assertRaisesRegex(
+            synthesis_tool_budget.SynthesisToolBudgetError,
+            "submission budget is exhausted",
+        ):
+            synthesis_tool_budget.reserve_tool_attempt(
+                self.project,
+                synthesis_tool_budget.GLOBAL_AUDIT_TOOL,
+                {},
+                environment,
+            )
+
+        summary = synthesis_tool_budget.finalize_action_budget(
+            self.project,
+            self.book_id,
+            action_id,
+        )
+        self.assertEqual(summary["maximum_reads"], 0)
+        self.assertEqual(summary["maximum_submissions"], 2)
+        self.assertEqual(
+            summary["second_submission_rule"],
+            "correctable_validation_rejected_only",
+        )
+
+    def test_global_audit_noncorrectable_rejection_is_terminal(self) -> None:
+        action_id = "global-audit-S1-terminal-test"
+        stage = "global-audit-S1"
+        event = {
+            "schema_version": "1.0",
+            "event": "contract_opened",
+            "book_id": self.book_id,
+            "cycle_id": self.cycle_id,
+            "action_id": action_id,
+            "stage": stage,
+            "backend": self.backend,
+            "input_hash": self.input_hash,
+            "tool_budget": {
+                "controlled_tools": [
+                    synthesis_tool_budget.GLOBAL_AUDIT_TOOL,
+                ]
+            },
+        }
+        with self.ledger.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(event) + "\n")
+        environment = {
+            synthesis_tool_budget.CONTEXT_ENV[field]: value
+            for field, value in {
+                "book_id": self.book_id,
+                "cycle_id": self.cycle_id,
+                "action_id": action_id,
+                "stage": stage,
+                "backend": self.backend,
+                "input_hash": self.input_hash,
+            }.items()
+        }
+
+        submission = synthesis_tool_budget.reserve_tool_attempt(
+            self.project,
+            synthesis_tool_budget.GLOBAL_AUDIT_TOOL,
+            {},
+            environment,
+        )
+        synthesis_tool_budget.record_tool_result(
+            self.project,
+            submission,
+            "argument_validation_rejected",
+            "identity field invalid",
+        )
+        with self.assertRaisesRegex(
+            synthesis_tool_budget.SynthesisToolBudgetError,
+            "only after a correctable",
+        ):
+            synthesis_tool_budget.reserve_tool_attempt(
+                self.project,
+                synthesis_tool_budget.GLOBAL_AUDIT_TOOL,
+                {},
+                environment,
+            )
+
+    def test_global_audit_extra_field_has_safe_correction_diagnostic(
+        self,
+    ) -> None:
+        with self.assertRaises(ValidationError) as raised:
+            mcp_server.StagedSynthesisGlobalAuditSubmission.model_validate(
+                {
+                    "book_id": self.book_id,
+                    "attempt": 1,
+                    "context_sha256": "a" * 64,
+                    "inventory_sha256": "b" * 64,
+                    "plan_sha256": "c" * 64,
+                    "submission_sha256": "d" * 64,
+                    "book_sha256": "e" * 64,
+                    "central_question_preserved": True,
+                    "curiosity_preservation": {
+                        "status": "preserved",
+                        "explanation": "The motivating inquiry remains.",
+                        "central_question_preserved": True,
+                    },
+                }
+            )
+
+        diagnostic = mcp_server._audit_extra_field_schema_diagnostic(
+            raised.exception
+        )
+        self.assertEqual(
+            diagnostic,
+            {
+                "code": "schema_extra_forbidden",
+                "claim_id": None,
+                "field_path": (
+                    "curiosity_preservation.central_question_preserved"
+                ),
+                "correctable": True,
+            },
+        )
 
 
 if __name__ == "__main__":

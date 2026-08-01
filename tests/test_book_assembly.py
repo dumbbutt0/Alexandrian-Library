@@ -740,6 +740,10 @@ class BookAssemblyTests(unittest.TestCase):
             catalog["books"][0]["book_sha256"],
             candidate["candidate_sha256"],
         )
+        self.assertEqual(
+            catalog["books"][0]["finalization_authority"],
+            "human",
+        )
 
         assembly_path = self.book_directory / "assembly.json"
         editorial_path = self.book_directory / "editorial_review.json"
@@ -755,7 +759,7 @@ class BookAssemblyTests(unittest.TestCase):
         self.write_json(assembly_path, assembly)
         with self.assertRaisesRegex(
             bookshelf.BookshelfError,
-            "Human approval does not match the final edition",
+            "Finalization decision does not match the final edition",
         ):
             bookshelf.build_bookshelf(
                 self.project_path,

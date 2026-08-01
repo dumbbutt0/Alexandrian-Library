@@ -1,12 +1,16 @@
 # Alexandrian Library
 
 Alexandrian Library is a local research prototype that captures durable
-conversations, reviews their claims and evidence, and develops approved
-material into books with human checkpoints.
+conversations, reviews their claims and evidence, and develops validated
+material into books under a source-permissions-only human approval policy.
 
-Before final editorial approval, the Library performs one bounded whole-book
-synthesis and an independent claim-preservation audit. A blocking audit permits
-one correction and one final audit. There is no third autonomous attempt.
+The user is asked only when an unknown research source requires permission.
+Research routing, plan acceptance, synthesis correction, final editorial
+release, finalization, and bookshelf projection proceed automatically only when
+their deterministic or independent audit gates pass. Unresolved project
+decisions remain explicitly unresolved; the system never records them as human
+decisions. A blocking whole-book audit permits one correction and one final
+audit. There is no third autonomous attempt.
 
 The synthesis stage uses Alexandrian Plain Technical English v1, a
 project-owned readability profile. It does not claim ASD-STE100 compliance and

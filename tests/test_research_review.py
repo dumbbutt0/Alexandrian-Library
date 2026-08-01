@@ -854,7 +854,6 @@ class ResearchReviewTests(unittest.TestCase):
                 "--json",
                 "--sandbox",
                 "read-only",
-                "review prompt",
             ],
         )
         self.assertEqual(
@@ -865,7 +864,6 @@ class ResearchReviewTests(unittest.TestCase):
                 "--json",
                 "--sandbox",
                 "read-only",
-                "book prompt",
             ],
         )
         self.assertEqual(
@@ -876,7 +874,6 @@ class ResearchReviewTests(unittest.TestCase):
                 "--json",
                 "--sandbox",
                 "read-only",
-                "chapter prompt",
             ],
         )
         self.assertEqual(
@@ -887,7 +884,6 @@ class ResearchReviewTests(unittest.TestCase):
                 "--json",
                 "--sandbox",
                 "read-only",
-                "evaluation prompt",
             ],
         )
         self.assertEqual(
@@ -899,9 +895,19 @@ class ResearchReviewTests(unittest.TestCase):
                 "--json",
                 "--sandbox",
                 "read-only",
-                "research prompt",
             ],
         )
+
+        for command, prompt in (
+            (claude_command, "review prompt"),
+            (claude_book_command, "book prompt"),
+            (claude_chapter_command, "chapter prompt"),
+            (claude_evaluator_command, "evaluation prompt"),
+            (claude_researcher_command, "research prompt"),
+            (claude_synthesis_command, "synthesis prompt"),
+            (claude_audit_command, "audit prompt"),
+        ):
+            self.assertNotIn(prompt, command)
 
     def test_staged_failure_diagnostic_keeps_safe_tool_evidence(self) -> None:
         project = self.project_path
@@ -1011,7 +1017,7 @@ class ResearchReviewTests(unittest.TestCase):
             diagnostic["diagnostic_sha256"],
         )
 
-    def test_captured_backend_does_not_inherit_terminal_input(self) -> None:
+    def test_captured_backend_sends_prompt_only_through_stdin(self) -> None:
         process = Mock(
             pid=123,
             returncode=0,
@@ -1044,13 +1050,35 @@ class ResearchReviewTests(unittest.TestCase):
         self.assertEqual(response, "Captured response.")
         self.assertIs(
             popen.call_args.kwargs["stdin"],
-            backend_selector.subprocess.DEVNULL,
+            backend_selector.subprocess.PIPE,
+        )
+        self.assertNotIn("Review prompt", popen.call_args.args[0])
+        self.assertEqual(
+            process.communicate.call_args.kwargs["input"],
+            "Review prompt",
         )
         self.assertTrue(popen.call_args.kwargs["start_new_session"])
         self.assertEqual(
             process.communicate.call_args.kwargs["timeout"],
             backend_selector.AUTONOMOUS_CALL_TIMEOUT_SECONDS,
         )
+
+    def test_large_prompt_never_enters_provider_argument_list(self) -> None:
+        large_prompt = "bounded synthesis packet\n" * 20_000
+
+        for backend, program_path in (
+            ("codex", "/usr/bin/codex"),
+            ("claude", "/usr/bin/claude"),
+        ):
+            command = backend_selector.build_capture_command(
+                backend,
+                program_path,
+                large_prompt,
+                backend_selector.BOOK_SYNTHESIS_CALL,
+            )
+
+            self.assertNotIn(large_prompt, command)
+            self.assertLess(sum(len(argument) for argument in command), 8_192)
 
     def test_autonomous_backend_timeout_is_bounded_and_sanitized(self) -> None:
         private_prompt = "private planning prompt"

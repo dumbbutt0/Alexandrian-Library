@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import bookshelf
 
@@ -251,6 +252,65 @@ class BookshelfTests(unittest.TestCase):
         )
         self.assertEqual(catalog["book_count"], 1)
         self.assertEqual(catalog["books"][0]["source_count"], 0)
+
+    def test_synthesized_final_accepts_exact_active_cycle_receipt(
+        self,
+    ) -> None:
+        book_id = "book-active-cycle"
+        book_directory = self.books_path / book_id
+        receipt_path = (
+            book_directory
+            / "synthesis_cycles"
+            / "cycle-009"
+            / "receipt.json"
+        )
+        self.write_json(receipt_path, {"record": "active receipt"})
+        receipt = {
+            "book_id": book_id,
+            "lifecycle_status": "ready_for_editorial",
+            "book_sha256": "a" * 64,
+            "candidate_sha256": "b" * 64,
+            "receipt_sha256": "c" * 64,
+            "selected_attempt": 1,
+            "context_sha256": "d" * 64,
+            "inventory_sha256": "e" * 64,
+            "plan_sha256": "f" * 64,
+            "audit_sha256": "1" * 64,
+            "profile": {"name": "bounded profile"},
+        }
+        assembly = {
+            "book_id": book_id,
+            "synthesis_receipt_path": self.relative_path(receipt_path),
+            "synthesis_receipt_file_sha256": self.file_sha256(receipt_path),
+            "book_sha256": receipt["book_sha256"],
+            "candidate_sha256": receipt["candidate_sha256"],
+            "synthesis_receipt_sha256": receipt["receipt_sha256"],
+            "synthesis_attempt": receipt["selected_attempt"],
+            "synthesis_context_sha256": receipt["context_sha256"],
+            "synthesis_inventory_sha256": receipt["inventory_sha256"],
+            "synthesis_plan_sha256": receipt["plan_sha256"],
+            "synthesis_audit_sha256": receipt["audit_sha256"],
+            "publication_profile": receipt["profile"],
+        }
+        candidate = {"candidate_sha256": receipt["candidate_sha256"]}
+
+        with patch.object(
+            bookshelf.book_synthesis,
+            "synthesis_receipt_path",
+            return_value=receipt_path,
+        ), patch.object(
+            bookshelf.book_synthesis,
+            "verify_receipt",
+            return_value=receipt,
+        ):
+            verified = bookshelf.verify_synthesized_final(
+                self.project_path,
+                book_directory,
+                assembly,
+                candidate,
+            )
+
+        self.assertEqual(verified, receipt)
 
     def test_rebuild_is_idempotent_and_does_not_duplicate_books(self) -> None:
         self.create_final_book()

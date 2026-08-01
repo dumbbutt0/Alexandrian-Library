@@ -190,10 +190,13 @@ def verify_synthesized_final(
     receipt_path = resolve_recorded_file(
         project_path,
         assembly.get("synthesis_receipt_path"),
-        book_directory / "synthesis",
+        book_directory,
         "Synthesis receipt",
     )
-    expected_receipt_path = book_directory / "synthesis" / "receipt.json"
+    expected_receipt_path = book_synthesis.synthesis_receipt_path(
+        project_path,
+        book_id,
+    )
     if receipt_path != expected_receipt_path.resolve():
         raise BookshelfError(
             f"Synthesis receipt is not canonical for {book_id}."
@@ -353,15 +356,32 @@ def project_final_book(
         "Editorial review",
     )
     editorial = read_json_object(editorial_path, "Editorial review")
+    finalization_authority = editorial.get("decision_authority", "human")
     if (
         editorial.get("book_id") != book_id
         or editorial.get("decision") != "approved_for_finalization"
         or editorial.get("candidate_sha256") != assembly.get("candidate_sha256")
         or editorial.get("candidate_assembly_sha256")
         != assembly.get("candidate_assembly_sha256")
+        or finalization_authority
+        not in {"human", "automated_audit_policy"}
+        or (
+            finalization_authority == "automated_audit_policy"
+            and editorial.get("workflow_policy_version")
+            != "source-permissions-only-v1"
+        )
     ):
         raise BookshelfError(
-            f"Final assembly lacks matching human approval for {book_id}."
+            f"Final assembly lacks a matching finalization decision for {book_id}."
+        )
+    if schema_version == "1.1" and (
+        assembly.get("finalization_authority", "human")
+        != finalization_authority
+        or assembly.get("workflow_policy_version")
+        != editorial.get("workflow_policy_version")
+    ):
+        raise BookshelfError(
+            f"Finalization authority does not match for {book_id}."
         )
     if synthesis_receipt is not None and (
         editorial.get("synthesis_receipt_path")
@@ -374,7 +394,7 @@ def project_final_book(
         != assembly.get("synthesis_attempt")
     ):
         raise BookshelfError(
-            f"Human approval does not match the final edition for {book_id}."
+            f"Finalization decision does not match the final edition for {book_id}."
         )
 
     manifest_record = manifest_input(candidate_assembly)
@@ -452,6 +472,8 @@ def project_final_book(
             assembly.get("assembled_at"),
             f"{book_id} finalization time",
         ),
+        "finalization_authority": finalization_authority,
+        "workflow_policy_version": editorial.get("workflow_policy_version"),
         "chapter_count": len(chapters),
         "chapters": chapters,
         "source_count": len(source_receipt_ids),

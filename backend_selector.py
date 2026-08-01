@@ -40,6 +40,32 @@ BACKEND_MODEL_PROVIDERS = {
 }
 RESEARCH_MODES = {"safe", "auto_approve"}
 DEFAULT_RESEARCH_MODE = "safe"
+WORKFLOW_POLICY_VERSION = "source-permissions-only-v1"
+DECISION_AUTHORITY_HUMAN = "human"
+DECISION_AUTHORITY_AUTOMATED = "automated_audit_policy"
+DECISION_AUTHORITIES = {
+    DECISION_AUTHORITY_HUMAN,
+    DECISION_AUTHORITY_AUTOMATED,
+}
+
+
+def decision_authority_fields(authority: str) -> dict:
+    """Return honest provenance for a workflow decision artifact."""
+    if authority not in DECISION_AUTHORITIES:
+        raise ValueError("Workflow decision authority is invalid.")
+    fields = {"decision_authority": authority}
+    if authority == DECISION_AUTHORITY_AUTOMATED:
+        fields["workflow_policy_version"] = WORKFLOW_POLICY_VERSION
+    return fields
+
+
+class WorkflowCheckpointRequired(RuntimeError):
+    """Signal that the noninteractive controller reached human authority."""
+
+    def __init__(self, status: str, **details: object) -> None:
+        super().__init__(status)
+        self.status = status
+        self.details = details
 
 CONVERSATION_CALL = "conversation"
 REVIEW_CALL = "review"
@@ -1443,7 +1469,11 @@ def build_staged_global_plan_audit_prompt(
         "supplied question in order with pass or fail, then return only "
         "approve when all pass, otherwise reject. Do not edit, repair, "
         "replace, regenerate, or propose a new plan. Call "
-        "submit_staged_synthesis_global_plan_audit exactly once, then stop. "
+        "Call submit_staged_synthesis_global_plan_audit once. If and only "
+        "if that call receives an explicitly correctable schema rejection, "
+        "remove only the invalid extra field and submit once more. Do not "
+        "change the findings or verdict during that correction. Stop after "
+        "a successful submission or the second attempt. "
         "Do not generate an edition, research, or write files directly.\n\n"
         "<staged_global_plan_audit_task>\n"
         f"{json.dumps(task, ensure_ascii=False, indent=2)}\n"
@@ -1513,7 +1543,11 @@ def build_staged_global_audit_prompt(
         "auditing. Check the central question, curiosity, limitations, novel "
         "or unmapped material, terminology, and whole-book coherence. Name "
         "only chapter IDs that actually require correction. Call "
-        "submit_staged_synthesis_global_audit exactly once, then stop. Do not "
+        "submit_staged_synthesis_global_audit once. If and only if that call "
+        "receives an explicitly correctable schema rejection, remove only "
+        "the invalid extra field and submit once more. Do not change the "
+        "findings during that correction. Stop after a successful submission "
+        "or the second attempt. Do not "
         "edit, research, or write files directly.\n\n"
         "<staged_global_audit_task>\n"
         f"{json.dumps(task, ensure_ascii=False, indent=2)}\n"
@@ -1754,13 +1788,16 @@ def build_capture_command(
         }:
             command.extend(["--sandbox", "read-only"])
 
-        return [*command, prompt]
+        # Prompts are delivered through standard input by
+        # ``capture_backend_response``. Keeping them out of argv avoids the
+        # operating-system argument-size limit for large, bounded synthesis
+        # packets and keeps private prompt text out of process listings.
+        return command
 
     if backend == "claude":
         command = [
             program_path,
             "-p",
-            prompt,
             "--output-format",
             "stream-json",
             "--verbose",
@@ -1920,13 +1957,16 @@ def capture_backend_response(
             command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE,
             text=True,
             cwd=PROJECT_PATH,
             start_new_session=True,
             env=process_environment,
         )
-        stdout, stderr = process.communicate(timeout=timeout_seconds)
+        stdout, stderr = process.communicate(
+            input=prompt,
+            timeout=timeout_seconds,
+        )
     except subprocess.TimeoutExpired:
         if process is not None:
             try:
@@ -1990,28 +2030,72 @@ def resolve_pending_source_requests(conversation_id: str) -> bool:
     if not pending_requests:
         return False
 
-    for request_record in pending_requests:
-        decision = prompt_for_source_decision(request_record)
+    decisions = [
+        {
+            "request_id": request_record["request_id"],
+            "decision": prompt_for_source_decision(request_record),
+        }
+        for request_record in pending_requests
+    ]
+    return apply_pending_source_decisions(conversation_id, decisions)
 
+
+def _validate_source_decisions(
+    pending_requests: list[dict],
+    decisions: list[dict],
+) -> dict[str, str]:
+    """Validate one exact, complete decision set before changing any state."""
+    if not isinstance(decisions, list) or not decisions:
+        raise ValueError("Source decisions must be a non-empty list.")
+    expected_ids = [request["request_id"] for request in pending_requests]
+    decision_map: dict[str, str] = {}
+    for item in decisions:
+        if not isinstance(item, dict) or set(item) != {
+            "request_id",
+            "decision",
+        }:
+            raise ValueError(
+                "Each source decision requires only request_id and decision."
+            )
+        request_id = item["request_id"]
+        decision = item["decision"]
+        if (
+            not isinstance(request_id, str)
+            or request_id in decision_map
+            or decision not in {"allow_once", "allow_domain", "reject"}
+        ):
+            raise ValueError("Source decision set is invalid or duplicated.")
+        decision_map[request_id] = decision
+    if set(decision_map) != set(expected_ids):
+        raise ValueError(
+            "Source decisions must cover every pending request exactly once."
+        )
+    return decision_map
+
+
+def apply_pending_source_decisions(
+    conversation_id: str,
+    decisions: list[dict],
+) -> bool:
+    """Apply exact human decisions to the canonical review source session."""
+    session = load_review_session(conversation_id)
+    pending_requests = list(session["pending_requests"])
+    if not pending_requests:
+        raise RuntimeError("Research review has no pending source requests.")
+    decision_map = _validate_source_decisions(pending_requests, decisions)
+    decided_at = current_utc_time()
+    for request_record in pending_requests:
+        decision = decision_map[request_record["request_id"]]
         if decision == "allow_domain":
             add_approved_domain(request_record["domain"])
-
         session["decisions"].append(
             {
                 **request_record,
                 "decision": decision,
-                "decided_at": current_utc_time(),
+                "decided_at": decided_at,
             }
         )
-
-    resolved_request_ids = {
-        request_record["request_id"] for request_record in pending_requests
-    }
-    session["pending_requests"] = [
-        request_record
-        for request_record in session["pending_requests"]
-        if request_record.get("request_id") not in resolved_request_ids
-    ]
+    session["pending_requests"] = []
     save_review_session(conversation_id, session)
     return True
 
@@ -2041,30 +2125,59 @@ def resolve_pending_chapter_source_requests(
         print(f"\n{index}. {request_record['domain']}")
         print(f"   URL: {request_record['url']}")
         print(f"   Why: {request_record['reason_for_source']}")
+    decisions = []
     for index, request_record in enumerate(pending_requests, start=1):
         print(f"\nDecision {index} of {len(pending_requests)}")
         try:
             decision = prompt_for_source_decision(request_record)
         except EOFError:
             return False
+        decisions.append(
+            {
+                "request_id": request_record["request_id"],
+                "decision": decision,
+            }
+        )
+    return apply_pending_chapter_source_decisions(
+        book_id,
+        chapter_id,
+        assessment_id,
+        research_mode,
+        decisions,
+    )
+
+
+def apply_pending_chapter_source_decisions(
+    book_id: str,
+    chapter_id: str,
+    assessment_id: str,
+    research_mode: str,
+    decisions: list[dict],
+) -> bool:
+    """Apply exact human decisions to one bound chapter source session."""
+    session = load_or_create_chapter_research_session(
+        book_id,
+        chapter_id,
+        assessment_id,
+        research_mode,
+    )
+    pending_requests = list(session["pending_requests"])
+    if not pending_requests:
+        raise RuntimeError("Chapter has no pending source requests.")
+    decision_map = _validate_source_decisions(pending_requests, decisions)
+    decided_at = current_utc_time()
+    for request_record in pending_requests:
+        decision = decision_map[request_record["request_id"]]
         if decision == "allow_domain":
             add_approved_domain(request_record["domain"])
         session["decisions"].append(
             {
                 **request_record,
                 "decision": decision,
-                "decided_at": current_utc_time(),
+                "decided_at": decided_at,
             }
         )
-    resolved_ids = {
-        request_record["request_id"]
-        for request_record in pending_requests
-    }
-    session["pending_requests"] = [
-        request_record
-        for request_record in session["pending_requests"]
-        if request_record.get("request_id") not in resolved_ids
-    ]
+    session["pending_requests"] = []
     save_chapter_research_session(session)
     return True
 
@@ -2201,6 +2314,203 @@ def prompt_for_curiosity_signature(signature: dict) -> tuple[str, dict]:
     return "corrected", approved
 
 
+def _validate_approved_curiosity_signature(value: object) -> dict:
+    """Validate a human-approved signature without inventing provenance."""
+    if not isinstance(value, dict):
+        raise ValueError("Approved curiosity signature must be an object.")
+    expected_fields = {
+        field_name for field_name, _, _ in CURIOSITY_SIGNATURE_FIELDS
+    }
+    if set(value) != expected_fields:
+        raise ValueError("Approved curiosity signature is incomplete.")
+    for field_name, _, allows_multiple in CURIOSITY_SIGNATURE_FIELDS:
+        items = value[field_name]
+        if not isinstance(items, list) or (
+            not allows_multiple and len(items) > 1
+        ):
+            raise ValueError(
+                f"Approved curiosity signature field is invalid: {field_name}"
+            )
+        for item in items:
+            if (
+                not isinstance(item, dict)
+                or set(item)
+                != {"text", "provenance", "transcript_references"}
+                or not isinstance(item["text"], str)
+                or not item["text"].strip()
+                or item["provenance"]
+                not in {"review_extraction", "human_checkpoint"}
+                or not isinstance(item["transcript_references"], list)
+                or any(
+                    not isinstance(reference, str)
+                    for reference in item["transcript_references"]
+                )
+                or (
+                    item["provenance"] == "review_extraction"
+                    and not item["transcript_references"]
+                )
+                or (
+                    item["provenance"] == "human_checkpoint"
+                    and item["transcript_references"]
+                )
+            ):
+                raise ValueError(
+                    "Approved curiosity signature contains invalid provenance."
+                )
+    return value
+
+
+def record_human_review_decision(
+    json_path: Path,
+    *,
+    decision: str,
+    decision_authority: str = DECISION_AUTHORITY_HUMAN,
+    confirmed_core_question_or_thesis: str | None = None,
+    curiosity_signature_decision: str | None = None,
+    approved_curiosity_signature: dict | None = None,
+    accepted_belief_revisions: list[str] | None = None,
+    disputed_points: list[str] | None = None,
+    excluded_material: list[str] | None = None,
+) -> Path:
+    """Validate and record one canonical research-routing decision."""
+    authority_fields = decision_authority_fields(decision_authority)
+    try:
+        review_document = json.loads(json_path.read_text(encoding="utf-8"))
+        review = review_document["review"]
+        core_question = review["core_question"]["text"]
+        research_route = review["research_route"]
+        reviewer_signature = validate_review_curiosity_signature(
+            review["curiosity_signature"]
+        )
+    except (KeyError, TypeError, json.JSONDecodeError, OSError) as error:
+        raise RuntimeError(
+            f"The research review could not be prepared for approval: {json_path}."
+        ) from error
+    eligible = research_route == "ready_for_book_consideration"
+    allowed_decisions = {
+        "needs_research_or_revision",
+        "hold",
+        (
+            "approved_for_book_planning"
+            if eligible
+            else "accepted_research_route"
+        ),
+    }
+    if decision not in allowed_decisions:
+        raise ValueError(
+            "Review decision is incompatible with the canonical research route."
+        )
+    list_fields = (
+        accepted_belief_revisions or [],
+        disputed_points or [],
+        excluded_material or [],
+    )
+    if any(
+        not isinstance(items, list)
+        or any(not isinstance(item, str) or not item.strip() for item in items)
+        for items in list_fields
+    ):
+        raise ValueError("Review decision lists must contain non-empty text.")
+    confirmed = confirmed_core_question_or_thesis or core_question
+    if not isinstance(confirmed, str) or not confirmed.strip():
+        raise ValueError("Confirmed core question must contain text.")
+
+    book_planning_gate = (
+        "ready"
+        if decision == "approved_for_book_planning" and eligible
+        else "blocked"
+    )
+    if book_planning_gate == "ready":
+        if curiosity_signature_decision == "accepted":
+            approved_signature = accepted_curiosity_signature(
+                reviewer_signature
+            )
+            if (
+                approved_curiosity_signature is not None
+                and approved_curiosity_signature != approved_signature
+            ):
+                raise ValueError(
+                    "Accepted curiosity signature must match the review exactly."
+                )
+        elif curiosity_signature_decision == "corrected":
+            approved_signature = _validate_approved_curiosity_signature(
+                approved_curiosity_signature
+            )
+        else:
+            raise ValueError(
+                "Book approval requires an accepted or corrected curiosity signature."
+            )
+    else:
+        if (
+            curiosity_signature_decision not in {None, "not_reviewed"}
+            or approved_curiosity_signature is not None
+        ):
+            raise ValueError(
+                "A blocked book gate cannot approve a curiosity signature."
+            )
+        curiosity_signature_decision = "not_reviewed"
+        approved_signature = None
+
+    decision_path = REVIEW_DECISIONS_PATH / f"{json_path.stem}.json"
+    if decision_path.exists():
+        raise RuntimeError(
+            f"A human review checkpoint already exists at {decision_path}."
+        )
+    decision_record = {
+        "review_id": review_document["review_id"],
+        "conversation_id": review_document["conversation_id"],
+        "decided_at": current_utc_time(),
+        "decision": decision,
+        "review_research_route": research_route,
+        "book_planning_gate": book_planning_gate,
+        "confirmed_core_question_or_thesis": confirmed.strip(),
+        "curiosity_signature_decision": curiosity_signature_decision,
+        "approved_curiosity_signature": approved_signature,
+        "accepted_belief_revisions": [item.strip() for item in list_fields[0]],
+        "disputed_points": [item.strip() for item in list_fields[1]],
+        "excluded_material": [item.strip() for item in list_fields[2]],
+        **authority_fields,
+    }
+    atomic_write_json(decision_path, decision_record)
+    return decision_path
+
+
+def record_automatic_review_decision(json_path: Path) -> Path:
+    """Apply the independent review route without a routine user gate."""
+    document = load_workflow_json(json_path, "Canonical research review")
+    review = document.get("review", {})
+    route = review.get("research_route")
+    core_question = review.get("core_question", {}).get("text")
+    signature = validate_review_curiosity_signature(
+        review.get("curiosity_signature")
+    )
+    if route == "ready_for_book_consideration":
+        return record_human_review_decision(
+            json_path,
+            decision="approved_for_book_planning",
+            decision_authority=DECISION_AUTHORITY_AUTOMATED,
+            confirmed_core_question_or_thesis=core_question,
+            curiosity_signature_decision="accepted",
+            approved_curiosity_signature=accepted_curiosity_signature(
+                signature
+            ),
+        )
+    if route in {
+        "research_seed",
+        "research_checkpoint",
+        "continue_conversation",
+    }:
+        decision = "needs_research_or_revision"
+    else:
+        decision = "accepted_research_route"
+    return record_human_review_decision(
+        json_path,
+        decision=decision,
+        decision_authority=DECISION_AUTHORITY_AUTOMATED,
+        confirmed_core_question_or_thesis=core_question,
+    )
+
+
 def record_human_review_checkpoint(json_path: Path) -> Path | None:
     """Record the user's research-routing and possible book-planning decision."""
     try:
@@ -2296,31 +2606,18 @@ def record_human_review_checkpoint(json_path: Path) -> Path | None:
         curiosity_signature_decision = "not_reviewed"
         approved_curiosity_signature = None
 
-    decision_path = REVIEW_DECISIONS_PATH / f"{json_path.stem}.json"
-    decision_record = {
-        "review_id": review_document["review_id"],
-        "conversation_id": review_document["conversation_id"],
-        "decided_at": current_utc_time(),
-        "decision": decisions[choice],
-        "review_research_route": research_route,
-        "book_planning_gate": book_planning_gate,
-        "confirmed_core_question_or_thesis": (
+    return record_human_review_decision(
+        json_path,
+        decision=decisions[choice],
+        confirmed_core_question_or_thesis=(
             confirmed_question or core_question
         ),
-        "curiosity_signature_decision": curiosity_signature_decision,
-        "approved_curiosity_signature": approved_curiosity_signature,
-        "accepted_belief_revisions": accepted_revisions,
-        "disputed_points": disputed_points,
-        "excluded_material": excluded_material,
-    }
-
-    if decision_path.exists():
-        raise RuntimeError(
-            f"A human review checkpoint already exists at {decision_path}."
-        )
-
-    atomic_write_json(decision_path, decision_record)
-    return decision_path
+        curiosity_signature_decision=curiosity_signature_decision,
+        approved_curiosity_signature=approved_curiosity_signature,
+        accepted_belief_revisions=accepted_revisions,
+        disputed_points=disputed_points,
+        excluded_material=excluded_material,
+    )
 
 
 def promote_review_to_index(
@@ -5782,6 +6079,38 @@ def reconcile_interrupted_chapter_action(
     }
 
 
+def reject_incomplete_chapter_transition(
+    book_id: str,
+    chapter_id: str,
+    note: str,
+) -> dict:
+    """Reject one exact incomplete provider transition after human review."""
+    if not isinstance(note, str) or not note.strip():
+        raise ValueError("Artifact-review note cannot be empty.")
+    ledger = chapter_controller.ChapterEventLedger(
+        chapter_controller_ledger_path(book_id, chapter_id)
+    )
+    events = ledger.read()
+    active = ledger.active_contract(events)
+    if active is None:
+        raise RuntimeError("Chapter has no artifact review checkpoint.")
+    contract_id = active["payload"]["contract_id"]
+    requirement = ledger.artifact_review_requirement(contract_id)
+    if requirement is None:
+        raise RuntimeError("Chapter has no artifact review checkpoint.")
+    current_snapshot = build_chapter_controller_snapshot(
+        book_id,
+        chapter_id,
+        include_interrupted_contract=False,
+    )
+    return ledger.reconcile(
+        contract_id,
+        "provider_output_rejected",
+        current_snapshot,
+        note.strip(),
+    )
+
+
 def record_chapter_artifact_review_checkpoint(
     book_id: str,
     chapter_id: str,
@@ -5836,16 +6165,35 @@ def record_chapter_artifact_review_checkpoint(
             break
         print("A concrete review note is required.")
 
-    current_snapshot = build_chapter_controller_snapshot(
+    return reject_incomplete_chapter_transition(
         book_id,
         chapter_id,
-        include_interrupted_contract=False,
-    )
-    return ledger.reconcile(
-        contract_id,
-        "provider_output_rejected",
-        current_snapshot,
         note,
+    )
+
+
+def authorize_chapter_retry(
+    book_id: str,
+    chapter_id: str,
+    changed_condition: str,
+) -> dict:
+    """Authorize the sole retry after validating one concrete change."""
+    if not isinstance(changed_condition, str) or not changed_condition.strip():
+        raise ValueError("A concrete changed condition is required.")
+    snapshot = build_chapter_controller_snapshot(book_id, chapter_id)
+    decision = chapter_controller.decide_next_action(snapshot)
+    ledger = chapter_controller.ChapterEventLedger(
+        chapter_controller_ledger_path(book_id, chapter_id)
+    )
+    requirement = ledger.retry_requirement(snapshot, decision)
+    if (
+        requirement is None
+        or requirement.get("status") != "authorization_required"
+    ):
+        raise RuntimeError("Chapter has no retry authorization checkpoint.")
+    return ledger.authorize_retry(
+        requirement["failed_contract_id"],
+        changed_condition.strip(),
     )
 
 
@@ -5905,8 +6253,9 @@ def record_chapter_retry_checkpoint(
         if changed_condition:
             break
         print("A concrete changed condition is required.")
-    return ledger.authorize_retry(
-        failed_contract_id,
+    return authorize_chapter_retry(
+        book_id,
+        chapter_id,
         changed_condition,
     )
 
@@ -8508,8 +8857,15 @@ def record_final_pass_repair_checkpoint(
     )
 
 
-def record_book_plan_checkpoint(manifest_path: Path) -> Path:
-    """Record the user's independent approval of a generated book plan."""
+def record_book_plan_decision(
+    manifest_path: Path,
+    *,
+    decision: str,
+    notes: list[str] | None = None,
+    decision_authority: str = DECISION_AUTHORITY_HUMAN,
+) -> Path:
+    """Validate and record one canonical book-plan decision."""
+    authority_fields = decision_authority_fields(decision_authority)
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         book_id = manifest["book_id"]
@@ -8518,6 +8874,80 @@ def record_book_plan_checkpoint(manifest_path: Path) -> Path:
             f"The book manifest could not be prepared for approval: {manifest_path}."
         ) from error
 
+    if decision not in {
+        "approved_for_drafting",
+        "needs_plan_revision",
+        "hold",
+    }:
+        raise ValueError("Book-plan decision is invalid.")
+    notes = [] if notes is None else notes
+    if not isinstance(notes, list) or any(
+        not isinstance(note, str) or not note.strip() for note in notes
+    ):
+        raise ValueError("Book-plan notes must contain non-empty text.")
+    approval_path = manifest_path.parent / "approval.json"
+    if approval_path.exists():
+        raise RuntimeError(
+            f"A book-plan approval already exists at {approval_path}."
+        )
+    approval_record = {
+        "book_id": book_id,
+        "decided_at": current_utc_time(),
+        "decision": decision,
+        "chapter_drafting_gate": (
+            "ready" if decision == "approved_for_drafting" else "blocked"
+        ),
+        "notes": [note.strip() for note in notes],
+        **authority_fields,
+    }
+    atomic_write_json(approval_path, approval_record)
+    return approval_path
+
+
+def record_automatic_book_plan_decision(manifest_path: Path) -> Path:
+    """Approve a validator-clean draftable plan or route it for revision."""
+    manifest = load_workflow_json(manifest_path, "Book manifest")
+    included = [
+        chapter
+        for chapter in manifest.get("chapter_plan", [])
+        if isinstance(chapter, dict)
+        and chapter.get("material_disposition") in {"include", "appendix"}
+    ]
+    blockers = []
+    if not included:
+        blockers.append("The plan contains no included chapters.")
+    for chapter in included:
+        if manifest_chapter_is_draft_ready(chapter):
+            continue
+        chapter_id = chapter.get("chapter_id", "unknown chapter")
+        requirements = [
+            requirement.get("description")
+            for requirement in chapter.get("open_requirements", [])
+            if isinstance(requirement, dict)
+            and requirement.get("required_before") == "drafting"
+            and requirement.get("disposition") != "completed"
+            and isinstance(requirement.get("description"), str)
+        ]
+        blockers.append(
+            f"{chapter_id}: "
+            + (
+                "; ".join(requirements)
+                if requirements
+                else "the draft gate is blocked"
+            )
+        )
+    return record_book_plan_decision(
+        manifest_path,
+        decision=(
+            "needs_plan_revision" if blockers else "approved_for_drafting"
+        ),
+        notes=blockers,
+        decision_authority=DECISION_AUTHORITY_AUTOMATED,
+    )
+
+
+def record_book_plan_checkpoint(manifest_path: Path) -> Path:
+    """Record the user's independent approval of a generated book plan."""
     print("\nBook-plan approval checkpoint")
     print("1. Approve the plan and start the chapter completion workflow")
     print("2. Return the plan for revision")
@@ -8542,31 +8972,18 @@ def record_book_plan_checkpoint(manifest_path: Path) -> Path:
             "(optional, separate multiple items with semicolons): "
         )
     )
-    approval_path = manifest_path.parent / "approval.json"
-    approval_record = {
-        "book_id": book_id,
-        "decided_at": current_utc_time(),
-        "decision": decisions[choice],
-        "chapter_drafting_gate": (
-            "ready" if decisions[choice] == "approved_for_drafting" else "blocked"
-        ),
-        "notes": notes,
-    }
-
-    if approval_path.exists():
-        raise RuntimeError(
-            f"A book-plan approval already exists at {approval_path}."
-        )
-
-    atomic_write_json(approval_path, approval_record)
-    return approval_path
+    return record_book_plan_decision(
+        manifest_path,
+        decision=decisions[choice],
+        notes=notes,
+    )
 
 
-def record_editorial_checkpoint(
+def _editorial_checkpoint_context(
     synthesis_receipt_path: Path,
     manifest_path: Path,
-) -> Path:
-    """Bind the user's editorial decision to one audited synthesized edition."""
+) -> tuple[dict, str, list[str], list[dict]]:
+    """Verify and expose the immutable basis for one editorial decision."""
     synthesis_receipt = load_workflow_json(
         synthesis_receipt_path,
         "Synthesis receipt",
@@ -8613,6 +9030,159 @@ def record_editorial_checkpoint(
         and requirement.get("required_before") == "finalization"
         and requirement.get("disposition") != "completed"
     ]
+    return (
+        synthesis_receipt,
+        book_id,
+        included_chapter_ids,
+        outstanding_finalization_requirements,
+    )
+
+
+def record_editorial_decision(
+    synthesis_receipt_path: Path,
+    manifest_path: Path,
+    *,
+    decision: str,
+    notes: list[str] | None = None,
+    chapter_revisions: list[dict] | None = None,
+    decision_authority: str = DECISION_AUTHORITY_HUMAN,
+) -> Path:
+    """Validate and bind one decision to an audited exact edition."""
+    authority_fields = decision_authority_fields(decision_authority)
+    (
+        synthesis_receipt,
+        book_id,
+        included_chapter_ids,
+        outstanding_finalization_requirements,
+    ) = _editorial_checkpoint_context(
+        synthesis_receipt_path,
+        manifest_path,
+    )
+    if decision not in {
+        "approved_for_finalization",
+        "needs_chapter_revision",
+        "hold",
+    }:
+        raise ValueError("Editorial decision is invalid.")
+    notes = [] if notes is None else notes
+    chapter_revisions = [] if chapter_revisions is None else chapter_revisions
+    if not isinstance(notes, list) or any(
+        not isinstance(note, str) or not note.strip() for note in notes
+    ):
+        raise ValueError("Editorial notes must contain non-empty text.")
+    if not isinstance(chapter_revisions, list):
+        raise ValueError("Chapter revisions must be a list.")
+    normalized_revisions = []
+    seen_chapters = set()
+    for revision in chapter_revisions:
+        if (
+            not isinstance(revision, dict)
+            or set(revision) != {"chapter_id", "instructions"}
+            or revision["chapter_id"] not in included_chapter_ids
+            or revision["chapter_id"] in seen_chapters
+            or not isinstance(revision["instructions"], list)
+            or not revision["instructions"]
+            or any(
+                not isinstance(item, str) or not item.strip()
+                for item in revision["instructions"]
+            )
+        ):
+            raise ValueError("Editorial chapter revision is invalid.")
+        seen_chapters.add(revision["chapter_id"])
+        normalized_revisions.append(
+            {
+                "chapter_id": revision["chapter_id"],
+                "instructions": [
+                    item.strip() for item in revision["instructions"]
+                ],
+            }
+        )
+    if decision == "needs_chapter_revision" and not normalized_revisions:
+        raise ValueError(
+            "Chapter revision requires at least one included chapter."
+        )
+    if decision != "needs_chapter_revision" and normalized_revisions:
+        raise ValueError(
+            "Only a chapter-revision decision may include revision instructions."
+        )
+
+    active_book_directory = book_synthesis.book_directory(
+        PROJECT_PATH,
+        book_id,
+    )
+    review_path = active_book_directory / "editorial_review.json"
+    if review_path.exists():
+        raise RuntimeError(
+            f"An editorial decision already exists at {review_path}."
+        )
+    record = {
+        "schema_version": "1.0",
+        "book_id": book_id,
+        "candidate_sha256": synthesis_receipt["candidate_sha256"],
+        "candidate_assembly_sha256": file_sha256(
+            active_book_directory / "candidate_assembly.json"
+        ),
+        "synthesis_receipt_path": str(
+            synthesis_receipt_path.relative_to(PROJECT_PATH)
+        ),
+        "synthesis_receipt_sha256": file_sha256(synthesis_receipt_path),
+        "edition_path": synthesis_receipt["book_path"],
+        "edition_sha256": synthesis_receipt["book_sha256"],
+        "synthesis_attempt": synthesis_receipt["selected_attempt"],
+        "decision": decision,
+        "notes": [note.strip() for note in notes],
+        "chapter_revisions": normalized_revisions,
+        "accepted_finalization_requirements": (
+            outstanding_finalization_requirements
+            if decision == "approved_for_finalization"
+            and decision_authority == DECISION_AUTHORITY_HUMAN
+            else []
+        ),
+        "preserved_unresolved_requirements": (
+            outstanding_finalization_requirements
+            if decision == "approved_for_finalization"
+            and decision_authority == DECISION_AUTHORITY_AUTOMATED
+            else []
+        ),
+        "decided_at": current_utc_time(),
+        **authority_fields,
+    }
+    atomic_write_json(review_path, record)
+    return review_path
+
+
+def record_automatic_editorial_decision(
+    synthesis_receipt_path: Path,
+    manifest_path: Path,
+) -> Path:
+    """Finalize an independently audited edition without settling open work."""
+    return record_editorial_decision(
+        synthesis_receipt_path,
+        manifest_path,
+        decision="approved_for_finalization",
+        notes=[
+            "Independent synthesis audit passed. Unresolved requirements "
+            "remain unresolved and are not treated as user-approved facts "
+            "or project decisions."
+        ],
+        decision_authority=DECISION_AUTHORITY_AUTOMATED,
+    )
+
+
+def record_editorial_checkpoint(
+    synthesis_receipt_path: Path,
+    manifest_path: Path,
+) -> Path:
+    """Bind the user's editorial decision to one audited synthesized edition."""
+    (
+        _,
+        _,
+        included_chapter_ids,
+        outstanding_finalization_requirements,
+    ) = _editorial_checkpoint_context(
+        synthesis_receipt_path,
+        manifest_path,
+    )
 
     print("\nFinal editorial checkpoint")
     if outstanding_finalization_requirements:
@@ -8684,37 +9254,13 @@ def record_editorial_checkpoint(
                 }
             )
 
-    review_path = synthesis_receipt_path.parent.parent / "editorial_review.json"
-    if review_path.exists():
-        raise RuntimeError(
-            f"An editorial decision already exists at {review_path}."
-        )
-    record = {
-        "schema_version": "1.0",
-        "book_id": book_id,
-        "candidate_sha256": synthesis_receipt["candidate_sha256"],
-        "candidate_assembly_sha256": file_sha256(
-            synthesis_receipt_path.parent.parent / "candidate_assembly.json"
-        ),
-        "synthesis_receipt_path": str(
-            synthesis_receipt_path.relative_to(PROJECT_PATH)
-        ),
-        "synthesis_receipt_sha256": file_sha256(synthesis_receipt_path),
-        "edition_path": synthesis_receipt["book_path"],
-        "edition_sha256": synthesis_receipt["book_sha256"],
-        "synthesis_attempt": synthesis_receipt["selected_attempt"],
-        "decision": decisions[choice],
-        "notes": notes,
-        "chapter_revisions": chapter_revisions,
-        "accepted_finalization_requirements": (
-            outstanding_finalization_requirements
-            if decisions[choice] == "approved_for_finalization"
-            else []
-        ),
-        "decided_at": current_utc_time(),
-    }
-    atomic_write_json(review_path, record)
-    return review_path
+    return record_editorial_decision(
+        synthesis_receipt_path,
+        manifest_path,
+        decision=decisions[choice],
+        notes=notes,
+        chapter_revisions=chapter_revisions,
+    )
 
 
 def append_synthesis_controller_event(
@@ -9215,6 +9761,71 @@ def reconcile_terminal_plan_shard_hold(
     return hold
 
 
+def reconcile_terminal_provider_stage_hold(
+    book_id: str,
+    stage: str,
+    target_path: Path,
+    input_hash: str,
+    maximum_provider_calls: int,
+) -> dict | None:
+    """Materialize a missing hold after an older run exhausted a stage."""
+    if maximum_provider_calls != 2 or target_path.exists():
+        return None
+    active_cycle = book_synthesis.active_synthesis_cycle(
+        PROJECT_PATH,
+        book_id,
+    )
+    cycle_id = (
+        "cycle-001"
+        if active_cycle is None
+        else active_cycle["cycle_id"]
+    )
+    ledger_path = (
+        BOOKS_PATH / book_id / "runs" / "synthesis.controller.jsonl"
+    )
+    consumed = consumed_synthesis_stage_backends(
+        ledger_path,
+        stage,
+        cycle_id,
+    )
+    if len(consumed) < maximum_provider_calls:
+        return None
+    hold_path = staged_synthesis.provider_stage_hold_path(
+        PROJECT_PATH,
+        book_id,
+        stage,
+    )
+    if hold_path.is_file():
+        return staged_synthesis.load_provider_stage_hold(hold_path)
+    hold = staged_synthesis.save_provider_stage_hold(
+        PROJECT_PATH,
+        book_id,
+        cycle_id,
+        stage,
+        target_path,
+        input_hash,
+        maximum_provider_calls,
+        consumed[-maximum_provider_calls:],
+    )
+    action_id = "reconcile-" + hashlib.sha256(
+        f"{book_id}:{cycle_id}:{stage}:{hold['hold_sha256']}".encode(
+            "utf-8"
+        )
+    ).hexdigest()[:16]
+    append_synthesis_controller_event(
+        book_id,
+        "provider_hold_created",
+        action_id,
+        stage,
+        cycle_id=cycle_id,
+        hold_path=str(hold_path.relative_to(PROJECT_PATH)),
+        hold_sha256=hold["hold_sha256"],
+        hold_status=hold["status"],
+        reconciled_from_prior_attempts=True,
+    )
+    return hold
+
+
 def controlled_write_tool_for_stage(stage: str) -> str | None:
     """Return the sole write tool permitted for a bounded synthesis stage."""
     if stage.startswith("inventory-"):
@@ -9336,6 +9947,30 @@ def run_staged_provider_action(
             cycle_id,
         )
         if len(prior_backends) >= maximum_stage_calls:
+            controlled_write_tool = controlled_write_tool_for_stage(stage)
+            recovery_input_hash = (
+                capability_preflight.get("input_hash")
+                if capability_preflight is not None
+                else stage_input_sha256
+            )
+            if (
+                controlled_write_tool
+                in {
+                    synthesis_tool_budget.INVENTORY_SUBMIT_TOOL,
+                    synthesis_tool_budget.EDITION_TOOL,
+                    synthesis_tool_budget.AUDIT_UNIT_TOOL,
+                    synthesis_tool_budget.GLOBAL_AUDIT_TOOL,
+                    synthesis_tool_budget.PLAN_AUDIT_SUBMIT_TOOL,
+                }
+                and isinstance(recovery_input_hash, str)
+            ):
+                reconcile_terminal_provider_stage_hold(
+                    book_id,
+                    stage,
+                    target_path,
+                    recovery_input_hash,
+                    maximum_stage_calls,
+                )
             raise RuntimeError(
                 f"{stage} exhausted its {maximum_stage_calls}-call budget."
             )
@@ -9430,9 +10065,19 @@ def run_staged_provider_action(
                     "maximum_reads": (
                         1 if stage == "global-plan-audit-A1" else 0
                     ),
-                    "maximum_submissions": 1,
+                    "maximum_submissions": (
+                        2
+                        if stage == "global-plan-audit-A1"
+                        or stage.startswith("global-audit-S")
+                        else 1
+                    ),
                     "maximum_successful_writes": 1,
-                    "second_submission_rule": "none",
+                    "second_submission_rule": (
+                        "correctable_validation_rejected_only"
+                        if stage == "global-plan-audit-A1"
+                        or stage.startswith("global-audit-S")
+                        else "none"
+                    ),
                     "controlled_tools": (
                         [
                             synthesis_tool_budget.PLAN_AUDIT_READ_TOOL,
@@ -9558,6 +10203,7 @@ def run_staged_provider_action(
                 synthesis_tool_budget.EDITION_TOOL,
                 synthesis_tool_budget.AUDIT_UNIT_TOOL,
                 synthesis_tool_budget.GLOBAL_AUDIT_TOOL,
+                synthesis_tool_budget.PLAN_AUDIT_SUBMIT_TOOL,
             }
         ):
             consumed_after = consumed_synthesis_stage_backends(
@@ -9903,7 +10549,7 @@ def run_next_staged_synthesis_action(
             target,
             build_staged_global_plan_audit_prompt(instructions, task),
             SYNTHESIS_AUDIT_CALL,
-            maximum_stage_calls=1,
+            maximum_stage_calls=2,
             capability_preflight=capability_preflight,
         )
 
@@ -9924,6 +10570,7 @@ def run_next_staged_synthesis_action(
         "edition_provider_held",
         "audit_provider_held",
         "global_audit_provider_held",
+        "plan_audit_provider_held",
     }:
         raise RuntimeError(
             "The active synthesis stage exhausted its two-call provider "
@@ -10204,6 +10851,8 @@ def review_finished_conversation(
     backend: str,
     program_path: str,
     conversation_path: Path,
+    *,
+    interactive_source_decisions: bool = True,
 ) -> tuple[Path, Path, str]:
     """Ask the reviewer to submit one canonical research review through MCP."""
     reviewer_instructions = load_skill_instructions(
@@ -10245,6 +10894,13 @@ def review_finished_conversation(
         if json_path.is_file() and markdown_path.is_file():
             break
 
+        session = load_review_session(conversation_id)
+        if session["pending_requests"] and not interactive_source_decisions:
+            raise WorkflowCheckpointRequired(
+                "source_approval_required",
+                conversation_id=conversation_id,
+                pending_requests=list(session["pending_requests"]),
+            )
         if resolve_pending_source_requests(conversation_id):
             print("\nSource decisions saved. Continuing the research review...")
             continue
@@ -10419,7 +11075,7 @@ def workflow_stage(conversation_path: Path) -> str:
         return "review_checkpoint"
     decision = load_workflow_json(
         decision_path,
-        "Human review checkpoint",
+        "Research-routing decision",
     )
     if (
         decision.get("conversation_id") != conversation_id
@@ -10540,6 +11196,7 @@ def workflow_stage(conversation_path: Path) -> str:
             "edition_provider_held",
             "audit_provider_held",
             "global_audit_provider_held",
+            "plan_audit_provider_held",
         }:
             return "synthesis_held"
         if synthesis_state in {
@@ -10673,13 +11330,13 @@ def workflow_stage(conversation_path: Path) -> str:
 
 WORKFLOW_STAGE_LABELS = {
     "research_review": "research review",
-    "review_checkpoint": "human review checkpoint",
+    "review_checkpoint": "automatic research-routing decision",
     "review_held": "held after research review",
     "research_continuation": "continued research conversation",
     "research_continued": "research continued in a new workflow",
     "knowledge_promotion": "knowledge-index promotion",
     "book_plan": "book planning",
-    "book_plan_checkpoint": "human book-plan checkpoint",
+    "book_plan_checkpoint": "automatic book-plan decision",
     "book_plan_revision": "book-plan revision",
     "book_plan_held": "held after book planning",
     "chapter_plan_blocked": "blocked chapter plan",
@@ -10690,7 +11347,7 @@ WORKFLOW_STAGE_LABELS = {
     "synthesis_correction": "single bounded synthesis correction",
     "synthesis_receipt_recovery": "synthesis receipt recovery",
     "synthesis_held": "held after the second synthesis audit",
-    "editorial_checkpoint": "final human editorial checkpoint",
+    "editorial_checkpoint": "automatic audit-policy finalization",
     "editorial_revision": "editorial chapter revision routing",
     "editorial_revision_recovery": "editorial revision recovery",
     "editorial_held": "held at final editorial review",
@@ -10742,6 +11399,8 @@ def continue_book_workflow(
     backend: str,
     program_path: str,
     conversation_path: Path,
+    *,
+    interactive_checkpoints: bool = True,
 ) -> dict:
     """Continue one finished conversation from its first unfinished stage."""
     conversation_id = conversation_path.stem
@@ -10758,14 +11417,36 @@ def continue_book_workflow(
         stage = workflow_stage(conversation_path)
 
         if stage == "research_review":
+            if not interactive_checkpoints:
+                session = load_review_session(conversation_id)
+                if session["pending_requests"]:
+                    return {
+                        "status": "source_approval_required",
+                        "checkpoint_kind": "research_source_permissions",
+                        "conversation_id": conversation_id,
+                        "pending_requests": list(
+                            session["pending_requests"]
+                        ),
+                    }
             print("\nReviewing finished conversation...")
-            json_path, markdown_path, review_body = (
-                review_finished_conversation(
-                    backend,
-                    program_path,
-                    conversation_path,
+            try:
+                json_path, markdown_path, review_body = (
+                    review_finished_conversation(
+                        backend,
+                        program_path,
+                        conversation_path,
+                        interactive_source_decisions=(
+                            interactive_checkpoints
+                        ),
+                    )
                 )
-            )
+            except WorkflowCheckpointRequired as checkpoint:
+                return {
+                    "status": checkpoint.status,
+                    "checkpoint_kind": "research_source_permissions",
+                    "conversation_id": conversation_id,
+                    **checkpoint.details,
+                }
             display_chat_section("RESEARCH REVIEW", review_body)
             print(
                 "\nCanonical review saved to:"
@@ -10776,15 +11457,9 @@ def continue_book_workflow(
             continue
 
         if stage == "review_checkpoint":
-            decision_path = record_human_review_checkpoint(review_json)
-            if decision_path is None:
-                return {
-                    "status": "awaiting_review_checkpoint",
-                    "conversation_id": conversation_id,
-                    "review_path": str(review_json),
-                }
+            decision_path = record_automatic_review_decision(review_json)
             print(
-                "\nHuman research-review decision saved to:"
+                "\nAudit-policy research-routing decision saved to:"
                 f"\n{decision_path}"
             )
             continue
@@ -10877,9 +11552,11 @@ def continue_book_workflow(
                     f"Book outline could not be read at {outline_path}."
                 ) from error
             display_chat_section("BOOK PLAN", outline_body)
-            approval_path = record_book_plan_checkpoint(manifest_path)
+            approval_path = record_automatic_book_plan_decision(
+                manifest_path
+            )
             print(
-                "\nHuman book-plan decision saved to:"
+                "\nAudit-policy book-plan decision saved to:"
                 f"\n{approval_path}"
             )
             continue
@@ -10971,12 +11648,39 @@ def continue_book_workflow(
                             raise RuntimeError(
                                 "Source approval has no bound assessment."
                             )
+                        research_mode = load_research_mode()
+                        if not interactive_checkpoints:
+                            source_session = (
+                                load_or_create_chapter_research_session(
+                                    book_id,
+                                    chapter_id,
+                                    assessment_id,
+                                    research_mode,
+                                )
+                            )
+                            return {
+                                "status": "source_approval_required",
+                                "checkpoint_kind": (
+                                    "chapter_source_permissions"
+                                ),
+                                "conversation_id": conversation_id,
+                                "book_id": book_id,
+                                "chapter_id": chapter_id,
+                                "assessment_id": assessment_id,
+                                "research_mode": research_mode,
+                                "pending_requests": list(
+                                    source_session["pending_requests"]
+                                ),
+                                "run_path": str(
+                                    chapter_run_path(book_id, chapter_id)
+                                ),
+                            }
                         resolved = (
                             resolve_pending_chapter_source_requests(
                                 book_id,
                                 chapter_id,
                                 assessment_id,
-                                load_research_mode(),
+                                research_mode,
                             )
                         )
                         if not resolved:
@@ -11014,6 +11718,21 @@ def continue_book_workflow(
                         if reconciliation["status"] == (
                             "artifact_review_required"
                         ):
+                            if not interactive_checkpoints:
+                                return {
+                                    **reconciliation,
+                                    "status": "artifact_review_required",
+                                    "checkpoint_kind": (
+                                        "chapter_artifact_review"
+                                    ),
+                                    "conversation_id": conversation_id,
+                                    "run_path": str(
+                                        chapter_run_path(
+                                            book_id,
+                                            chapter_id,
+                                        )
+                                    ),
+                                }
                             reviewed = (
                                 record_chapter_artifact_review_checkpoint(
                                     book_id,
@@ -11052,6 +11771,22 @@ def continue_book_workflow(
                             )
                             is not None
                         ):
+                            if not interactive_checkpoints:
+                                return {
+                                    "status": "draft_acceptance_required",
+                                    "checkpoint_kind": (
+                                        "chapter_draft_acceptance"
+                                    ),
+                                    "conversation_id": conversation_id,
+                                    "book_id": book_id,
+                                    "chapter_id": chapter_id,
+                                    "run_path": str(
+                                        chapter_run_path(
+                                            book_id,
+                                            chapter_id,
+                                        )
+                                    ),
+                                }
                             acceptance_path = (
                                 record_chapter_human_draft_acceptance_checkpoint(
                                     book_id,
@@ -11083,6 +11818,17 @@ def continue_book_workflow(
                                     acceptance_path
                                 ),
                                 "max_additional_provider_calls": 0,
+                            }
+                        if not interactive_checkpoints:
+                            return {
+                                "status": "retry_authorization_required",
+                                "checkpoint_kind": "chapter_retry",
+                                "conversation_id": conversation_id,
+                                "book_id": book_id,
+                                "chapter_id": chapter_id,
+                                "run_path": str(
+                                    chapter_run_path(book_id, chapter_id)
+                                ),
                             }
                         authorization = record_chapter_retry_checkpoint(
                             book_id,
@@ -11119,6 +11865,24 @@ def continue_book_workflow(
                             else None
                         )
                         if existing_input is None:
+                            if not interactive_checkpoints:
+                                return {
+                                    "status": "human_input_required",
+                                    "checkpoint_kind": "chapter_human_input",
+                                    "conversation_id": conversation_id,
+                                    "book_id": book_id,
+                                    "chapter_id": chapter_id,
+                                    "questions": chapter_result.get(
+                                        "human_input_requests",
+                                        [],
+                                    ),
+                                    "run_path": str(
+                                        chapter_run_path(
+                                            book_id,
+                                            chapter_id,
+                                        )
+                                    ),
+                                }
                             human_input_path = (
                                 record_chapter_human_input_checkpoint(
                                     book_id,
@@ -11149,6 +11913,19 @@ def continue_book_workflow(
                                 "human_input_path": str(human_input_path),
                             }
                     if status == "human_input_closeout_required":
+                        if not interactive_checkpoints:
+                            return {
+                                "status": "human_input_closeout_required",
+                                "checkpoint_kind": (
+                                    "chapter_human_input_closeout"
+                                ),
+                                "conversation_id": conversation_id,
+                                "book_id": book_id,
+                                "chapter_id": chapter_id,
+                                "run_path": str(
+                                    chapter_run_path(book_id, chapter_id)
+                                ),
+                            }
                         closeout_path = (
                             record_chapter_human_input_closeout_checkpoint(
                                 book_id,
@@ -11196,6 +11973,19 @@ def continue_book_workflow(
                         )
                         is not None
                     ):
+                        if not interactive_checkpoints:
+                            return {
+                                "status": "draft_acceptance_required",
+                                "checkpoint_kind": (
+                                    "chapter_draft_acceptance"
+                                ),
+                                "conversation_id": conversation_id,
+                                "book_id": book_id,
+                                "chapter_id": chapter_id,
+                                "run_path": str(
+                                    chapter_run_path(book_id, chapter_id)
+                                ),
+                            }
                         acceptance_path = (
                             record_chapter_human_draft_acceptance_checkpoint(
                                 book_id,
@@ -11248,6 +12038,22 @@ def continue_book_workflow(
                             )
                             is not None
                         ):
+                            if not interactive_checkpoints:
+                                return {
+                                    "status": "draft_acceptance_required",
+                                    "checkpoint_kind": (
+                                        "chapter_draft_acceptance"
+                                    ),
+                                    "conversation_id": conversation_id,
+                                    "book_id": book_id,
+                                    "chapter_id": chapter_id,
+                                    "run_path": str(
+                                        chapter_run_path(
+                                            book_id,
+                                            chapter_id,
+                                        )
+                                    ),
+                                }
                             acceptance_path = (
                                 record_chapter_human_draft_acceptance_checkpoint(
                                     book_id,
@@ -11279,6 +12085,17 @@ def continue_book_workflow(
                                     acceptance_path
                                 ),
                                 "max_additional_provider_calls": 0,
+                            }
+                        if not interactive_checkpoints:
+                            return {
+                                "status": "recovery_authorization_required",
+                                "checkpoint_kind": "chapter_recovery",
+                                "conversation_id": conversation_id,
+                                "book_id": book_id,
+                                "chapter_id": chapter_id,
+                                "run_path": str(
+                                    chapter_run_path(book_id, chapter_id)
+                                ),
                             }
                         recovery_path = (
                             record_chapter_recovery_checkpoint(
@@ -11326,6 +12143,21 @@ def continue_book_workflow(
                         )
                         is None
                     ):
+                        if not interactive_checkpoints:
+                            return {
+                                "status": (
+                                    "research_access_recovery_required"
+                                ),
+                                "checkpoint_kind": (
+                                    "research_access_recovery"
+                                ),
+                                "conversation_id": conversation_id,
+                                "book_id": book_id,
+                                "chapter_id": chapter_id,
+                                "run_path": str(
+                                    chapter_run_path(book_id, chapter_id)
+                                ),
+                            }
                         recovery_path = (
                             record_research_access_recovery_checkpoint(
                                 book_id,
@@ -11372,6 +12204,17 @@ def continue_book_workflow(
                         )
                         is None
                     ):
+                        if not interactive_checkpoints:
+                            return {
+                                "status": "final_pass_repair_required",
+                                "checkpoint_kind": "final_pass_repair",
+                                "conversation_id": conversation_id,
+                                "book_id": book_id,
+                                "chapter_id": chapter_id,
+                                "run_path": str(
+                                    chapter_run_path(book_id, chapter_id)
+                                ),
+                            }
                         repair_path = (
                             record_final_pass_repair_checkpoint(
                                 book_id,
@@ -11542,7 +12385,10 @@ def continue_book_workflow(
                 "book_id": book_id,
                 "synthesis_state": synthesis_state,
                 "receipt_path": str(
-                    book_directory / "synthesis" / "receipt.json"
+                    book_synthesis.synthesis_receipt_path(
+                        PROJECT_PATH,
+                        book_id,
+                    )
                 ),
                 "reason": (
                     "The bounded synthesis workflow reached a durable terminal "
@@ -11552,8 +12398,9 @@ def continue_book_workflow(
             }
 
         if stage == "editorial_checkpoint":
-            synthesis_receipt_path = (
-                book_directory / "synthesis" / "receipt.json"
+            synthesis_receipt_path = book_synthesis.synthesis_receipt_path(
+                PROJECT_PATH,
+                book_id,
             )
             synthesis_receipt = load_workflow_json(
                 synthesis_receipt_path,
@@ -11561,28 +12408,16 @@ def continue_book_workflow(
             )
             edition_path = PROJECT_PATH / synthesis_receipt["book_path"]
             print(
-                "\nReview the audited synthesized edition before deciding:"
+                "\nPreparing the independently audited edition for "
+                "policy-bound finalization:"
                 f"\n{edition_path}"
             )
-            try:
-                editorial_path = record_editorial_checkpoint(
-                    synthesis_receipt_path,
-                    manifest_path,
-                )
-            except EOFError:
-                print(
-                    "\nNo interactive input is available. "
-                    "The synthesized edition remains pending human editorial "
-                    "review."
-                )
-                return {
-                    "status": "awaiting_editorial_review",
-                    "conversation_id": conversation_id,
-                    "edition_path": str(edition_path),
-                    "synthesis_receipt_path": str(synthesis_receipt_path),
-                }
+            editorial_path = record_automatic_editorial_decision(
+                synthesis_receipt_path,
+                manifest_path,
+            )
             print(
-                "\nEditorial decision saved to:"
+                "\nAudit-policy finalization decision saved to:"
                 f"\n{editorial_path}"
             )
             continue
@@ -11645,7 +12480,7 @@ def continue_book_workflow(
             }
 
         if stage == "book_finalization":
-            print("\nFinalizing the human-approved book...")
+            print("\nFinalizing the independently audited book...")
             try:
                 receipt = book_assembler.finalize_book(
                     PROJECT_PATH,

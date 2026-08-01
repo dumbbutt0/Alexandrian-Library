@@ -2068,6 +2068,18 @@ class StagedSynthesisTests(unittest.TestCase):
         )
         self.assertEqual(receipt["selected_attempt"], 1)
         self.assertEqual(
+            book_synthesis.synthesis_receipt_path(
+                self.project,
+                self.book_id,
+            ),
+            (
+                self.book
+                / "synthesis_cycles"
+                / "cycle-002"
+                / "receipt.json"
+            ),
+        )
+        self.assertEqual(
             self.sha(self.book / "synthesis" / "receipt.json"),
             prior_receipt_sha,
         )
@@ -2722,6 +2734,44 @@ class StagedSynthesisTests(unittest.TestCase):
                 self.book_id,
             )
 
+    def test_same_terminology_is_preserved_for_each_chapter_scope(self) -> None:
+        self.authorize_and_prepare_sharded_cycle()
+        for chapter_id in ("CH1", "CH2"):
+            shard = self.plan_shard(chapter_id)
+            shard["operations"][0]["kind"] = "terminology"
+            claim_id = shard["claim_dispositions"][0]["claim_id"]
+            shard["terminology"] = [
+                {
+                    "operation_id": "OP1",
+                    "term": "claim",
+                    "canonical_form": "claim",
+                    "rule": "Keep this chapter-scoped term stable.",
+                    "applies_to": [chapter_id],
+                    "authority_type": "candidate",
+                    "authority_refs": [claim_id],
+                }
+            ]
+            staged_synthesis.save_plan_shard(self.project, shard)
+
+        merged = staged_synthesis.merge_plan_shards(
+            self.project,
+            self.book_id,
+        )
+        terms = [
+            entry
+            for entry in merged["terminology"]
+            if entry["term"] == "claim"
+        ]
+        self.assertEqual(len(terms), 2)
+        self.assertEqual(
+            [entry["applies_to"] for entry in terms],
+            [["CH1"], ["CH2"]],
+        )
+        self.assertEqual(
+            {entry["source_shard_id"] for entry in terms},
+            {"CH1", "CH2"},
+        )
+
     def test_global_audit_is_terminal_and_exact_hash_controls_promotion(
         self,
     ) -> None:
@@ -2764,6 +2814,79 @@ class StagedSynthesisTests(unittest.TestCase):
                 self.book_id,
             ).exists()
         )
+
+    def test_rejected_plan_audit_authorizes_one_fresh_bound_cycle(self) -> None:
+        self.authorize_and_prepare_sharded_cycle()
+        self.save_all_plan_shards()
+        merged = staged_synthesis.merge_plan_shards(
+            self.project,
+            self.book_id,
+        )
+        audit = self.sharded_audit("terminology_consistent")
+        prior_cycle = book_synthesis.active_synthesis_cycle(
+            self.project,
+            self.book_id,
+        )
+        self.assertIsNotNone(prior_cycle)
+        prior_staging = (
+            self.project / prior_cycle["root_path"]
+        ).with_name("cycle-003_staging")
+        preserved = {
+            "plan": self.sha(prior_staging / "plans" / "P1.json"),
+            "audit": self.sha(prior_staging / "plan_audits" / "A1.json"),
+        }
+
+        authorization = (
+            book_synthesis.authorize_plan_audit_recovery_cycle(
+                self.project,
+                self.book_id,
+                "Regenerate after a deterministic merge defect.",
+            )
+        )
+
+        active = book_synthesis.active_synthesis_cycle(
+            self.project,
+            self.book_id,
+        )
+        self.assertIsNotNone(active)
+        self.assertEqual(active["cycle_id"], "cycle-004")
+        self.assertEqual(
+            authorization["transition_kind"],
+            "fresh_after_plan_audit_hold",
+        )
+        self.assertEqual(
+            authorization["prior_plan_audit_sha256"],
+            preserved["audit"],
+        )
+        self.assertEqual(
+            book_synthesis.verify_active_cycle_authorization(
+                self.project,
+                self.book_id,
+            )["authorization_sha256"],
+            authorization["authorization_sha256"],
+        )
+        self.assertEqual(
+            self.sha(prior_staging / "plans" / "P1.json"),
+            preserved["plan"],
+        )
+        self.assertEqual(
+            self.sha(prior_staging / "plan_audits" / "A1.json"),
+            preserved["audit"],
+        )
+        self.prepare()
+        self.assertEqual(
+            book_synthesis.workflow_state(self.project, self.book_id),
+            "inventory_required",
+        )
+        with self.assertRaisesRegex(
+            book_synthesis.BookSynthesisError,
+            "single plan-audit recovery cycle",
+        ):
+            book_synthesis.authorize_plan_audit_recovery_cycle(
+                self.project,
+                self.book_id,
+                "A second plan-audit recovery must not be available.",
+            )
 
     def test_global_plan_auditor_reads_exact_hash_bound_inputs(
         self,
@@ -3214,6 +3337,133 @@ class StagedSynthesisTests(unittest.TestCase):
                     self.book_id,
                 )
             self.assertEqual(provider.call_count, 2)
+
+    def test_exhausted_inventory_stage_can_enter_one_fresh_recovery_cycle(
+        self,
+    ) -> None:
+        self.create_sharded_terminal_synthesis_hold()
+        book_synthesis.authorize_terminal_synthesis_successor_cycle(
+            self.project,
+            self.book_id,
+            "Regenerate inventory after the terminal synthesis hold.",
+        )
+        self.prepare()
+        active = book_synthesis.active_synthesis_cycle(
+            self.project,
+            self.book_id,
+        )
+        self.assertIsNotNone(active)
+        prior_cycle_id = active["cycle_id"]
+        self.assertEqual(prior_cycle_id, "cycle-004")
+        stage = "inventory-CH1"
+        task = staged_synthesis.inventory_task(
+            self.project,
+            self.book_id,
+            "CH1",
+        )
+        target = (
+            staged_synthesis.staging_directory(
+                self.project,
+                self.book_id,
+            )
+            / "inventory_units"
+            / "CH1.json"
+        )
+        ledger = self.book / "runs" / "synthesis.controller.jsonl"
+        records = []
+        for number, provider_name in enumerate(
+            ("codex", "claude"),
+            start=1,
+        ):
+            action_id = f"{stage}-{number}"
+            records.extend(
+                [
+                    {
+                        "event": "contract_opened",
+                        "action_id": action_id,
+                        "cycle_id": prior_cycle_id,
+                        "stage": stage,
+                        "backend": provider_name,
+                    },
+                    {
+                        "event": "contract_failed",
+                        "action_id": action_id,
+                        "cycle_id": prior_cycle_id,
+                        "stage": stage,
+                        "backend": provider_name,
+                        "reason": "provider timed out",
+                        "failure_classification": "provider_timeout",
+                        "diagnostic_sha256": f"{number}" * 64,
+                    },
+                ]
+            )
+        with ledger.open("a", encoding="utf-8") as stream:
+            for record in records:
+                stream.write(json.dumps(record) + "\n")
+
+        with (
+            patch.object(backend_selector, "PROJECT_PATH", self.project),
+            patch.object(
+                backend_selector,
+                "BOOKS_PATH",
+                self.project / "data" / "books",
+            ),
+        ):
+            hold = backend_selector.reconcile_terminal_provider_stage_hold(
+                self.book_id,
+                stage,
+                target,
+                task["input_hash"],
+                2,
+            )
+        self.assertIsNotNone(hold)
+        self.assertEqual(hold["status"], "inventory_provider_held")
+        prior_hold_sha = hold["hold_sha256"]
+
+        authorization = book_synthesis.authorize_inventory_recovery_cycle(
+            self.project,
+            self.book_id,
+            "Retry from fresh packets after diagnosing the inventory failure.",
+        )
+        self.assertEqual(
+            authorization["transition_kind"],
+            "retry_after_inventory_provider_hold",
+        )
+        self.assertEqual(authorization["held_stage"], stage)
+        self.assertEqual(
+            book_synthesis.verify_active_cycle_authorization(
+                self.project,
+                self.book_id,
+            )["authorization_sha256"],
+            authorization["authorization_sha256"],
+        )
+        successor = book_synthesis.active_synthesis_cycle(
+            self.project,
+            self.book_id,
+        )
+        self.assertIsNotNone(successor)
+        self.assertEqual(successor["cycle_id"], "cycle-005")
+        self.assertEqual(
+            book_synthesis.read_json_object(
+                self.project / authorization["prior_hold_path"],
+                "prior hold",
+            )["hold_sha256"],
+            prior_hold_sha,
+        )
+        self.prepare()
+        self.assertEqual(
+            book_synthesis.workflow_state(self.project, self.book_id),
+            "inventory_required",
+        )
+        with self.assertRaisesRegex(
+            book_synthesis.BookSynthesisError,
+            "single inventory-recovery cycle",
+        ):
+            book_synthesis.authorize_inventory_recovery_cycle(
+                self.project,
+                self.book_id,
+                "A second inventory recovery must not be available.",
+            )
 
     def test_audit_recovery_cycle_preserves_s1_and_resumes_next_unit(
         self,

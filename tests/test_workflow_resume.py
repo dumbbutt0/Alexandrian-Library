@@ -233,6 +233,52 @@ class WorkflowResumeTests(unittest.TestCase):
                 "candidate_assembly",
             )
 
+    def test_automatic_book_plan_approves_only_draftable_chapters(self) -> None:
+        self.write_manifest()
+        manifest_path = self.books_path / self.book_id / "manifest.json"
+
+        with ExitStack() as stack:
+            for active_patch in self.patches():
+                stack.enter_context(active_patch)
+            approval_path = (
+                backend_selector.record_automatic_book_plan_decision(
+                    manifest_path
+                )
+            )
+
+        approval = json.loads(approval_path.read_text(encoding="utf-8"))
+        self.assertEqual(approval["decision"], "approved_for_drafting")
+        self.assertEqual(approval["chapter_drafting_gate"], "ready")
+        self.assertEqual(
+            approval["decision_authority"],
+            "automated_audit_policy",
+        )
+        self.assertEqual(
+            approval["workflow_policy_version"],
+            "source-permissions-only-v1",
+        )
+
+    def test_automatic_book_plan_routes_blocked_chapter_to_revision(self) -> None:
+        self.write_manifest()
+        manifest_path = self.books_path / self.book_id / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["chapter_plan"][0]["readiness"] = "blocked"
+        self.write_json(manifest_path, manifest)
+
+        with ExitStack() as stack:
+            for active_patch in self.patches():
+                stack.enter_context(active_patch)
+            approval_path = (
+                backend_selector.record_automatic_book_plan_decision(
+                    manifest_path
+                )
+            )
+
+        approval = json.loads(approval_path.read_text(encoding="utf-8"))
+        self.assertEqual(approval["decision"], "needs_plan_revision")
+        self.assertEqual(approval["chapter_drafting_gate"], "blocked")
+        self.assertIn("CH1", approval["notes"][0])
+
     def test_final_book_waits_for_exact_bookshelf_projection(self) -> None:
         book_directory = self.write_ready_completed_book_state()
         book_path = book_directory / "book.md"
@@ -577,7 +623,7 @@ class WorkflowResumeTests(unittest.TestCase):
             stack.enter_context(
                 patch.object(
                     backend_selector,
-                    "record_human_review_checkpoint",
+                    "record_automatic_review_decision",
                     side_effect=record_held_checkpoint,
                 )
             )
@@ -590,8 +636,23 @@ class WorkflowResumeTests(unittest.TestCase):
         review_call.assert_not_called()
         self.assertEqual(result["status"], "review_held")
 
-    def test_review_checkpoint_can_pause_without_writing_a_decision(self) -> None:
+    def test_review_checkpoint_uses_automatic_routing_decision(self) -> None:
         self.write_review()
+        decision_path = (
+            self.decisions_path / f"{self.conversation_id}.json"
+        )
+
+        def record_held_checkpoint(_review_path: Path) -> Path:
+            self.write_json(
+                decision_path,
+                {
+                    "review_id": self.review_id,
+                    "conversation_id": self.conversation_id,
+                    "book_planning_gate": "blocked",
+                    "decision_authority": "automated_audit_policy",
+                },
+            )
+            return decision_path
 
         with ExitStack() as stack:
             for active_patch in self.patches():
@@ -599,8 +660,8 @@ class WorkflowResumeTests(unittest.TestCase):
             stack.enter_context(
                 patch.object(
                     backend_selector,
-                    "record_human_review_checkpoint",
-                    return_value=None,
+                    "record_automatic_review_decision",
+                    side_effect=record_held_checkpoint,
                 )
             )
             result = backend_selector.continue_book_workflow(
@@ -609,11 +670,11 @@ class WorkflowResumeTests(unittest.TestCase):
                 self.conversation_path,
             )
 
-        self.assertEqual(result["status"], "awaiting_review_checkpoint")
-        self.assertFalse(
-            (
-                self.decisions_path / f"{self.conversation_id}.json"
-            ).exists()
+        self.assertEqual(result["status"], "review_held")
+        saved = json.loads(decision_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            saved["decision_authority"],
+            "automated_audit_policy",
         )
 
     def test_candidate_requires_editorial_approval_before_finalization(
@@ -769,7 +830,7 @@ class WorkflowResumeTests(unittest.TestCase):
         )
         self.assertIn("No further provider call", result["reason"])
 
-    def test_noninteractive_editorial_checkpoint_pauses_cleanly(
+    def test_editorial_checkpoint_records_automatic_finalization_decision(
         self,
     ) -> None:
         book_directory = self.write_ready_completed_book_state()
@@ -794,12 +855,20 @@ class WorkflowResumeTests(unittest.TestCase):
         }
         self.write_json(candidate_receipt_path, candidate)
         edition_path = (
-            book_directory / "synthesis" / "attempts" / "S1" / "book.md"
+            book_directory
+            / "synthesis_cycles"
+            / "cycle-009"
+            / "attempts"
+            / "S1"
+            / "book.md"
         )
         edition_path.parent.mkdir(parents=True)
         edition_path.write_text("# Synthesized\n", encoding="utf-8")
         synthesis_receipt_path = (
-            book_directory / "synthesis" / "receipt.json"
+            book_directory
+            / "synthesis_cycles"
+            / "cycle-009"
+            / "receipt.json"
         )
         synthesis_receipt = {
             "book_id": self.book_id,
@@ -837,25 +906,32 @@ class WorkflowResumeTests(unittest.TestCase):
                     return_value=synthesis_receipt,
                 )
             )
-            stack.enter_context(
-                patch("builtins.input", side_effect=EOFError)
-            )
-            result = backend_selector.continue_book_workflow(
-                "codex",
-                "/usr/bin/codex",
-                self.conversation_path,
+            editorial_path = (
+                backend_selector.record_automatic_editorial_decision(
+                    synthesis_receipt_path,
+                    book_directory / "manifest.json",
+                )
             )
 
+        saved = json.loads(editorial_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["decision"], "approved_for_finalization")
         self.assertEqual(
-            result["status"],
-            "awaiting_editorial_review",
+            saved["decision_authority"],
+            "automated_audit_policy",
         )
         self.assertEqual(
-            Path(result["edition_path"]),
-            edition_path,
+            saved["workflow_policy_version"],
+            "source-permissions-only-v1",
         )
-        self.assertFalse(
-            (book_directory / "editorial_review.json").exists()
+        self.assertEqual(saved["accepted_finalization_requirements"], [])
+        self.assertIn("preserved_unresolved_requirements", saved)
+        self.assertEqual(
+            editorial_path,
+            book_directory / "editorial_review.json",
+        )
+        self.assertEqual(
+            saved["synthesis_receipt_path"],
+            str(synthesis_receipt_path.relative_to(self.project_path)),
         )
 
     def test_editorial_revision_routing_reopens_only_selected_chapter(

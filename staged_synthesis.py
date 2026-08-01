@@ -83,6 +83,7 @@ def provider_stage_hold_path(
     """Return the immutable hold path for one exhausted provider stage."""
     if not re.fullmatch(
         r"inventory-CH[1-9][0-9]*|"
+        r"global-plan-audit-A1|"
         r"(?:edition|audit)-S[12]-[A-Za-z0-9._-]+|global-audit-S[12]",
         stage,
     ):
@@ -91,7 +92,7 @@ def provider_stage_hold_path(
         )
     root = (
         staging_directory(project_path, book_id)
-        if stage.startswith("inventory-")
+        if stage.startswith(("inventory-", "global-plan-audit-"))
         else staged_directory(project_path, book_id)
     )
     return (
@@ -110,6 +111,8 @@ def _provider_hold_status(stage: str) -> str:
         return "audit_provider_held"
     if stage.startswith("global-audit-"):
         return "global_audit_provider_held"
+    if stage.startswith("global-plan-audit-"):
+        return "plan_audit_provider_held"
     raise book_synthesis.BookSynthesisError(
         "Provider-stage hold has an unsupported stage."
     )
@@ -2176,13 +2179,8 @@ def merge_plan_shards(project_path: Path, book_id: str) -> dict:
             }
         )
     merged_terminology = []
-    seen_terms = set()
     for shard in shards:
         for term in shard["terminology"]:
-            key = (term["term"], term["canonical_form"])
-            if key in seen_terms:
-                continue
-            seen_terms.add(key)
             merged_terminology.append(
                 {
                     **term,

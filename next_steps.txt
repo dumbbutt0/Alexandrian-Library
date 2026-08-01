@@ -6,6 +6,13 @@ These are candidate improvements to revisit after the complete basic local app
 has been proven. They are not requirements for the current prototype, and each
 meaningful design decision should be reviewed before implementation.
 
+Organization Identity
+
+- The canonical organization name is Inquirion Labs
+- The name combines inquiry and ions: an "inquiry ion" is a unit of inquiry
+- Use Anamnion only for historical naming discussion; do not present it as the
+  current lab name in product copy, generated assets, or release material
+
 
 Current Prototype Focus
 
@@ -300,6 +307,158 @@ Smallest useful frontend slice:
 - Keep animation state explicit and testable: selected volume, transition phase,
   open or closed state, current page, interrupted transitions, resize behavior,
   and restoration after navigation must not depend on hidden timing assumptions
+
+Deferred Frontend Build Specification
+
+Architecture and authority:
+
+- Build one web-based frontend that can run from a Python startup script during
+  development and later inside a packaged desktop executable
+- Keep Python and the proven durable backend artifacts authoritative; do not
+  recreate research, approval, retry, synthesis, or publication logic in the UI
+- Treat browser and embedded-webview execution as two shells around the same UI
+- Bind the local service only to loopback, report startup failures clearly, and
+  shut it down cleanly with the application
+- Freeze the backend book, assembly, bookshelf, resume, and approval contracts
+  before beginning frontend implementation
+
+Primary spatial model:
+
+- Make a 3D bookshelf the main finalized-book selection surface
+- Populate it only from verified final bookshelf entries; candidates, drafts,
+  held syntheses, and active conversations must not look published
+- Give each volume a stable catalog identity, cover, spine, shelf position,
+  edition status, and explicit open or inspect action
+- Put active inquiry on a distinct worktable, lectern, journal, or similarly
+  unfinished surface
+- Use the worktable to start a new conversation, resume an inquiry, answer source
+  decisions, and reach human review or approval checkpoints
+- A compact V1 may use several camera positions in one room rather than multiple
+  navigable 3D environments
+- Provide a searchable keyboard-accessible collection list as a fallback while
+  preserving the shelf as the intended main experience
+
+Reader interaction:
+
+- Transition from the spatial shelf into a quiet document-centered reader
+- Use a two-page spread on wide windows and a single page on narrow windows
+- Render canonical text, headings, citations, code, tables, equations, and notes
+  as semantic selectable HTML rather than canvas textures
+- Turn forward with the lower-right corner, Right Arrow, D, or Page Down
+- Turn backward with the lower-left corner, Left Arrow, A, or Page Up
+- Use Escape and a visible action to close the book and return to the shelf
+- Keep visible page-corner controls even when shortcuts are available
+- Make page-edge lift, fold preview, and drag-to-turn optional; do not require a
+  simulated gesture for ordinary reading
+- Begin with a controlled page-fold illusion and defer full paper physics unless
+  hands-on testing proves that it materially improves the experience
+- Preserve contents navigation, last position, direct chapter access, search,
+  text selection, zoom, print, instant navigation, and reduced-motion behavior
+
+Research and approvals:
+
+- Preserve the current new-conversation and resume workflow in the worktable UI
+- Keep model output, accepted durable state, source receipts, provider attempts,
+  human decisions, holds, and final publication visually distinct
+- Show the current bounded stage and pending human action without treating
+  provider silence or latency as failure
+- Never let decorative metaphors conceal whether an action approves a source,
+  records a decision, authorizes a retry, or finalizes a book
+- Display the exact immutable edition at final editorial approval
+- Derive resume choices from canonical backend state instead of maintaining an
+  independent frontend workflow state machine
+
+Cyber Renaissance art direction:
+
+- Use "archival cyber renaissance" as the working visual direction for Inquirion
+  Labs books and the Alexandrian Library
+- Combine Renaissance engraving, illuminated manuscript, anatomy, mythology,
+  alchemy, and archival marks with circuits, terminal residue, neural diagrams,
+  geometric networks, scan lines, and impossible electric light
+- Use warm wood, leather, vellum, charcoal paper, oxidized metal, candle gold,
+  and faded ink for the physical library
+- Let books introduce restrained cyan, violet, crimson, or electric blue so they
+  resemble recovered artifacts documenting intelligence not yet invented
+- Pair classical serif display typography with restrained monospace metadata for
+  hashes, editions, catalog identities, and provenance
+- Favor one strong symbolic figure, object, or event per cover over generic AI
+  brains, crowded montages, or dashboard imagery
+- Treat Nous Research as inspiration for mixing mythic, technical, archival,
+  manga, and internet-native languages; do not copy its logos, characters,
+  images, compositions, or distinctive promotional trade dress
+- Keep meme-like visual chaos for optional founder communication and easter eggs,
+  not permanent finalized-book covers
+
+Cover asset contract:
+
+- Derive a bounded cover brief from the finalized title, central question,
+  dominant tension, approved symbols, forbidden implications, palette, research
+  program, and edition
+- Generate illustration without title text; compose exact title, subtitle,
+  organization, edition, and spine typography deterministically
+- Produce separate front, spine, back, and shelf-thumbnail assets with a manifest
+  binding them to the final book and asset-generation version
+- Treat covers as presentation, never evidence, and reject imagery that implies a
+  result, discovery, winner, certification, or settled decision not in the book
+- Preserve prompts, model identity when available, references, human selection,
+  licenses, hashes, and replacement history
+- Provide a deterministic typography-only fallback for missing or rejected art
+
+Rendering and performance:
+
+- Prefer Three.js for room, shelves, covers, camera, lighting, and selection while
+  keeping the reader and workflow controls in the DOM
+- Begin with one low-polygon room, baked or restrained lighting, limited active
+  animation, and lazy-loaded cover textures
+- Load only the selected book at high resolution and cache pagination, thumbnails,
+  and stable layout measurements
+- Keep the workflow usable without WebGL, animation, cover art, or high-resolution
+  textures
+- Measure cold startup, time to usable shelf, book-open latency, page-turn frame
+  stability, memory, resize, reduced-motion, and low-power behavior
+- Prioritize correctness and resource efficiency first; after those gates pass,
+  make measured speed improvement the next frontend engineering focus
+
+Frontend data boundary:
+
+- Read finalized collection status from the bookshelf catalog
+- Read book.md and assembly.json through a narrow backend API instead of scanning
+  arbitrary project files in browser code
+- Expose provenance, claims, citations, limitations, and evidence through
+  structured read-only endpoints tied to the same final book
+- Keep reading progress, camera position, shelf selection, and presentation
+  preferences outside immutable publication artifacts
+- Version the frontend API and fail visibly on unsupported schemas
+
+V1 scenes:
+
+- Library: finalized shelf, selected-volume focus, metadata, open, inspect, and
+  accessible-list actions
+- Reader: open book, contents, page navigation, progress, evidence panel, plain
+  mode, and return to shelf
+- Worktable: new conversation, resumable inquiry, source decision, review
+  checkpoint, operational hold, and terminal state
+- Startup: environment verification, backend startup, bookshelf loading,
+  recoverable errors, and an explicit no-books state
+- Defer avatars, multiplayer, procedural rooms, full paper simulation, audio
+  narration, and extensive room customization
+
+V1 acceptance gates:
+
+- Launch from one documented Python command in a clean supported environment
+- Display exact verified shelf entries without drafts or duplicates
+- Open and read a real finalized book without modifying its artifacts
+- Preserve identity between the displayed book and final assembly
+- Start one new inquiry and resume one existing inquiry
+- Complete representative source and human approval checkpoints clearly
+- Restore shelf selection and reading position after restart
+- Pass keyboard-only, screen-reader landmark, zoom, narrow-window,
+  reduced-motion, no-WebGL, long-book, citation, table, and code tests
+- Require hands-on testing in addition to automated contract, component, and
+  integration tests
+- Demonstrate acceptable startup, memory, book-open, and page-turn performance
+  on a modest target machine before declaring visual polish complete
+
 
 V1 candidates:
 

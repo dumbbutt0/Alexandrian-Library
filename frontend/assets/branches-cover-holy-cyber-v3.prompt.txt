@@ -1,0 +1,13 @@
+Use case: stylized-concept
+Asset type: portrait book-cover artwork for a digital 3D library UI
+Primary request: Create an original HOLY-CYBER / MEDIEVAL-CYBER illuminated cover for a technical research book about decision branches, durable state, and knowledge surviving a process-restart boundary.
+Scene/backdrop: a near-black cathedral-data-vault, rendered as flat cover art rather than a photo or 3D book mockup.
+Subject: a solitary hooded archivist-scribe in a long geometric robe stands before a vast circular rose-window made of circuitry and branching decision paths. A vertical cobalt beam divides the window like a restart boundary; fragmented branches on one side reassemble into ordered constellations on the other. The scribe holds a small luminous codex at chest height. Halo geometry is architectural and abstract, not a depiction of a named religious figure.
+Style/medium: medieval illuminated manuscript, Gothic cathedral tracery, engraved monastic marginalia and reliquary metalwork fused with cybernetic diagrams, fiber-optic filaments, neural graphs, holographic foil, xerox grain, and faint CRT scanlines. Premium experimental AI research-lab visual identity. Entirely original, not an imitation of any named brand, artist, game, or existing artwork.
+Composition/framing: vertical 2:3, iconic centered silhouette, monumental circular window behind it, clear visual hierarchy at thumbnail size, controlled dark space near the top and bottom for exact HTML title typography.
+Lighting/mood: reverent, mysterious, severe, sacred knowledge as durable infrastructure; visually powerful but not horror.
+Color palette: carbon black, midnight ultramarine, electric cobalt, ultraviolet shadows, tarnished gold, tiny acid-cyan highlights; minimal parchment.
+Materials/textures: blackened vellum, etched silver, oxidized gold, stained-glass luminosity, woven circuit threads.
+Constraints: no words, letters, numbers, logos, watermark, crosses, named religious iconography, existing IP, steampunk gears, bright beige page, generic fantasy castle, or recognizable existing cover. No face close-up. Preserve calm dark typography zones.
+
+Generation mode: built-in image generation tool.

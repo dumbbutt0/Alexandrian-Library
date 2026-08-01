@@ -940,6 +940,12 @@ def load_editorial_decision(
     """Load the decision bound to the current candidate and audited edition."""
     decision_path = book_directory / "editorial_review.json"
     decision = read_json_object(decision_path, "Editorial review decision")
+    project_path = book_directory.parents[2]
+    synthesis_receipt_path = book_synthesis.synthesis_receipt_path(
+        project_path,
+        book_id,
+    )
+    decision_authority = decision.get("decision_authority", "human")
     if (
         decision.get("schema_version") != "1.0"
         or decision.get("book_id") != book_id
@@ -959,6 +965,13 @@ def load_editorial_decision(
             not isinstance(note, str) or not note.strip()
             for note in decision.get("notes", [])
         )
+        or decision_authority
+        not in {"human", "automated_audit_policy"}
+        or (
+            decision_authority == "automated_audit_policy"
+            and decision.get("workflow_policy_version")
+            != "source-permissions-only-v1"
+        )
     ):
         raise BookAssemblyError(
             "Editorial review does not match the current candidate."
@@ -968,13 +981,9 @@ def load_editorial_decision(
         or synthesis_receipt.get("candidate_sha256") != candidate_sha256
         or synthesis_receipt.get("lifecycle_status") != "ready_for_editorial"
         or decision.get("synthesis_receipt_path")
-        != str(
-            (
-                book_directory / "synthesis" / "receipt.json"
-            ).relative_to(book_directory.parents[2])
-        )
+        != str(synthesis_receipt_path.relative_to(project_path))
         or decision.get("synthesis_receipt_sha256")
-        != file_sha256(book_directory / "synthesis" / "receipt.json")
+        != file_sha256(synthesis_receipt_path)
         or decision.get("edition_path") != synthesis_receipt.get("book_path")
         or decision.get("edition_sha256") != synthesis_receipt.get("book_sha256")
         or decision.get("synthesis_attempt")
@@ -1117,7 +1126,7 @@ def verify_existing_assembly(
     book_directory: Path,
     book_id: str,
 ) -> dict | None:
-    """Return an unchanged human-approved final book."""
+    """Return an unchanged, authority-bound final book."""
     book_path = book_directory / "book.md"
     receipt_path = book_directory / "assembly.json"
     if not book_path.exists() and not receipt_path.exists():
@@ -1168,7 +1177,10 @@ def verify_existing_assembly(
         candidate["candidate_sha256"],
         synthesis_receipt,
     )
-    synthesis_receipt_path = book_directory / "synthesis" / "receipt.json"
+    synthesis_receipt_path = book_synthesis.synthesis_receipt_path(
+        project_path,
+        book_id,
+    )
     if (
         receipt.get("schema_version") != "1.1"
         or decision.get("decision") != "approved_for_finalization"
@@ -1185,6 +1197,10 @@ def verify_existing_assembly(
         != synthesis_receipt["selected_attempt"]
         or receipt.get("editorial_review_sha256")
         != file_sha256(decision_path)
+        or receipt.get("finalization_authority", "human")
+        != decision.get("decision_authority", "human")
+        or receipt.get("workflow_policy_version")
+        != decision.get("workflow_policy_version")
     ):
         raise BookAssemblyError("Existing final assembly receipt is invalid.")
     return receipt
@@ -1231,16 +1247,19 @@ def finalize_book(project_path: Path, book_id: str) -> dict:
     )
     if decision.get("decision") != "approved_for_finalization":
         raise BookAssemblyError(
-            "Candidate book has not received final human approval."
+            "Candidate book has no valid finalization decision."
         )
 
     candidate_path = book_directory / "candidate.md"
     candidate_receipt_path = book_directory / "candidate_assembly.json"
-    synthesis_receipt_path = book_directory / "synthesis" / "receipt.json"
+    synthesis_receipt_path = book_synthesis.synthesis_receipt_path(
+        project_path,
+        book_id,
+    )
     synthesized_book_path = resolve_project_file(
         project_path,
         synthesis_receipt["book_path"],
-        book_directory / "synthesis",
+        book_synthesis.synthesis_directory(project_path, book_id),
         "Synthesized edition",
     )
     book_path = book_directory / "book.md"
@@ -1276,6 +1295,13 @@ def finalize_book(project_path: Path, book_id: str) -> dict:
             decision_path.relative_to(project_path)
         ),
         "editorial_review_sha256": file_sha256(decision_path),
+        "finalization_authority": decision.get(
+            "decision_authority",
+            "human",
+        ),
+        "workflow_policy_version": decision.get(
+            "workflow_policy_version"
+        ),
         "chapter_count": candidate["chapter_count"],
         "chapters": candidate["chapters"],
         "source_count": candidate["source_count"],

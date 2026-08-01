@@ -611,6 +611,11 @@ def synthesis_directory(project_path: Path, book_id: str) -> Path:
     )
 
 
+def synthesis_receipt_path(project_path: Path, book_id: str) -> Path:
+    """Return the terminal receipt path for the verified active cycle."""
+    return synthesis_directory(project_path, book_id) / "receipt.json"
+
+
 def authorize_fresh_synthesis_cycle(
     project_path: Path,
     book_id: str,
@@ -1246,6 +1251,554 @@ def authorize_sharded_recovery_cycle(
         "prior_index_path": str(
             prior_index_path.relative_to(project_path)
         ),
+        "prior_index_sha256": file_sha256(prior_index_path),
+        "active_cycle_id": next_cycle_id,
+        "cycles": [
+            *index["cycles"][:-1],
+            terminal_prior,
+            {
+                "cycle_id": next_cycle_id,
+                "protocol_version": SHARDED_PLAN_PROTOCOL,
+                "root_path": str(next_root.relative_to(project_path)),
+                "authorization_path": str(
+                    authorization_path.relative_to(project_path)
+                ),
+                "authorization_sha256": authorization[
+                    "authorization_sha256"
+                ],
+            },
+        ],
+    }
+    successor["cycle_index_sha256"] = canonical_json_sha256(
+        successor,
+        "cycle_index_sha256",
+    )
+    atomic_write_json(next_index_path, successor)
+    return authorization
+
+
+def authorize_inventory_recovery_cycle(
+    project_path: Path,
+    book_id: str,
+    reason: str,
+) -> dict:
+    """Authorize one fresh sharded cycle after an inventory provider hold."""
+    import staged_synthesis
+
+    project_path = project_path.resolve()
+    if not isinstance(reason, str) or not reason.strip():
+        raise BookSynthesisError(
+            "Inventory recovery authorization needs a reason."
+        )
+    index = load_synthesis_cycle_index(project_path, book_id)
+    if index is None or len(index.get("cycles", [])) < 3:
+        raise BookSynthesisError(
+            "Inventory recovery requires an existing sharded cycle."
+        )
+    prior_cycle = index["cycles"][-1]
+    prior_cycle_id = prior_cycle["cycle_id"]
+    if prior_cycle.get("protocol_version") != SHARDED_PLAN_PROTOCOL:
+        raise BookSynthesisError(
+            "Inventory recovery requires a sharded synthesis cycle."
+        )
+    prior_authorization = verify_active_cycle_authorization(
+        project_path,
+        book_id,
+    )
+    if prior_authorization is None:
+        raise BookSynthesisError(
+            "Inventory recovery has no verified prior authorization."
+        )
+    if (
+        prior_authorization.get("transition_kind")
+        == "retry_after_inventory_provider_hold"
+    ):
+        raise BookSynthesisError(
+            "The single inventory-recovery cycle is already consumed."
+        )
+    prior_root = resolve_project_path(
+        project_path,
+        prior_cycle.get("root_path"),
+        "Prior inventory-held cycle",
+    )
+    if prior_root.exists():
+        raise BookSynthesisError(
+            "Inventory recovery requires an unpromoted prior cycle."
+        )
+    prior_staging = prior_root.with_name(f"{prior_root.name}_staging")
+    context_path = prior_staging / "context.json"
+    staged_index_path = prior_staging / "index.json"
+    context = read_json_object(context_path, "Prior inventory context")
+    staged_index = read_json_object(
+        staged_index_path,
+        "Prior inventory staged index",
+    )
+    if (
+        context.get("cycle_id") != prior_cycle_id
+        or context.get("protocol_version") != SHARDED_PLAN_PROTOCOL
+        or context.get("cycle_authorization_sha256")
+        != prior_authorization["authorization_sha256"]
+        or context.get("context_sha256")
+        != canonical_json_sha256(context, "context_sha256")
+        or staged_index.get("context_sha256") != context["context_sha256"]
+        or staged_index.get("index_sha256")
+        != canonical_json_sha256(staged_index, "index_sha256")
+    ):
+        raise BookSynthesisError(
+            "Prior inventory recovery foundation is invalid."
+        )
+    if (prior_staging / "inventory.json").exists() or any(
+        (prior_staging / "inventory_units").glob("*.json")
+    ):
+        raise BookSynthesisError(
+            "Inventory recovery can only restart before an accepted unit."
+        )
+
+    hold_paths = sorted(
+        (prior_staging / "provider_holds").glob("*.json")
+    )
+    if len(hold_paths) != 1:
+        raise BookSynthesisError(
+            "Inventory recovery requires exactly one provider-stage hold."
+        )
+    hold_path = hold_paths[0]
+    hold = staged_synthesis.load_provider_stage_hold(hold_path)
+    match = re.fullmatch(r"inventory-(CH[1-9][0-9]*)", str(hold.get("stage")))
+    if (
+        match is None
+        or hold.get("book_id") != book_id
+        or hold.get("cycle_id") != prior_cycle_id
+        or hold.get("status") != "inventory_provider_held"
+        or hold.get("maximum_provider_calls") != 2
+        or hold.get("target_created") is not False
+        or len(hold.get("provider_attempts", [])) != 2
+    ):
+        raise BookSynthesisError(
+            "Only a verified held inventory stage can be recovered."
+        )
+    held_unit_id = match.group(1)
+    target_path = resolve_project_path(
+        project_path,
+        hold.get("target_path"),
+        "Held inventory target",
+    )
+    expected_target = (
+        prior_staging / "inventory_units" / f"{held_unit_id}.json"
+    )
+    task = staged_synthesis.inventory_task(
+        project_path,
+        book_id,
+        held_unit_id,
+    )
+    if (
+        target_path != expected_target
+        or target_path.exists()
+        or hold.get("input_hash") != task.get("input_hash")
+    ):
+        raise BookSynthesisError(
+            "Held inventory target does not match its immutable input."
+        )
+
+    controller_path = (
+        book_directory(project_path, book_id)
+        / "runs"
+        / "synthesis.controller.jsonl"
+    )
+    try:
+        controller_text = controller_path.read_text(encoding="utf-8")
+        controller_events = [
+            json.loads(line)
+            for line in controller_text.splitlines()
+            if line.strip()
+        ]
+    except (OSError, json.JSONDecodeError) as error:
+        raise BookSynthesisError(
+            "Inventory recovery controller ledger is unreadable."
+        ) from error
+    stage_events = [
+        event
+        for event in controller_events
+        if event.get("cycle_id") == prior_cycle_id
+        and event.get("stage") == hold["stage"]
+        and event.get("event") != "provider_hold_created"
+    ]
+    stage_digest = hashlib.sha256(
+        json.dumps(
+            stage_events,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    if hold.get("stage_event_sha256") != stage_digest:
+        raise BookSynthesisError(
+            "Inventory hold is not bound to its provider attempts."
+        )
+
+    chain = synthesis_cycle_index_chain(project_path, book_id)
+    prior_index_path = chain[-1]
+    next_number = len(index["cycles"]) + 1
+    next_cycle_id = f"cycle-{next_number:03d}"
+    next_index_path = synthesis_cycle_index_path_for_count(
+        project_path,
+        book_id,
+        next_number,
+    )
+    cycles_root = synthesis_cycle_directory(project_path, book_id)
+    authorization_path = (
+        cycles_root / "authorizations" / f"{next_cycle_id}.json"
+    )
+    next_root = cycles_root / next_cycle_id
+    if (
+        next_index_path.exists()
+        or authorization_path.exists()
+        or next_root.exists()
+        or next_root.with_name(f"{next_root.name}_staging").exists()
+    ):
+        raise BookSynthesisError(
+            f"{next_cycle_id} inventory recovery is already present."
+        )
+    controller_snapshot_path = (
+        cycles_root
+        / "terminal_records"
+        / f"{prior_cycle_id}-controller.jsonl"
+    )
+    if controller_snapshot_path.exists():
+        raise BookSynthesisError(
+            "Prior inventory-held controller snapshot already exists."
+        )
+    atomic_write_text(controller_snapshot_path, controller_text)
+
+    prior_authorization_path = resolve_project_path(
+        project_path,
+        prior_cycle.get("authorization_path"),
+        "Prior cycle authorization",
+    )
+    authorization = {
+        "schema_version": "5.0",
+        "book_id": book_id,
+        "cycle_id": next_cycle_id,
+        "protocol_version": SHARDED_PLAN_PROTOCOL,
+        "transition_kind": "retry_after_inventory_provider_hold",
+        "inventory_policy": "regenerate_required",
+        "candidate_path": context["candidate_path"],
+        "candidate_sha256": context["candidate_sha256"],
+        "prior_cycle_id": prior_cycle_id,
+        "prior_cycle_authorization_path": str(
+            prior_authorization_path.relative_to(project_path)
+        ),
+        "prior_cycle_authorization_sha256": file_sha256(
+            prior_authorization_path
+        ),
+        "prior_index_path": str(prior_index_path.relative_to(project_path)),
+        "prior_index_sha256": file_sha256(prior_index_path),
+        "prior_context_path": str(context_path.relative_to(project_path)),
+        "prior_context_sha256": file_sha256(context_path),
+        "prior_staged_index_path": str(
+            staged_index_path.relative_to(project_path)
+        ),
+        "prior_staged_index_sha256": file_sha256(staged_index_path),
+        "prior_hold_path": str(hold_path.relative_to(project_path)),
+        "prior_hold_sha256": file_sha256(hold_path),
+        "prior_controller_path": str(
+            controller_snapshot_path.relative_to(project_path)
+        ),
+        "prior_controller_sha256": file_sha256(
+            controller_snapshot_path
+        ),
+        "held_stage": hold["stage"],
+        "held_unit_id": held_unit_id,
+        "provider_attempts": hold["provider_attempts"],
+        "reason": reason.strip(),
+        "recovery_authority_type": (
+            "human_synthesis_recovery_authorization"
+        ),
+        "human_decision_artifacts": context.get(
+            "human_decision_artifacts",
+            [],
+        ),
+        "planning_shard_count": len(staged_index["units"]),
+        "maximum_provider_calls_per_stage": 2,
+        "maximum_synthesis_attempts": 2,
+        "authorized_at": current_utc_time(),
+    }
+    authorization["authorization_sha256"] = canonical_json_sha256(
+        authorization,
+        "authorization_sha256",
+    )
+    atomic_write_json(authorization_path, authorization)
+
+    terminal_prior = {
+        **prior_cycle,
+        "terminal_status": "inventory_provider_held",
+        "terminal_context_path": str(context_path.relative_to(project_path)),
+        "terminal_context_sha256": file_sha256(context_path),
+        "terminal_staged_index_path": str(
+            staged_index_path.relative_to(project_path)
+        ),
+        "terminal_staged_index_sha256": file_sha256(staged_index_path),
+        "terminal_hold_path": str(hold_path.relative_to(project_path)),
+        "terminal_hold_sha256": file_sha256(hold_path),
+        "terminal_controller_path": str(
+            controller_snapshot_path.relative_to(project_path)
+        ),
+        "terminal_controller_sha256": file_sha256(
+            controller_snapshot_path
+        ),
+        "terminal_plan_status": "absent",
+        "terminal_edition_status": "absent",
+    }
+    successor = {
+        "schema_version": f"{next_number - 1}.0",
+        "book_id": book_id,
+        "prior_index_path": str(prior_index_path.relative_to(project_path)),
+        "prior_index_sha256": file_sha256(prior_index_path),
+        "active_cycle_id": next_cycle_id,
+        "cycles": [
+            *index["cycles"][:-1],
+            terminal_prior,
+            {
+                "cycle_id": next_cycle_id,
+                "protocol_version": SHARDED_PLAN_PROTOCOL,
+                "root_path": str(next_root.relative_to(project_path)),
+                "authorization_path": str(
+                    authorization_path.relative_to(project_path)
+                ),
+                "authorization_sha256": authorization[
+                    "authorization_sha256"
+                ],
+            },
+        ],
+    }
+    successor["cycle_index_sha256"] = canonical_json_sha256(
+        successor,
+        "cycle_index_sha256",
+    )
+    atomic_write_json(next_index_path, successor)
+    return authorization
+
+
+def authorize_plan_audit_recovery_cycle(
+    project_path: Path,
+    book_id: str,
+    reason: str,
+) -> dict:
+    """Authorize one fresh successor after a rejected sharded plan audit."""
+    project_path = project_path.resolve()
+    if not isinstance(reason, str) or not reason.strip():
+        raise BookSynthesisError(
+            "Plan-audit recovery authorization needs a reason."
+        )
+    index = load_synthesis_cycle_index(project_path, book_id)
+    if index is None or len(index.get("cycles", [])) < 3:
+        raise BookSynthesisError(
+            "Plan-audit recovery requires an existing sharded cycle."
+        )
+    prior_cycle = index["cycles"][-1]
+    prior_cycle_id = prior_cycle["cycle_id"]
+    if prior_cycle.get("protocol_version") != SHARDED_PLAN_PROTOCOL:
+        raise BookSynthesisError(
+            "Plan-audit recovery requires a sharded synthesis cycle."
+        )
+    prior_authorization = verify_active_cycle_authorization(
+        project_path,
+        book_id,
+    )
+    if prior_authorization is None:
+        raise BookSynthesisError(
+            "Plan-audit recovery has no verified prior authorization."
+        )
+    if (
+        prior_authorization.get("transition_kind")
+        == "fresh_after_plan_audit_hold"
+    ):
+        raise BookSynthesisError(
+            "The single plan-audit recovery cycle is already consumed."
+        )
+    prior_root = resolve_project_path(
+        project_path,
+        prior_cycle.get("root_path"),
+        "Prior plan-held cycle",
+    )
+    if prior_root.exists():
+        raise BookSynthesisError(
+            "Plan-audit recovery requires an unpromoted prior cycle."
+        )
+    prior_staging = prior_root.with_name(f"{prior_root.name}_staging")
+    context_path = prior_staging / "context.json"
+    staged_index_path = prior_staging / "index.json"
+    inventory_path = prior_staging / "inventory.json"
+    plan_path = prior_staging / "plans" / "P1.json"
+    audit_path = prior_staging / "plan_audits" / "A1.json"
+    context = read_json_object(context_path, "Prior plan-held context")
+    staged_index = read_json_object(
+        staged_index_path,
+        "Prior plan-held staged index",
+    )
+    inventory = read_json_object(
+        inventory_path,
+        "Prior plan-held inventory",
+    )
+    plan = read_json_object(plan_path, "Rejected merged plan")
+    audit = read_json_object(audit_path, "Rejecting global plan audit")
+    if (
+        context.get("cycle_id") != prior_cycle_id
+        or context.get("protocol_version") != SHARDED_PLAN_PROTOCOL
+        or context.get("cycle_authorization_sha256")
+        != prior_authorization["authorization_sha256"]
+        or context.get("context_sha256")
+        != canonical_json_sha256(context, "context_sha256")
+        or staged_index.get("context_sha256") != context["context_sha256"]
+        or staged_index.get("index_sha256")
+        != canonical_json_sha256(staged_index, "index_sha256")
+        or inventory.get("context_sha256") != context["context_sha256"]
+        or inventory.get("staging_inventory_sha256")
+        != canonical_json_sha256(inventory, "staging_inventory_sha256")
+        or plan.get("context_sha256") != context["context_sha256"]
+        or plan.get("inventory_staging_sha256")
+        != inventory["staging_inventory_sha256"]
+        or plan.get("plan_draft_sha256")
+        != canonical_json_sha256(plan, "plan_draft_sha256")
+        or audit.get("merged_plan_sha256") != plan["plan_draft_sha256"]
+        or audit.get("plan_audit_sha256")
+        != canonical_json_sha256(audit, "plan_audit_sha256")
+        or audit.get("verdict") != "reject"
+        or audit.get("overall_status") != "blocking"
+        or workflow_state(project_path, book_id) != "plan_held"
+    ):
+        raise BookSynthesisError(
+            "Prior rejected plan-audit foundation is invalid."
+        )
+
+    chain = synthesis_cycle_index_chain(project_path, book_id)
+    prior_index_path = chain[-1]
+    next_number = len(index["cycles"]) + 1
+    next_cycle_id = f"cycle-{next_number:03d}"
+    next_index_path = synthesis_cycle_index_path_for_count(
+        project_path,
+        book_id,
+        next_number,
+    )
+    cycles_root = synthesis_cycle_directory(project_path, book_id)
+    authorization_path = (
+        cycles_root / "authorizations" / f"{next_cycle_id}.json"
+    )
+    next_root = cycles_root / next_cycle_id
+    if (
+        next_index_path.exists()
+        or authorization_path.exists()
+        or next_root.exists()
+        or next_root.with_name(f"{next_root.name}_staging").exists()
+    ):
+        raise BookSynthesisError(
+            f"{next_cycle_id} plan-audit recovery is already present."
+        )
+    controller_path = (
+        book_directory(project_path, book_id)
+        / "runs"
+        / "synthesis.controller.jsonl"
+    )
+    try:
+        controller_text = controller_path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise BookSynthesisError(
+            "Plan-audit recovery controller ledger is unreadable."
+        ) from error
+    controller_snapshot_path = (
+        cycles_root
+        / "terminal_records"
+        / f"{prior_cycle_id}-controller.jsonl"
+    )
+    if controller_snapshot_path.exists():
+        raise BookSynthesisError(
+            "Prior plan-held controller snapshot already exists."
+        )
+    atomic_write_text(controller_snapshot_path, controller_text)
+    prior_authorization_path = resolve_project_path(
+        project_path,
+        prior_cycle.get("authorization_path"),
+        "Prior cycle authorization",
+    )
+    authorization = {
+        "schema_version": "6.0",
+        "book_id": book_id,
+        "cycle_id": next_cycle_id,
+        "protocol_version": SHARDED_PLAN_PROTOCOL,
+        "transition_kind": "fresh_after_plan_audit_hold",
+        "inventory_policy": "regenerate_required",
+        "candidate_path": context["candidate_path"],
+        "candidate_sha256": context["candidate_sha256"],
+        "prior_cycle_id": prior_cycle_id,
+        "prior_cycle_authorization_path": str(
+            prior_authorization_path.relative_to(project_path)
+        ),
+        "prior_cycle_authorization_sha256": file_sha256(
+            prior_authorization_path
+        ),
+        "prior_index_path": str(prior_index_path.relative_to(project_path)),
+        "prior_index_sha256": file_sha256(prior_index_path),
+        "prior_context_path": str(context_path.relative_to(project_path)),
+        "prior_context_sha256": file_sha256(context_path),
+        "prior_staged_index_path": str(
+            staged_index_path.relative_to(project_path)
+        ),
+        "prior_staged_index_sha256": file_sha256(staged_index_path),
+        "prior_inventory_path": str(
+            inventory_path.relative_to(project_path)
+        ),
+        "prior_inventory_sha256": file_sha256(inventory_path),
+        "prior_plan_path": str(plan_path.relative_to(project_path)),
+        "prior_plan_sha256": file_sha256(plan_path),
+        "prior_plan_audit_path": str(audit_path.relative_to(project_path)),
+        "prior_plan_audit_sha256": file_sha256(audit_path),
+        "prior_controller_path": str(
+            controller_snapshot_path.relative_to(project_path)
+        ),
+        "prior_controller_sha256": file_sha256(controller_snapshot_path),
+        "reason": reason.strip(),
+        "recovery_authority_type": (
+            "human_synthesis_recovery_authorization"
+        ),
+        "human_decision_artifacts": context.get(
+            "human_decision_artifacts",
+            [],
+        ),
+        "maximum_provider_calls_per_stage": 2,
+        "maximum_synthesis_attempts": 2,
+        "authorized_at": current_utc_time(),
+    }
+    authorization["authorization_sha256"] = canonical_json_sha256(
+        authorization,
+        "authorization_sha256",
+    )
+    atomic_write_json(authorization_path, authorization)
+    terminal_prior = {
+        **prior_cycle,
+        "terminal_status": "plan_held",
+        "terminal_context_path": str(context_path.relative_to(project_path)),
+        "terminal_context_sha256": file_sha256(context_path),
+        "terminal_inventory_path": str(
+            inventory_path.relative_to(project_path)
+        ),
+        "terminal_inventory_sha256": file_sha256(inventory_path),
+        "terminal_plan_path": str(plan_path.relative_to(project_path)),
+        "terminal_plan_sha256": file_sha256(plan_path),
+        "terminal_plan_audit_path": str(
+            audit_path.relative_to(project_path)
+        ),
+        "terminal_plan_audit_sha256": file_sha256(audit_path),
+        "terminal_controller_path": str(
+            controller_snapshot_path.relative_to(project_path)
+        ),
+        "terminal_controller_sha256": file_sha256(
+            controller_snapshot_path
+        ),
+        "terminal_edition_status": "absent",
+    }
+    successor = {
+        "schema_version": f"{next_number - 1}.0",
+        "book_id": book_id,
+        "prior_index_path": str(prior_index_path.relative_to(project_path)),
         "prior_index_sha256": file_sha256(prior_index_path),
         "active_cycle_id": next_cycle_id,
         "cycles": [
@@ -1990,11 +2543,6 @@ def verify_active_cycle_authorization(
                 "Prior staged index",
             ),
             (
-                "prior_inventory_path",
-                "prior_inventory_sha256",
-                "Prior inventory",
-            ),
-            (
                 "prior_controller_path",
                 "prior_controller_sha256",
                 "Prior controller ledger",
@@ -2021,6 +2569,11 @@ def verify_active_cycle_authorization(
                         "prior_hold_path",
                         "prior_hold_sha256",
                         "Prior plan-shard hold",
+                    ),
+                    (
+                        "prior_inventory_path",
+                        "prior_inventory_sha256",
+                        "Prior inventory",
                     ),
                 ]
             )
@@ -2070,6 +2623,11 @@ def verify_active_cycle_authorization(
                         "prior_hold_sha256",
                         "Prior audit-stage hold",
                     ),
+                    (
+                        "prior_inventory_path",
+                        "prior_inventory_sha256",
+                        "Prior inventory",
+                    ),
                 ]
             )
         elif authorization.get("schema_version") == "4.0":
@@ -2098,11 +2656,98 @@ def verify_active_cycle_authorization(
                         "prior_terminal_receipt_sha256",
                         "Prior terminal receipt",
                     ),
+                    (
+                        "prior_inventory_path",
+                        "prior_inventory_sha256",
+                        "Prior inventory",
+                    ),
+                ]
+            )
+        elif authorization.get("schema_version") == "5.0":
+            if (
+                authorization.get("transition_kind")
+                != "retry_after_inventory_provider_hold"
+                or authorization.get("inventory_policy")
+                != "regenerate_required"
+                or authorization.get("prior_cycle_id")
+                != f"cycle-{int(authorization['cycle_id'].split('-')[1]) - 1:03d}"
+                or authorization.get("maximum_provider_calls_per_stage") != 2
+                or authorization.get("maximum_synthesis_attempts") != 2
+                or authorization.get("recovery_authority_type")
+                != "human_synthesis_recovery_authorization"
+                or not re.fullmatch(
+                    r"inventory-CH[1-9][0-9]*",
+                    str(authorization.get("held_stage")),
+                )
+            ):
+                raise BookSynthesisError(
+                    "Inventory recovery authorization is invalid."
+                )
+            required_prior_artifacts.extend(
+                [
+                    (
+                        "prior_index_path",
+                        "prior_index_sha256",
+                        "Prior cycle index",
+                    ),
+                    (
+                        "prior_hold_path",
+                        "prior_hold_sha256",
+                        "Prior inventory-stage hold",
+                    ),
+                ]
+            )
+        elif authorization.get("schema_version") == "6.0":
+            if (
+                authorization.get("transition_kind")
+                != "fresh_after_plan_audit_hold"
+                or authorization.get("inventory_policy")
+                != "regenerate_required"
+                or authorization.get("prior_cycle_id")
+                != f"cycle-{int(authorization['cycle_id'].split('-')[1]) - 1:03d}"
+                or authorization.get("maximum_provider_calls_per_stage") != 2
+                or authorization.get("maximum_synthesis_attempts") != 2
+                or authorization.get("recovery_authority_type")
+                != "human_synthesis_recovery_authorization"
+            ):
+                raise BookSynthesisError(
+                    "Plan-audit recovery authorization is invalid."
+                )
+            required_prior_artifacts.extend(
+                [
+                    (
+                        "prior_index_path",
+                        "prior_index_sha256",
+                        "Prior cycle index",
+                    ),
+                    (
+                        "prior_inventory_path",
+                        "prior_inventory_sha256",
+                        "Prior inventory",
+                    ),
+                    (
+                        "prior_plan_path",
+                        "prior_plan_sha256",
+                        "Prior rejected plan",
+                    ),
+                    (
+                        "prior_plan_audit_path",
+                        "prior_plan_audit_sha256",
+                        "Prior rejecting plan audit",
+                    ),
                 ]
             )
         elif authorization.get("cycle_id") != "cycle-003":
             raise BookSynthesisError(
                 "Sharded successor uses an unknown authorization version."
+            )
+        else:
+            required_prior_artifacts.append(
+                (
+                    "prior_inventory_path",
+                    "prior_inventory_sha256",
+                    "Prior inventory",
+                )
             )
         for path_field, hash_field, label in required_prior_artifacts:
             prior_path = resolve_project_path(
@@ -2200,6 +2845,30 @@ def verify_active_cycle_authorization(
             ):
                 raise BookSynthesisError(
                     "Prior terminal receipt is invalid."
+                )
+        if authorization.get("schema_version") == "6.0":
+            prior_plan_audit_path = resolve_project_path(
+                project_path,
+                authorization["prior_plan_audit_path"],
+                "Prior rejecting plan audit",
+            )
+            prior_plan_audit = read_json_object(
+                prior_plan_audit_path,
+                "Prior rejecting plan audit",
+            )
+            if (
+                prior_plan_audit.get("verdict") != "reject"
+                or prior_plan_audit.get("overall_status") != "blocking"
+                or prior_plan_audit.get("plan_audit_sha256")
+                != canonical_json_sha256(
+                    prior_plan_audit,
+                    "plan_audit_sha256",
+                )
+                or prior_plan_audit.get("merged_plan_sha256")
+                is None
+            ):
+                raise BookSynthesisError(
+                    "Prior rejecting plan audit is invalid."
                 )
     else:
         raise BookSynthesisError("Unknown synthesis-cycle authorization.")

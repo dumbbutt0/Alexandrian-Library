@@ -145,6 +145,31 @@ def _inventory_schema_diagnostic(
     }
 
 
+def _audit_extra_field_schema_diagnostic(
+    error: ValidationError,
+) -> dict | None:
+    """Allow one retry only for removable extra audit fields."""
+    details = error.errors(
+        include_url=False,
+        include_context=False,
+        include_input=False,
+    )
+    if not details or any(
+        detail.get("type") != "extra_forbidden" for detail in details
+    ):
+        return None
+    location = list(details[0].get("loc", ()))
+    if location and location[0] == "audit":
+        location = location[1:]
+    field_path = ".".join(str(part) for part in location) or "audit"
+    return {
+        "code": "schema_extra_forbidden",
+        "claim_id": None,
+        "field_path": field_path,
+        "correctable": True,
+    }
+
+
 class ResearchRoute(str, Enum):
     RESEARCH_SEED = "research_seed"
     RESEARCH_CHECKPOINT = "research_checkpoint"
@@ -6025,6 +6050,31 @@ class AlexandrianFastMCP(FastMCP):
                 safe_diagnostic = _inventory_schema_diagnostic(
                     arguments,
                     schema_error,
+                )
+            elif (
+                isinstance(schema_error, ValidationError)
+                and name
+                == synthesis_tool_budget.PLAN_AUDIT_SUBMIT_TOOL
+            ):
+                safe_diagnostic = _audit_extra_field_schema_diagnostic(
+                    schema_error
+                )
+                outcome = (
+                    "correctable_validation_rejected"
+                    if safe_diagnostic is not None
+                    else "argument_validation_rejected"
+                )
+            elif (
+                isinstance(schema_error, ValidationError)
+                and name == synthesis_tool_budget.GLOBAL_AUDIT_TOOL
+            ):
+                safe_diagnostic = _audit_extra_field_schema_diagnostic(
+                    schema_error
+                )
+                outcome = (
+                    "correctable_validation_rejected"
+                    if safe_diagnostic is not None
+                    else "argument_validation_rejected"
                 )
             elif synthesis_tool_budget.CORRECTABLE_ERROR_PREFIX in message:
                 outcome = "correctable_validation_rejected"

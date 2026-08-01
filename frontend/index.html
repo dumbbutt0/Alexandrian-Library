@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#080711">
+  <title>The Library — Inquirion Labs</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="ambient ambient-one" aria-hidden="true"></div>
+  <div class="ambient ambient-two" aria-hidden="true"></div>
+
+  <header class="topbar">
+    <button class="wordmark" type="button" data-route="library" aria-label="Return to the library">
+      <span class="wordmark-mark" aria-hidden="true">I</span>
+      <span>
+        <strong>THE LIBRARY</strong>
+        <small>INQUIRION LABS · A UNIT OF INQUIRY</small>
+      </span>
+    </button>
+    <nav aria-label="Primary">
+      <button class="nav-link is-active" type="button" data-route="library">Library</button>
+      <button class="nav-link" type="button" data-route="worktable">New inquiry</button>
+    </nav>
+    <div class="system-state"><span></span> Local archive</div>
+  </header>
+
+  <main>
+    <section id="library-view" class="view library-view is-active" aria-labelledby="library-title">
+      <div class="archive-frame">
+        <header class="archive-header">
+          <div>
+            <p class="eyebrow">Inquirion archive · verified works</p>
+            <h1 id="library-title">The enduring shelf</h1>
+          </div>
+          <p class="archive-thesis">Questions become volumes. Evidence becomes memory. Every edition remains inspectable.</p>
+          <div class="archive-count">
+            <strong id="book-count">—</strong>
+            <span>01 continuous shelf</span>
+          </div>
+        </header>
+
+        <div class="catalog-stage">
+          <aside id="book-inspector" class="book-inspector" aria-live="polite">
+            <div class="catalog-index" aria-label="Catalog position">
+              <span id="selected-book-number">—</span>
+              <i></i>
+              <span id="catalog-total">—</span>
+            </div>
+            <p class="eyebrow">The shelf is closed</p>
+            <h2>Choose a spine</h2>
+            <p>Select a finalized volume to bring its verified cover and record forward.</p>
+          </aside>
+
+          <div class="shelf-room" aria-label="Interactive three-dimensional bookshelf">
+            <div class="room-arch" aria-hidden="true"></div>
+            <div id="book-focus-stage" class="book-focus-stage" aria-hidden="true">
+              <span class="focus-orbit"></span>
+            </div>
+            <button id="previous-volume" class="shelf-arrow shelf-arrow-left" type="button" aria-label="Previous volume">←</button>
+            <div class="bookshelf-viewport">
+              <div id="bookshelf" class="bookshelf" role="list" aria-live="polite"></div>
+            </div>
+            <button id="next-volume" class="shelf-arrow shelf-arrow-right" type="button" aria-label="Next volume">→</button>
+          </div>
+        </div>
+
+        <footer class="shelf-navigator">
+          <span>01</span>
+          <div id="catalog-track" class="catalog-track" aria-label="Choose a volume"></div>
+          <span id="catalog-end">—</span>
+          <p>Arrows browse · click a spine to focus · drag to spin</p>
+        </footer>
+      </div>
+    </section>
+
+    <section id="reader-view" class="view reader-view" aria-labelledby="reader-title">
+      <div class="reader-toolbar">
+        <button class="icon-button" type="button" data-route="library" aria-label="Close book">×</button>
+        <div class="reader-identity">
+          <small id="reader-kicker">Verified edition</small>
+          <strong id="reader-title">Loading book…</strong>
+        </div>
+        <div class="reader-tools">
+          <button id="plain-toggle" class="tool-button" type="button" aria-pressed="false">Plain view</button>
+          <button id="toc-toggle" class="tool-button" type="button" aria-expanded="false">Contents</button>
+        </div>
+      </div>
+
+      <aside id="toc-panel" class="toc-panel" aria-label="Table of contents">
+        <p class="eyebrow">Contents</p>
+        <ol id="toc-list"></ol>
+      </aside>
+
+      <div class="reading-stage">
+        <button id="previous-page" class="page-turn page-turn-left" type="button" aria-label="Previous page">‹</button>
+        <article id="open-book" class="open-book" aria-live="polite">
+          <div class="book-binding" aria-hidden="true"></div>
+          <section id="left-page" class="paper-page"></section>
+          <section id="right-page" class="paper-page"></section>
+        </article>
+        <button id="next-page" class="page-turn page-turn-right" type="button" aria-label="Next page">›</button>
+      </div>
+      <div class="reader-footer">
+        <span id="page-position">—</span>
+        <span>← → or A D to turn pages</span>
+        <span id="hash-status">Verifying edition…</span>
+      </div>
+    </section>
+
+    <section id="worktable-view" class="view worktable-view" aria-labelledby="worktable-title">
+      <div class="worktable-shell">
+        <header class="worktable-masthead">
+          <div>
+            <p class="eyebrow">The governed worktable</p>
+            <h1 id="worktable-title">Begin at the question.</h1>
+          </div>
+          <p>One inquiry, one durable lineage. The interface shows only actions authorized by the canonical workflow.</p>
+          <button id="new-inquiry-button" class="secondary-button" type="button">New inquiry <span>＋</span></button>
+        </header>
+
+        <div class="worktable-grid">
+          <aside class="workflow-rail" aria-labelledby="workflow-rail-title">
+            <div class="rail-heading">
+              <span class="rail-sigil" aria-hidden="true">I</span>
+              <div>
+                <p class="eyebrow">Durable threads</p>
+                <h2 id="workflow-rail-title">Resume an inquiry</h2>
+              </div>
+            </div>
+            <div id="workflow-list" class="workflow-list" aria-live="polite">
+              <p class="workflow-list-empty">Reading the local archive…</p>
+            </div>
+            <p class="rail-footnote">Stages are derived from immutable artifacts. Closing this window does not erase completed work.</p>
+          </aside>
+
+          <section class="workflow-console" aria-labelledby="workflow-console-title">
+            <header class="workflow-console-header">
+              <div>
+                <p id="workflow-console-kicker" class="eyebrow">A new line of inquiry</p>
+                <h2 id="workflow-console-title">What has your curiosity caught?</h2>
+              </div>
+              <div id="workflow-stage-badge" class="workflow-stage-badge" hidden>
+                <span></span>
+                <strong id="workflow-stage-label">Awaiting action</strong>
+              </div>
+            </header>
+
+            <div id="new-inquiry-panel" class="new-inquiry-panel">
+              <div class="inquiry-card">
+                <label for="inquiry-input">Your opening question</label>
+                <textarea id="inquiry-input" rows="6" placeholder="I keep wondering whether…"></textarea>
+
+                <fieldset class="choice-fieldset">
+                  <legend>Research host</legend>
+                  <div class="segmented-options">
+                    <label class="segmented-option">
+                      <input type="radio" name="provider" value="codex" checked>
+                      <span><strong>Codex</strong><small>OpenAI research host</small></span>
+                    </label>
+                    <label class="segmented-option">
+                      <input type="radio" name="provider" value="claude">
+                      <span><strong>Claude</strong><small>Anthropic research host</small></span>
+                    </label>
+                  </div>
+                </fieldset>
+
+                <fieldset class="choice-fieldset">
+                  <legend>Source authority</legend>
+                  <div class="segmented-options">
+                    <label class="segmented-option">
+                      <input type="radio" name="research-mode" value="safe" checked>
+                      <span><strong>Review sources</strong><small>Pause before unknown sources</small></span>
+                    </label>
+                    <label class="segmented-option">
+                      <input type="radio" name="research-mode" value="auto_approve">
+                      <span><strong>Trusted autonomy</strong><small>Use the configured approval policy</small></span>
+                    </label>
+                  </div>
+                </fieldset>
+
+                <button id="begin-inquiry" class="primary-button" type="button">Create and ask <span>→</span></button>
+                <p id="inquiry-status" class="inquiry-status" role="status">The opening question becomes the first durable conversation turn.</p>
+              </div>
+            </div>
+
+            <div id="active-workflow-panel" class="active-workflow-panel" hidden>
+              <div id="conversation-transcript" class="conversation-transcript" aria-live="polite"></div>
+
+              <div id="conversation-composer" class="conversation-composer" hidden>
+                <label for="turn-input">Continue the inquiry</label>
+                <textarea id="turn-input" rows="4" placeholder="Ask the next question, challenge the answer, or add context…"></textarea>
+                <div class="composer-actions">
+                  <button id="finish-inquiry" class="secondary-button danger-edge" type="button">Finish research conversation</button>
+                  <button id="send-turn" class="primary-button compact" type="button">Send turn <span>→</span></button>
+                </div>
+              </div>
+
+              <section id="workflow-action-zone" class="workflow-action-zone" aria-live="polite"></section>
+              <p id="workflow-status" class="workflow-status" role="status"></p>
+            </div>
+          </section>
+        </div>
+      </div>
+      <button class="return-link" type="button" data-route="library">← Return to the shelf</button>
+    </section>
+  </main>
+
+  <template id="shelf-book-template">
+    <button class="shelf-book" type="button" role="listitem">
+      <span class="selection-orbit" aria-hidden="true"></span>
+      <span class="book-floor-shadow" aria-hidden="true"></span>
+      <span class="book-rotor" aria-hidden="true">
+        <span class="book-back-board">
+          <span class="back-archive-mark">I</span>
+          <span class="back-kicker">THE CENTRAL INQUIRY</span>
+          <span class="back-question"></span>
+          <span class="back-rule"></span>
+          <span class="back-meta"></span>
+          <span class="back-imprint">INQUIRION LABS · VERIFIED ARCHIVE</span>
+        </span>
+        <span class="book-page-block"></span>
+        <span class="book-spine-panel">
+          <span class="display-spine-sigil"></span>
+          <span class="display-spine-title"></span>
+          <span class="display-spine-imprint">INQUIRION LABS</span>
+          <span class="display-spine-edition"></span>
+        </span>
+        <span class="book-spine-lip"></span>
+        <span class="book-head-edge"></span>
+        <span class="book-tail-edge"></span>
+        <span class="book-cover-face">
+          <img class="cover-art" alt="" width="1024" height="1536" decoding="async" draggable="false">
+          <span class="cover-kicker">INQUIRION ARCHIVE</span>
+          <span class="cover-title"></span>
+          <span class="cover-subtitle"></span>
+          <span class="cover-edition"></span>
+        </span>
+      </span>
+    </button>
+  </template>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>
