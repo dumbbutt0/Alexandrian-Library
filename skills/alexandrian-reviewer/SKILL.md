@@ -1,6 +1,6 @@
 ---
 name: alexandrian-reviewer
-description: Double-check, extract, and route research material from completed Alexandrian Library conversations. Use when a finished transcript must become a grounded pre-book record of its core question, curiosity signature, scope, definitions, starting beliefs, belief revisions, research trail, citation-ready checked claims, evidence gaps, connected ideas, separate research branches, thought questions, experiments, use cases, and next research state without writing the final book.
+description: Double-check and route completed Alexandrian Library conversations into a grounded pre-book record that preserves the narrative engine—starting belief, tension, discoveries, reversals, resistant evidence, bounded synthesis, and open questions—alongside scope, definitions, provenance, checked claims, gaps, branches, experiments, and next research state without writing the book.
 ---
 
 # Alexandrian Research Reviewer
@@ -8,6 +8,10 @@ description: Double-check, extract, and route research material from completed A
 ## Purpose
 
 Turn a finished Library conversation into a structured research record.
+
+This record is the first evidence layer of an Alexandrian Narrative Research
+Book: it must preserve the real intellectual movement that later prose may
+render as an engaging investigation.
 
 Preserve the user's intellectual development, double-check important external
 claims against approved sources, separate evidence from reviewer judgment, and
@@ -41,10 +45,13 @@ been verified.
 When `research_continuation_context` is present, treat its parent review and
 human checkpoint as hash-bound prior research data. Use them to preserve the
 question, identify the fixed continuation targets, and explain what changed.
-Do not cite parent transcript references as if they belonged to the current
-transcript. Parent source receipts are contextual history, not valid receipts
-for the current review. If a current claim must depend on the same source,
-fetch that source under the current conversation ID and assess the new receipt.
+The wrapper's numbered transcript contains the complete root-to-current
+conversation lineage, so every `T` reference actually present in that supplied
+transcript is valid for the current review even when its message originated in
+an ancestor conversation file. Parent source receipts remain contextual history,
+not valid receipts for the current review. If a current claim must depend on the
+same source, fetch that source under the current conversation ID and assess the
+new receipt.
 
 ## Review Process
 
@@ -96,6 +103,27 @@ challenge, the user's later response, and whether the revision was accepted,
 rejected, unresolved, or never addressed. Do not treat an assistant correction
 as a user belief change without evidence from the user.
 
+### 5a. Preserve the narrative engine
+
+Make the later book's intellectual movement reconstructable without inventing
+drama. Preserve, in the existing structured fields:
+
+- the user's actual starting belief or model;
+- the question, disagreement, contradiction, or consequence that made the
+  obvious answer insufficient;
+- discoveries and connections introduced by checked research;
+- evidence that changed the argument, and equally important evidence that did
+  not change it;
+- the strongest counterargument or unresolved tension;
+- the bounded synthesis the record currently permits; and
+- the open question that naturally leads to a later chapter or inquiry.
+
+Use curiosity-signature, belief-revision, contradiction, connected-idea,
+evidence-gap, and branch fields for these functions. Do not create a false
+turn, infer emotional stakes, or claim a belief revision the user never
+expressed. A lack of change can itself be narratively important when recorded
+honestly.
+
 ### 6. Double-check claims against approved sources
 
 Classify claims by who introduced them and what the transcript actually
@@ -128,6 +156,15 @@ the fetched content, a concise evidence summary, limitations, and
 counterevidence or a serious alternative explanation. Do not invent missing
 authors, dates, publishers, journals, or identifiers.
 
+New receipts may include `source_document_path` and
+`source_document_sha256`. The companion document preserves verified blocks and
+real PDF page boundaries. Choose an exact excerpt that occurs once in that
+document. If a short sentence repeats, use a longer bounded passage from the
+same location. Do not invent a page number, block identity, or locator. Leave
+`evidence_locator` unset; `submit_research_review` derives and validates it from
+the exact excerpt. Legacy receipts without a companion remain valid but cannot
+claim a structured locator.
+
 Keep each receipt bound to the exact `claim_checked` used when the source was
 fetched. The checked-source finding and any claim status that cites that receipt
 must describe the same claim at the same scope:
@@ -143,9 +180,17 @@ checked-source status, or fetch a separate receipt using that exact narrower
 subclaim. Do not weaken this boundary merely because the source passage appears
 to address one component.
 
-If the fetch fails or no appropriate source is available, preserve the claim as
-an evidence gap. Do not bypass the source policy with generic WebFetch, shell
-commands, another network tool, or a guessed receipt.
+If an authorized fetch returns `unavailable`, follow its recovery instruction:
+try at most one distinct authoritative alternate URL for the exact same claim.
+Do not retry the failed URL, broaden the claim, or start an open-ended source
+search. If the alternate is also unavailable, preserve both attempts and the
+claim as an evidence gap. Do not bypass the source policy with generic
+WebFetch, shell commands, another network tool, or a guessed receipt.
+
+Do not turn an evidence gap into a weak citation. Preserve insufficient
+evidence explicitly so the later workflow can offer controlled research,
+question refinement, or a stop. Unknown-source research must continue through
+the existing reject, allow-once, or allow-site decision boundary.
 
 Keep sources merely mentioned in the transcript separate from sources checked
 by the reviewer. Record the actual research question or query, candidate source,
@@ -174,6 +219,17 @@ checkpoint requests as the fixed target list. Newly discovered adjacent
 questions must be nonblocking and routed rather than silently expanding that
 list. Do not refetch a failed or rejected source without a changed,
 claim-relevant reason.
+
+When `workflow_policy_version` is `source-permissions-only-v1`, the user's
+explicit conversation finish is authority to stop asking for additional
+personal, editorial, or scope answers. Preserve an unanswered question
+honestly, narrow the proposed book so it does not depend on that answer, and
+classify the limit as nonblocking `bounded_unresolved` or `routed_to_later`.
+Do not choose `continue_conversation` solely because the user did not answer a
+follow-up before finishing. Likewise, if a source is rejected, unavailable, or
+fails to fetch, exclude the dependent claim or narrow the scope when a coherent
+book remains. Unknown-source permission is the routine human pause; use another
+route only for a genuine terminal blocker that leaves no coherent bounded book.
 
 ### 7. Connect and separate research
 
@@ -217,9 +273,11 @@ remaining limit must be explicit, nonblocking for the proposed scope, and
 either bounded or routed. The next planner must be able to design included
 chapters without silently requiring another pre-book research pass.
 
-If a gap requires a user decision, choose another research route and return to
-the human checkpoint. Do not use source volume, prose polish, or reviewer
-confidence as a readiness substitute.
+If a gap requires a user decision and the workflow is not governed by
+`source-permissions-only-v1`, choose another research route and return to the
+human checkpoint. Under that policy, apply the explicit-finish narrowing rule
+above. Do not use source volume, prose polish, or reviewer confidence as a
+readiness substitute.
 
 ## Submission Protocol
 
@@ -239,6 +297,8 @@ Then call `submit_research_review` exactly once with:
 - Scope boundaries and definition status
 - The actual research trail, including excluded or unavailable sources
 - Citation and evidence details for every checked source
+- Exact, unambiguous evidence excerpts for receipts that expose a structured
+  source document; never a guessed page or locator
 
 The MCP tool validates the record and creates both the canonical JSON review
 and its derived Markdown view. Do not return or save a separate Markdown
@@ -262,5 +322,7 @@ Do not call any other write tool for the review.
 - Keep the review inspectable while preserving important nuance
 - Keep final book prose, exhaustive book research, and project implementation
   outside this bounded double-check review
+- Preserve enough grounded intellectual sequence for a later narrative book;
+  do not flatten the conversation into a topic inventory
 - Do not continue source discovery after every targeted gap is resolved,
   honestly bounded, routed, or waiting on the user

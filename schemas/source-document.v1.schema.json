@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://alexandrian.local/schemas/source-document.v1.schema.json",
+  "title": "Alexandrian Source Document V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "receipt_id",
+    "source_content_sha256",
+    "content_type",
+    "title",
+    "normalizer_version",
+    "content_truncated",
+    "blocks",
+    "document_text_sha256",
+    "source_document_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "receipt_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$"
+    },
+    "source_content_sha256": {"$ref": "#/$defs/sha256"},
+    "content_type": {"type": "string", "minLength": 1},
+    "title": {"type": ["string", "null"]},
+    "normalizer_version": {
+      "const": "alexandrian-source-normalizer-v1"
+    },
+    "content_truncated": {"type": "boolean"},
+    "blocks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/source_block"}
+    },
+    "document_text_sha256": {"$ref": "#/$defs/sha256"},
+    "source_document_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source_block": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "block_id",
+        "block_type",
+        "heading_path",
+        "page_number",
+        "text",
+        "text_sha256",
+        "document_start",
+        "document_end"
+      ],
+      "properties": {
+        "block_id": {"type": "string", "pattern": "^B[0-9]{6}$"},
+        "block_type": {
+          "enum": [
+            "heading",
+            "paragraph",
+            "list_item",
+            "table_cell",
+            "quote",
+            "code",
+            "text",
+            "page"
+          ]
+        },
+        "heading_path": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "page_number": {
+          "anyOf": [
+            {"type": "integer", "minimum": 1},
+            {"type": "null"}
+          ]
+        },
+        "text": {"type": "string", "minLength": 1},
+        "text_sha256": {"$ref": "#/$defs/sha256"},
+        "document_start": {"type": "integer", "minimum": 0},
+        "document_end": {"type": "integer", "minimum": 1}
+      }
+    }
+  }
+}

@@ -378,6 +378,60 @@ def visible_messages(conversation_path: Path) -> list[dict]:
     return visible_messages_from_events(load_events(conversation_path))
 
 
+def visible_messages_from_lineage(
+    conversation_path: Path,
+    *,
+    project_root: Path | None = None,
+) -> list[dict]:
+    """Return root-to-current messages for one linked research continuation."""
+    current = conversation_path.resolve()
+    visited: set[Path] = set()
+    segments: list[list[dict]] = []
+
+    while True:
+        if current in visited:
+            raise ConversationIntegrityError(
+                "Conversation continuation lineage contains a cycle."
+            )
+        visited.add(current)
+        events = load_events(current)
+        segments.append(visible_messages_from_events(events))
+
+        started = [
+            event for event in events if event["type"] == "conversation_started"
+        ]
+        continuation = started[0]["payload"].get("continuation")
+        if continuation is None:
+            break
+        if (
+            not isinstance(continuation, dict)
+            or continuation.get("kind") != "research_revision"
+            or not isinstance(continuation.get("parent_conversation_id"), str)
+            or not CONVERSATION_ID_PATTERN.fullmatch(
+                continuation["parent_conversation_id"]
+            )
+        ):
+            raise ConversationIntegrityError(
+                "Research continuation lineage identity is invalid."
+            )
+        parent = current.parent / (
+            continuation["parent_conversation_id"] + ".jsonl"
+        )
+        if not parent.is_file():
+            raise ConversationIntegrityError(
+                "Research continuation parent conversation is missing."
+            )
+        if project_root is not None:
+            verify_receipt(parent, project_root=project_root)
+        current = parent.resolve()
+
+    return [
+        message
+        for segment in reversed(segments)
+        for message in segment
+    ]
+
+
 def visible_messages_from_events(events: list[dict]) -> list[dict]:
     """Project canonical events into the text-message view used by consumers."""
     messages = []

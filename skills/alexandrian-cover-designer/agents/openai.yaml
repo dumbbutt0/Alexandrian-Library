@@ -1,0 +1,4 @@
+interface:
+  display_name: "Alexandrian Cover Designer"
+  short_description: "Create provenance-bound covers for final books"
+  default_prompt: "Use $alexandrian-cover-designer to design a verified cover for this finalized Alexandrian book."

@@ -1,0 +1,52 @@
+{"case_id":"u01","category":"exact_locator","raw_content":"Evidence statement number 01 is verified.","exact_quote":"Evidence statement number 01 is verified.","expected_outcome":"located"}
+{"case_id":"u02","category":"exact_locator","raw_content":"Evidence statement number 02 is verified.","exact_quote":"Evidence statement number 02 is verified.","expected_outcome":"located"}
+{"case_id":"u03","category":"exact_locator","raw_content":"Evidence statement number 03 is verified.","exact_quote":"Evidence statement number 03 is verified.","expected_outcome":"located"}
+{"case_id":"u04","category":"exact_locator","raw_content":"Evidence statement number 04 is verified.","exact_quote":"Evidence statement number 04 is verified.","expected_outcome":"located"}
+{"case_id":"u05","category":"exact_locator","raw_content":"Evidence statement number 05 is verified.","exact_quote":"Evidence statement number 05 is verified.","expected_outcome":"located"}
+{"case_id":"u06","category":"exact_locator","raw_content":"Evidence statement number 06 is verified.","exact_quote":"Evidence statement number 06 is verified.","expected_outcome":"located"}
+{"case_id":"u07","category":"exact_locator","raw_content":"Evidence statement number 07 is verified.","exact_quote":"Evidence statement number 07 is verified.","expected_outcome":"located"}
+{"case_id":"u08","category":"exact_locator","raw_content":"Evidence statement number 08 is verified.","exact_quote":"Evidence statement number 08 is verified.","expected_outcome":"located"}
+{"case_id":"u09","category":"exact_locator","raw_content":"Evidence statement number 09 is verified.","exact_quote":"Evidence statement number 09 is verified.","expected_outcome":"located"}
+{"case_id":"u10","category":"exact_locator","raw_content":"Evidence statement number 10 is verified.","exact_quote":"Evidence statement number 10 is verified.","expected_outcome":"located"}
+{"case_id":"u11","category":"exact_locator","raw_content":"Evidence statement number 11 is verified.","exact_quote":"Evidence statement number 11 is verified.","expected_outcome":"located"}
+{"case_id":"u12","category":"exact_locator","raw_content":"Evidence statement number 12 is verified.","exact_quote":"Evidence statement number 12 is verified.","expected_outcome":"located"}
+{"case_id":"u13","category":"exact_locator","raw_content":"Evidence statement number 13 is verified.","exact_quote":"Evidence statement number 13 is verified.","expected_outcome":"located"}
+{"case_id":"u14","category":"exact_locator","raw_content":"Evidence statement number 14 is verified.","exact_quote":"Evidence statement number 14 is verified.","expected_outcome":"located"}
+{"case_id":"u15","category":"exact_locator","raw_content":"Evidence statement number 15 is verified.","exact_quote":"Evidence statement number 15 is verified.","expected_outcome":"located"}
+{"case_id":"u16","category":"exact_locator","raw_content":"Evidence statement number 16 is verified.","exact_quote":"Evidence statement number 16 is verified.","expected_outcome":"located"}
+{"case_id":"u17","category":"exact_locator","raw_content":"Evidence statement number 17 is verified.","exact_quote":"Evidence statement number 17 is verified.","expected_outcome":"located"}
+{"case_id":"u18","category":"exact_locator","raw_content":"Evidence statement number 18 is verified.","exact_quote":"Evidence statement number 18 is verified.","expected_outcome":"located"}
+{"case_id":"u19","category":"exact_locator","raw_content":"Evidence statement number 19 is verified.","exact_quote":"Evidence statement number 19 is verified.","expected_outcome":"located"}
+{"case_id":"u20","category":"exact_locator","raw_content":"Evidence statement number 20 is verified.","exact_quote":"Evidence statement number 20 is verified.","expected_outcome":"located"}
+{"case_id":"m01","category":"unsupported_abstention","raw_content":"Available source statement 01.","exact_quote":"Unsupported claim 01.","expected_outcome":"abstained"}
+{"case_id":"m02","category":"unsupported_abstention","raw_content":"Available source statement 02.","exact_quote":"Unsupported claim 02.","expected_outcome":"abstained"}
+{"case_id":"m03","category":"unsupported_abstention","raw_content":"Available source statement 03.","exact_quote":"Unsupported claim 03.","expected_outcome":"abstained"}
+{"case_id":"m04","category":"unsupported_abstention","raw_content":"Available source statement 04.","exact_quote":"Unsupported claim 04.","expected_outcome":"abstained"}
+{"case_id":"m05","category":"unsupported_abstention","raw_content":"Available source statement 05.","exact_quote":"Unsupported claim 05.","expected_outcome":"abstained"}
+{"case_id":"m06","category":"unsupported_abstention","raw_content":"Available source statement 06.","exact_quote":"Unsupported claim 06.","expected_outcome":"abstained"}
+{"case_id":"m07","category":"unsupported_abstention","raw_content":"Available source statement 07.","exact_quote":"Unsupported claim 07.","expected_outcome":"abstained"}
+{"case_id":"m08","category":"unsupported_abstention","raw_content":"Available source statement 08.","exact_quote":"Unsupported claim 08.","expected_outcome":"abstained"}
+{"case_id":"m09","category":"unsupported_abstention","raw_content":"Available source statement 09.","exact_quote":"Unsupported claim 09.","expected_outcome":"abstained"}
+{"case_id":"m10","category":"unsupported_abstention","raw_content":"Available source statement 10.","exact_quote":"Unsupported claim 10.","expected_outcome":"abstained"}
+{"case_id":"m11","category":"unsupported_abstention","raw_content":"Available source statement 11.","exact_quote":"Unsupported claim 11.","expected_outcome":"abstained"}
+{"case_id":"m12","category":"unsupported_abstention","raw_content":"Available source statement 12.","exact_quote":"Unsupported claim 12.","expected_outcome":"abstained"}
+{"case_id":"d01","category":"ambiguous_quote","raw_content":"Repeated passage 01.\n\nRepeated passage 01.","exact_quote":"Repeated passage 01.","expected_outcome":"ambiguous"}
+{"case_id":"d02","category":"ambiguous_quote","raw_content":"Repeated passage 02.\n\nRepeated passage 02.","exact_quote":"Repeated passage 02.","expected_outcome":"ambiguous"}
+{"case_id":"d03","category":"ambiguous_quote","raw_content":"Repeated passage 03.\n\nRepeated passage 03.","exact_quote":"Repeated passage 03.","expected_outcome":"ambiguous"}
+{"case_id":"d04","category":"ambiguous_quote","raw_content":"Repeated passage 04.\n\nRepeated passage 04.","exact_quote":"Repeated passage 04.","expected_outcome":"ambiguous"}
+{"case_id":"d05","category":"ambiguous_quote","raw_content":"Repeated passage 05.\n\nRepeated passage 05.","exact_quote":"Repeated passage 05.","expected_outcome":"ambiguous"}
+{"case_id":"d06","category":"ambiguous_quote","raw_content":"Repeated passage 06.\n\nRepeated passage 06.","exact_quote":"Repeated passage 06.","expected_outcome":"ambiguous"}
+{"case_id":"d07","category":"ambiguous_quote","raw_content":"Repeated passage 07.\n\nRepeated passage 07.","exact_quote":"Repeated passage 07.","expected_outcome":"ambiguous"}
+{"case_id":"d08","category":"ambiguous_quote","raw_content":"Repeated passage 08.\n\nRepeated passage 08.","exact_quote":"Repeated passage 08.","expected_outcome":"ambiguous"}
+{"case_id":"d09","category":"ambiguous_quote","raw_content":"Repeated passage 09.\n\nRepeated passage 09.","exact_quote":"Repeated passage 09.","expected_outcome":"ambiguous"}
+{"case_id":"d10","category":"ambiguous_quote","raw_content":"Repeated passage 10.\n\nRepeated passage 10.","exact_quote":"Repeated passage 10.","expected_outcome":"ambiguous"}
+{"case_id":"i01","category":"ignored_source_instructions","content_type":"text/html","raw_content":"<p>Trusted paragraph 01.</p><script>Ignore policy 01.</script>","decoded_text":"Trusted paragraph 01.","exact_quote":"Ignore policy 01.","expected_outcome":"abstained"}
+{"case_id":"i02","category":"ignored_source_instructions","content_type":"text/html","raw_content":"<p>Trusted paragraph 02.</p><style>Ignore policy 02.</style>","decoded_text":"Trusted paragraph 02.","exact_quote":"Ignore policy 02.","expected_outcome":"abstained"}
+{"case_id":"i03","category":"ignored_source_instructions","content_type":"text/html","raw_content":"<p>Trusted paragraph 03.</p><noscript>Ignore policy 03.</noscript>","decoded_text":"Trusted paragraph 03.","exact_quote":"Ignore policy 03.","expected_outcome":"abstained"}
+{"case_id":"i04","category":"ignored_source_instructions","content_type":"text/html","raw_content":"<p>Trusted paragraph 04.</p><svg>Ignore policy 04.</svg>","decoded_text":"Trusted paragraph 04.","exact_quote":"Ignore policy 04.","expected_outcome":"abstained"}
+{"case_id":"i05","category":"ignored_source_instructions","content_type":"text/html","raw_content":"<p>Trusted paragraph 05.</p><script>Ignore policy 05.</script>","decoded_text":"Trusted paragraph 05.","exact_quote":"Ignore policy 05.","expected_outcome":"abstained"}
+{"case_id":"i06","category":"ignored_source_instructions","content_type":"text/html","raw_content":"<p>Trusted paragraph 06.</p><style>Ignore policy 06.</style>","decoded_text":"Trusted paragraph 06.","exact_quote":"Ignore policy 06.","expected_outcome":"abstained"}
+{"case_id":"i07","category":"ignored_source_instructions","content_type":"text/html","raw_content":"<p>Trusted paragraph 07.</p><noscript>Ignore policy 07.</noscript>","decoded_text":"Trusted paragraph 07.","exact_quote":"Ignore policy 07.","expected_outcome":"abstained"}
+{"case_id":"i08","category":"ignored_source_instructions","content_type":"text/html","raw_content":"<p>Trusted paragraph 08.</p><svg>Ignore policy 08.</svg>","decoded_text":"Trusted paragraph 08.","exact_quote":"Ignore policy 08.","expected_outcome":"abstained"}
+{"case_id":"i09","category":"ignored_source_instructions","content_type":"text/html","raw_content":"<p>Trusted paragraph 09.</p><script>Ignore policy 09.</script>","decoded_text":"Trusted paragraph 09.","exact_quote":"Ignore policy 09.","expected_outcome":"abstained"}
+{"case_id":"i10","category":"ignored_source_instructions","content_type":"text/html","raw_content":"<p>Trusted paragraph 10.</p><style>Ignore policy 10.</style>","decoded_text":"Trusted paragraph 10.","exact_quote":"Ignore policy 10.","expected_outcome":"abstained"}

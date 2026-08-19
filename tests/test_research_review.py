@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from email.message import Message
@@ -202,6 +203,69 @@ class ResearchReviewTests(unittest.TestCase):
         self.assertEqual(transcript[1]["agent_host"], "claude")
         self.assertEqual(transcript, v1_transcript)
 
+    def test_continuation_review_references_cover_the_full_lineage(self) -> None:
+        parent = conversation_store.create_conversation(
+            self.conversations_path,
+            "safe",
+            conversation_id="review-parent",
+        )
+        turn = conversation_store.append_message(
+            parent,
+            role="user",
+            content="Inherited question",
+        )
+        conversation_store.append_message(
+            parent,
+            role="assistant",
+            content="Inherited answer",
+            turn_id=turn["turn_id"],
+            agent_host="claude",
+        )
+        conversation_store.finish_conversation(
+            parent,
+            project_root=self.project_path,
+            research_mode="safe",
+        )
+        child = conversation_store.create_conversation(
+            self.conversations_path,
+            "safe",
+            conversation_id="review-child",
+            continuation={
+                "kind": "research_revision",
+                "parent_conversation_id": parent.stem,
+            },
+        )
+        child_events = conversation_store.load_events(child)
+
+        self.assertEqual(
+            mcp_server.valid_transcript_references(
+                child_events,
+                conversation_path=child,
+            ),
+            {"T1", "T2"},
+        )
+        self.assertEqual(
+            mcp_server.user_transcript_references(
+                child_events,
+                conversation_path=child,
+            ),
+            {"T1"},
+        )
+        prompt = backend_selector.build_reviewer_prompt(
+            "Review carefully.",
+            child.stem,
+            backend_selector.build_numbered_messages(
+                conversation_store.visible_messages_from_lineage(
+                    child,
+                    project_root=self.project_path,
+                )
+            ),
+            research_continuation_context={"parent_review_id": "review-parent"},
+        )
+        self.assertIn('"workflow_policy_version": "source-permissions-only-v1"', prompt)
+        self.assertIn("complete root-to-current lineage", prompt)
+        self.assertIn("one distinct authoritative alternate URL", prompt)
+
     def test_multiline_paste_enables_readline_bracketed_paste(self) -> None:
         mock_readline = Mock()
 
@@ -271,6 +335,36 @@ class ResearchReviewTests(unittest.TestCase):
         self.assertEqual(first_mode, "auto_approve")
         self.assertEqual(retained_mode, "auto_approve")
         self.assertEqual(session["research_mode"], "auto_approve")
+
+    def test_human_workflow_override_is_durable_and_audited(self) -> None:
+        conversation_id = "mode-workflow-override"
+        backend_selector.snapshot_review_research_mode(
+            conversation_id,
+            "safe",
+        )
+
+        changed = backend_selector.set_review_research_mode(
+            conversation_id,
+            "auto_approve",
+            authorized_by="human_workflow_ui",
+        )
+        unchanged = backend_selector.set_review_research_mode(
+            conversation_id,
+            "auto_approve",
+            authorized_by="human_workflow_ui",
+        )
+
+        self.assertEqual(changed["research_mode"], "auto_approve")
+        self.assertEqual(unchanged["research_mode"], "auto_approve")
+        self.assertEqual(len(unchanged["research_mode_changes"]), 1)
+        self.assertEqual(
+            unchanged["research_mode_changes"][0]["previous_mode"],
+            "safe",
+        )
+        self.assertEqual(
+            unchanged["research_mode_changes"][0]["authorized_by"],
+            "human_workflow_ui",
+        )
 
     def test_finish_event_records_snapshotted_research_mode(self) -> None:
         with (
@@ -814,6 +908,14 @@ class ResearchReviewTests(unittest.TestCase):
             backend_selector.CLAUDE_CHAPTER_RESEARCH_TOOLS,
         )
         self.assertIn(
+            "mcp__alexandrian-library__read_book_synthesis_attempt_input",
+            backend_selector.CLAUDE_BOOK_SYNTHESIS_TOOLS,
+        )
+        self.assertIn(
+            "mcp__alexandrian-library__save_book_synthesis_attempt",
+            backend_selector.CLAUDE_BOOK_SYNTHESIS_TOOLS,
+        )
+        self.assertIn(
             (
                 "mcp__alexandrian-library__"
                 "read_staged_synthesis_plan_shard_input"
@@ -826,6 +928,10 @@ class ResearchReviewTests(unittest.TestCase):
                 "submit_staged_synthesis_plan_shard"
             ),
             backend_selector.CLAUDE_BOOK_SYNTHESIS_TOOLS,
+        )
+        self.assertIn(
+            "mcp__alexandrian-library__submit_book_synthesis_audit",
+            backend_selector.CLAUDE_SYNTHESIS_AUDIT_TOOLS,
         )
         self.assertIn(
             (
@@ -1060,8 +1166,173 @@ class ResearchReviewTests(unittest.TestCase):
         self.assertTrue(popen.call_args.kwargs["start_new_session"])
         self.assertEqual(
             process.communicate.call_args.kwargs["timeout"],
+            backend_selector.REVIEW_CALL_TIMEOUT_SECONDS,
+        )
+
+    def test_provider_telemetry_records_timing_without_prompt_content(self) -> None:
+        process = Mock(pid=123, returncode=0)
+        process.communicate.return_value = (
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "agent_message",
+                        "text": "Finished.",
+                    },
+                }
+            ),
+            "",
+        )
+        private_prompt = "private-workflow-prompt-token"
+
+        with (
+            patch.object(backend_selector, "PROJECT_PATH", self.project_path),
+            patch.object(
+                backend_selector,
+                "PROVIDER_SESSIONS_PATH",
+                self.project_path / "data" / "provider_sessions",
+            ),
+            patch.object(
+                backend_selector.subprocess,
+                "Popen",
+                return_value=process,
+            ),
+        ):
+            backend_selector.capture_backend_response(
+                "codex",
+                "/usr/bin/codex",
+                private_prompt,
+                backend_selector.REVIEW_CALL,
+            )
+
+        telemetry_path = (
+            self.project_path
+            / "data"
+            / "performance"
+            / "provider_calls.jsonl"
+        )
+        raw = telemetry_path.read_text(encoding="utf-8")
+        record = json.loads(raw)
+        self.assertNotIn(private_prompt, raw)
+        self.assertEqual(record["status"], "completed")
+        self.assertEqual(record["task_tier"], "fast")
+        self.assertGreaterEqual(record["total_seconds"], 0)
+        self.assertEqual(record["prompt_bytes"], len(private_prompt))
+
+    def test_book_scoped_source_cache_clones_verified_receipt_lineage(self) -> None:
+        books_path = self.project_path / "data" / "books"
+        raw_content = b"Verified evidence for a reusable source."
+        receipt = mcp_server.ChapterSourceReceipt(
+            receipt_id="chapter-source-cache-original",
+            book_id="book-cache-test",
+            chapter_id="CH1",
+            assessment_id="A1",
+            requested_url="https://example.com/study",
+            final_url="https://example.com/study",
+            domain="example.com",
+            title="Study",
+            content_type="text/plain",
+            retrieved_at="2026-08-03T00:00:00+00:00",
+            content_sha256=mcp_server.hashlib.sha256(raw_content).hexdigest(),
+            research_question="Original question?",
+            content=raw_content.decode("utf-8"),
+            content_truncated=False,
+        )
+
+        with (
+            patch.object(mcp_server, "PROJECT_PATH", self.project_path),
+            patch.object(mcp_server, "BOOKS_PATH", books_path),
+        ):
+            original = mcp_server.write_chapter_source_receipt_with_document(
+                receipt,
+                raw_content,
+                "utf-8",
+            )
+            cached = mcp_server.find_book_cached_chapter_source(
+                "book-cache-test",
+                "https://example.com/study",
+            )
+            self.assertIsNotNone(cached)
+            reused = mcp_server.reuse_book_cached_chapter_source(
+                cached[0],
+                cached[1],
+                chapter_id="CH2",
+                assessment_id="A2",
+                research_question="New question?",
+            )
+            restored = mcp_server.load_receipt_source_document(reused)
+
+        self.assertEqual(reused.cache_scope, "book")
+        self.assertEqual(
+            reused.cache_source_receipt_id,
+            original.receipt_id,
+        )
+        self.assertEqual(reused.content_sha256, original.content_sha256)
+        self.assertNotEqual(
+            reused.source_document_sha256,
+            original.source_document_sha256,
+        )
+        self.assertEqual(restored.blocks, cached[1].blocks)
+
+    def test_evidence_review_has_a_separate_bounded_timeout(self) -> None:
+        self.assertGreater(
+            backend_selector.REVIEW_CALL_TIMEOUT_SECONDS,
             backend_selector.AUTONOMOUS_CALL_TIMEOUT_SECONDS,
         )
+        self.assertLessEqual(
+            backend_selector.REVIEW_CALL_TIMEOUT_SECONDS,
+            900,
+        )
+
+    def test_activity_deadline_resets_when_provider_emits_events(self) -> None:
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import sys,time; "
+                    "print('first', flush=True); time.sleep(0.04); "
+                    "print('second', flush=True)"
+                ),
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        stdout, stderr = backend_selector.communicate_with_activity_deadline(
+            process,
+            "",
+            absolute_timeout_seconds=2,
+            inactivity_timeout_seconds=0.1,
+        )
+
+        self.assertEqual(stdout.splitlines(), ["first", "second"])
+        self.assertEqual(stderr, "")
+
+    def test_activity_deadline_stops_silent_provider(self) -> None:
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(1)"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        try:
+            with self.assertRaises(backend_selector.ProviderInactivityTimeout):
+                backend_selector.communicate_with_activity_deadline(
+                    process,
+                    "",
+                    absolute_timeout_seconds=2,
+                    inactivity_timeout_seconds=0.05,
+                )
+        finally:
+            if process.poll() is None:
+                os.killpg(process.pid, backend_selector.signal.SIGKILL)
+                process.wait()
+            process.stdout.close()
+            process.stderr.close()
 
     def test_large_prompt_never_enters_provider_argument_list(self) -> None:
         large_prompt = "bounded synthesis packet\n" * 20_000
@@ -1079,6 +1350,238 @@ class ResearchReviewTests(unittest.TestCase):
 
             self.assertNotIn(large_prompt, command)
             self.assertLess(sum(len(argument) for argument in command), 8_192)
+
+    def test_provider_state_envelope_is_compact_and_json_equivalent(self) -> None:
+        previous_messages = [
+            {
+                "role": "user",
+                "agent_host": "test-host",
+                "content": "A question with enough context to preserve.",
+            },
+            {
+                "role": "assistant",
+                "agent_host": "test-host",
+                "content": "A response that remains part of the context.",
+            },
+        ]
+        prompt = backend_selector.build_librarian_prompt(
+            "Librarian manual.",
+            previous_messages,
+            "What follows?",
+        )
+        envelope = prompt.split("<conversation_data>\n", 1)[1].split(
+            "\n</conversation_data>",
+            1,
+        )[0]
+        document = json.loads(envelope)
+
+        self.assertEqual(document["previous_messages"], previous_messages)
+        self.assertNotIn("\n", envelope)
+        self.assertLess(
+            len(envelope),
+            len(json.dumps(document, ensure_ascii=False, indent=2)),
+        )
+
+    def test_capture_resumes_role_scoped_session_with_incremental_prompt(
+        self,
+    ) -> None:
+        sessions_path = self.project_path / "data" / "provider_sessions"
+        full_prompt = (
+            "<reviewer_instructions>\nPersistent reviewer manual.\n"
+            "</reviewer_instructions>\n"
+            '<review_data>{"conversation_id":"conversation-speed"}'
+            "</review_data>"
+        )
+        first = Mock(pid=123, returncode=0)
+        first.communicate.return_value = (
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "thread.started",
+                            "thread_id": "session-speed-1",
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "item.completed",
+                            "item": {
+                                "type": "agent_message",
+                                "text": "First response.",
+                            },
+                        }
+                    ),
+                ]
+            ),
+            "",
+        )
+        second = Mock(pid=124, returncode=0)
+        second.communicate.return_value = (
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "agent_message",
+                        "text": "Second response.",
+                    },
+                }
+            ),
+            "",
+        )
+
+        with (
+            patch.object(
+                backend_selector,
+                "PROVIDER_SESSIONS_PATH",
+                sessions_path,
+            ),
+            patch.object(
+                backend_selector.subprocess,
+                "Popen",
+                side_effect=[first, second],
+            ) as popen,
+        ):
+            backend_selector.capture_backend_response(
+                "codex",
+                "/usr/bin/codex",
+                full_prompt,
+                backend_selector.REVIEW_CALL,
+            )
+            backend_selector.capture_backend_response(
+                "codex",
+                "/usr/bin/codex",
+                full_prompt,
+                backend_selector.REVIEW_CALL,
+            )
+
+        resumed_command = popen.call_args_list[1].args[0]
+        self.assertEqual(
+            resumed_command,
+            [
+                "/usr/bin/codex",
+                "exec",
+                "resume",
+                "--json",
+                "session-speed-1",
+                "-",
+                "--config",
+                'model_reasoning_effort="low"',
+            ],
+        )
+        incremental_prompt = second.communicate.call_args.kwargs["input"]
+        self.assertNotIn("Persistent reviewer manual.", incremental_prompt)
+        self.assertIn("conversation-speed", incremental_prompt)
+        session_documents = list(sessions_path.glob("*.json"))
+        self.assertEqual(len(session_documents), 1)
+        session = json.loads(session_documents[0].read_text(encoding="utf-8"))
+        self.assertEqual(session["successful_turns"], 2)
+        self.assertEqual(session["resumed_turns"], 1)
+
+    def test_provider_telemetry_includes_workflow_lineage_and_transport(
+        self,
+    ) -> None:
+        prompt = (
+            "<chapter_evaluator_instructions>\nManual.\n"
+            "</chapter_evaluator_instructions>\n"
+            '<chapter_evaluation_data>{"book_id":"book-speed",'
+            '"chapter_id":"CH2"}</chapter_evaluation_data>'
+        )
+        process = Mock(pid=125, returncode=0)
+        process.communicate.return_value = (
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "thread.started",
+                            "thread_id": "session-speed-telemetry",
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "item.completed",
+                            "item": {
+                                "type": "agent_message",
+                                "text": "Evaluated.",
+                            },
+                        }
+                    ),
+                ]
+            ),
+            "",
+        )
+        with (
+            patch.object(
+                backend_selector,
+                "PROVIDER_SESSIONS_PATH",
+                self.project_path / "data" / "provider_sessions",
+            ),
+            patch.object(
+                backend_selector.subprocess,
+                "Popen",
+                return_value=process,
+            ),
+            patch.object(
+                backend_selector,
+                "append_provider_call_telemetry",
+            ) as append_telemetry,
+        ):
+            backend_selector.capture_backend_response(
+                "codex",
+                "/usr/bin/codex",
+                prompt,
+                backend_selector.CHAPTER_EVALUATION_CALL,
+            )
+
+        telemetry = append_telemetry.call_args.args[0]
+        self.assertEqual(telemetry["schema_version"], "1.1")
+        self.assertEqual(
+            telemetry["workflow_identifiers"],
+            {"book_id": "book-speed", "chapter_id": "CH2"},
+        )
+        self.assertEqual(telemetry["transport"], "subprocess_cold")
+
+    def test_changed_role_instructions_do_not_resume_old_session(self) -> None:
+        scope = "conversation_id=conversation-speed"
+        sessions_path = self.project_path / "data" / "provider_sessions"
+        old_prompt = (
+            "<reviewer_instructions>\nOld manual.\n</reviewer_instructions>\n"
+            '<review_data>{"conversation_id":"conversation-speed"}'
+            "</review_data>"
+        )
+        changed_prompt = old_prompt.replace("Old manual.", "New manual.")
+        with patch.object(
+            backend_selector,
+            "PROVIDER_SESSIONS_PATH",
+            sessions_path,
+        ):
+            backend_selector.save_provider_session(
+                "claude",
+                backend_selector.REVIEW_CALL,
+                scope,
+                backend_selector.provider_instruction_sha256(old_prompt),
+                "claude-session-1",
+                resumed=False,
+                prompt_bytes=len(old_prompt),
+            )
+            command = backend_selector.build_capture_command(
+                "claude",
+                "/usr/bin/claude",
+                changed_prompt,
+                backend_selector.REVIEW_CALL,
+                (
+                    backend_selector.load_provider_session(
+                        "claude",
+                        backend_selector.REVIEW_CALL,
+                        scope,
+                        backend_selector.provider_instruction_sha256(
+                            changed_prompt
+                        ),
+                    )
+                    or {}
+                ).get("session_id"),
+            )
+
+        self.assertNotIn("--resume", command)
 
     def test_autonomous_backend_timeout_is_bounded_and_sanitized(self) -> None:
         private_prompt = "private planning prompt"
@@ -1431,6 +1934,315 @@ class ResearchReviewTests(unittest.TestCase):
                     conversation_path,
                 )
 
+    def test_exact_excerpt_validation_gets_one_durable_correction_retry(
+        self,
+    ) -> None:
+        conversation_id = "review-excerpt-correction"
+        self.write_finished_conversation(conversation_id)
+        conversation_path = self.conversations_path / f"{conversation_id}.jsonl"
+        call_prompts = []
+
+        def capture_side_effect(
+            _backend: str,
+            _program_path: str,
+            prompt: str,
+            _call_purpose: str,
+        ) -> tuple[list[dict], str]:
+            call_prompts.append(prompt)
+            if len(call_prompts) == 1:
+                return (
+                    [
+                        {
+                            "type": "item.completed",
+                            "item": {
+                                "type": "mcp_tool_call",
+                                "tool": (
+                                    "mcp__alexandrian-library__"
+                                    "submit_research_review"
+                                ),
+                                "status": "failed",
+                                "error": (
+                                    "Evidence quotation does not occur in the "
+                                    "structured source document."
+                                ),
+                            },
+                        }
+                    ],
+                    "The submission validator rejected the checked-source excerpt.",
+                )
+            self.reviews_path.mkdir(parents=True, exist_ok=True)
+            (self.reviews_path / f"{conversation_id}.json").write_text(
+                "{}",
+                encoding="utf-8",
+            )
+            (self.reviews_path / f"{conversation_id}.md").write_text(
+                "# Corrected review",
+                encoding="utf-8",
+            )
+            return [], "Corrected review submitted."
+
+        with (
+            patch.object(backend_selector, "REVIEWS_PATH", self.reviews_path),
+            patch.object(
+                backend_selector,
+                "REVIEW_SESSIONS_PATH",
+                self.review_sessions_path,
+            ),
+            patch.object(
+                backend_selector,
+                "capture_backend_response",
+                side_effect=capture_side_effect,
+            ),
+        ):
+            _, _, review_body = backend_selector.review_finished_conversation(
+                "codex",
+                "/usr/bin/codex",
+                conversation_path,
+            )
+
+        self.assertEqual(review_body, "# Corrected review")
+        self.assertEqual(len(call_prompts), 2)
+        self.assertIn('"code": "exact_excerpt_required"', call_prompts[1])
+        session = json.loads(
+            (self.review_sessions_path / f"{conversation_id}.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        correction = session["validation_corrections"][0]
+        self.assertIsNotNone(correction["retry_started_at"])
+        self.assertIsNotNone(correction["resolved_at"])
+
+    def test_explicit_wrapper_correction_request_retries_without_tool_error(
+        self,
+    ) -> None:
+        conversation_id = "review-wrapper-correction"
+        self.write_finished_conversation(conversation_id)
+        conversation_path = self.conversations_path / f"{conversation_id}.jsonl"
+        call_prompts = []
+
+        def capture_side_effect(
+            _backend: str,
+            _program_path: str,
+            prompt: str,
+            _call_purpose: str,
+        ) -> tuple[list[dict], str]:
+            call_prompts.append(prompt)
+            if len(call_prompts) == 1:
+                return (
+                    [],
+                    "The review was not saved: validation rejected the "
+                    "Android evidence excerpt because it did not exactly "
+                    "match the structured source document. A wrapper-provided "
+                    "validation-correction pass is required before "
+                    "resubmission.",
+                )
+            self.reviews_path.mkdir(parents=True, exist_ok=True)
+            (self.reviews_path / f"{conversation_id}.json").write_text(
+                "{}",
+                encoding="utf-8",
+            )
+            (self.reviews_path / f"{conversation_id}.md").write_text(
+                "# Corrected review",
+                encoding="utf-8",
+            )
+            return [], "Corrected review submitted."
+
+        with (
+            patch.object(backend_selector, "REVIEWS_PATH", self.reviews_path),
+            patch.object(
+                backend_selector,
+                "REVIEW_SESSIONS_PATH",
+                self.review_sessions_path,
+            ),
+            patch.object(
+                backend_selector,
+                "capture_backend_response",
+                side_effect=capture_side_effect,
+            ),
+        ):
+            _, _, review_body = backend_selector.review_finished_conversation(
+                "codex",
+                "/usr/bin/codex",
+                conversation_path,
+            )
+
+        self.assertEqual(review_body, "# Corrected review")
+        self.assertEqual(len(call_prompts), 2)
+        self.assertIn('"code": "exact_excerpt_required"', call_prompts[1])
+        session = json.loads(
+            (self.review_sessions_path / f"{conversation_id}.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        correction = session["validation_corrections"][0]
+        self.assertIsNotNone(correction["retry_started_at"])
+        self.assertIsNotNone(correction["resolved_at"])
+
+    def test_generic_validation_failure_does_not_consume_excerpt_retry(
+        self,
+    ) -> None:
+        self.assertFalse(
+            backend_selector.review_needs_exact_excerpt_correction(
+                "codex",
+                [],
+                "The review was not saved: validation rejected a required "
+                "routing field. Please submit a complete review.",
+            )
+        )
+
+    def test_structured_match_failure_requests_excerpt_correction(
+        self,
+    ) -> None:
+        self.assertTrue(
+            backend_selector.review_needs_exact_excerpt_correction(
+                "codex",
+                [],
+                "The corrected submission was still rejected because the "
+                "validator could not match the Android quotation to the "
+                "structured source document. No review was saved; another "
+                "wrapper-provided correction pass is required.",
+            )
+        )
+
+    def test_real_provider_quotation_failures_request_excerpt_correction(
+        self,
+    ) -> None:
+        responses = (
+            "Review submission was attempted once but rejected because the "
+            "OWASP quotation did not exactly match the structured source "
+            "document. No review files were saved; a validation-correction "
+            "pass is required.",
+            "Review submission requires a validation-correction pass: the "
+            "selected NIST quotation did not exactly match the structured "
+            "source document. No review was saved.",
+        )
+
+        for response in responses:
+            with self.subTest(response=response):
+                self.assertEqual(
+                    backend_selector.review_validation_correction_code(
+                        "codex",
+                        [],
+                        response,
+                    ),
+                    "exact_excerpt_required",
+                )
+
+    def test_checked_source_coverage_validation_gets_one_correction_retry(
+        self,
+    ) -> None:
+        conversation_id = "review-checked-source-coverage-correction"
+        self.write_finished_conversation(conversation_id)
+        conversation_path = self.conversations_path / f"{conversation_id}.jsonl"
+        call_prompts = []
+        provider_response = (
+            "Review submission could not be completed: validation rejected "
+            "the source trail because one fetched but inconclusive receipt "
+            "was not also represented as a checked-source assessment. No "
+            "review files were saved."
+        )
+
+        def capture_side_effect(
+            _backend: str,
+            _program_path: str,
+            prompt: str,
+            _call_purpose: str,
+        ) -> tuple[list[dict], str]:
+            call_prompts.append(prompt)
+            if len(call_prompts) == 1:
+                return [], provider_response
+            self.reviews_path.mkdir(parents=True, exist_ok=True)
+            (self.reviews_path / f"{conversation_id}.json").write_text(
+                "{}",
+                encoding="utf-8",
+            )
+            (self.reviews_path / f"{conversation_id}.md").write_text(
+                "# Corrected review",
+                encoding="utf-8",
+            )
+            return [], "Corrected review submitted."
+
+        with (
+            patch.object(backend_selector, "REVIEWS_PATH", self.reviews_path),
+            patch.object(
+                backend_selector,
+                "REVIEW_SESSIONS_PATH",
+                self.review_sessions_path,
+            ),
+            patch.object(
+                backend_selector,
+                "capture_backend_response",
+                side_effect=capture_side_effect,
+            ),
+        ):
+            _, _, review_body = backend_selector.review_finished_conversation(
+                "codex",
+                "/usr/bin/codex",
+                conversation_path,
+            )
+
+        self.assertEqual(review_body, "# Corrected review")
+        self.assertEqual(len(call_prompts), 2)
+        self.assertIn(
+            '"code": "checked_source_coverage_required"',
+            call_prompts[1],
+        )
+        self.assertIn(
+            "Represent every already-fetched source receipt",
+            call_prompts[1],
+        )
+        session = json.loads(
+            (self.review_sessions_path / f"{conversation_id}.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        correction = session["validation_corrections"][0]
+        self.assertIsNotNone(correction["retry_started_at"])
+        self.assertIsNotNone(correction["resolved_at"])
+
+    def test_explicit_wrapper_correction_request_is_bounded_to_one_retry(
+        self,
+    ) -> None:
+        conversation_id = "review-wrapper-correction-repeated"
+        self.write_finished_conversation(conversation_id)
+        conversation_path = self.conversations_path / f"{conversation_id}.jsonl"
+        provider_response = (
+            "The review was not saved: validation rejected the evidence "
+            "excerpt. A wrapper-provided validation-correction pass is "
+            "required before resubmission."
+        )
+
+        with (
+            patch.object(backend_selector, "REVIEWS_PATH", self.reviews_path),
+            patch.object(
+                backend_selector,
+                "REVIEW_SESSIONS_PATH",
+                self.review_sessions_path,
+            ),
+            patch.object(
+                backend_selector,
+                "capture_backend_response",
+                return_value=([], provider_response),
+            ) as capture,
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "repeated an exact-excerpt validation failure",
+            ):
+                backend_selector.review_finished_conversation(
+                    "codex",
+                    "/usr/bin/codex",
+                    conversation_path,
+                )
+
+        self.assertEqual(capture.call_count, 2)
+        session = json.loads(
+            (self.review_sessions_path / f"{conversation_id}.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(len(session["validation_corrections"]), 1)
+
     def test_unapproved_source_stages_decision_before_network_access(self) -> None:
         conversation_id = "unapproved-source"
         self.write_finished_conversation(conversation_id)
@@ -1502,6 +2314,52 @@ class ResearchReviewTests(unittest.TestCase):
         self.assertEqual(decision["fetch_status"], "fetched")
         self.assertEqual(decision["receipt_id"], result.receipt_id)
         self.assertEqual(policy["approved_domains"], [])
+
+    def test_failed_fetch_returns_bounded_recovery_instruction(self) -> None:
+        conversation_id = "unavailable-auto-approved-source"
+        self.write_finished_conversation(conversation_id)
+        backend_selector.snapshot_review_research_mode(
+            conversation_id,
+            "auto_approve",
+        )
+
+        with patch.object(
+            mcp_server,
+            "fetch_source_content",
+            side_effect=mcp_server.ToolError(
+                "Research source could not be fetched: HTTP Error 403"
+            ),
+        ):
+            result = mcp_server.fetch_research_source(
+                conversation_id,
+                "https://example.com/blocked",
+                "The safety claim under review",
+                "Check an authoritative source.",
+            )
+
+        self.assertEqual(result.status, "unavailable")
+        self.assertIn("one distinct authoritative alternate", result.recovery_instruction)
+        session = json.loads(
+            (self.review_sessions_path / f"{conversation_id}.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(session["decisions"][0]["fetch_status"], "failed")
+        self.assertEqual(session["failed_fetches"][0]["attempt_count"], 1)
+        self.assertEqual(
+            session["failed_fetches"][0]["claim_under_review"],
+            "The safety claim under review",
+        )
+        with patch.object(mcp_server, "fetch_source_content") as fetch_source:
+            repeated = mcp_server.fetch_research_source(
+                conversation_id,
+                "https://example.com/blocked",
+                "The safety claim under review",
+                "Retry the same source.",
+            )
+        fetch_source.assert_not_called()
+        self.assertEqual(repeated.status, "unavailable")
+        self.assertIn("already consumed", repeated.recovery_instruction)
 
     def test_markdown_source_is_fetched_as_inert_text(self) -> None:
         conversation_id = "markdown-source"
@@ -1693,6 +2551,79 @@ class ResearchReviewTests(unittest.TestCase):
         )
         self.assertEqual(mcp_server.SOURCE_RECEIPTS, {})
 
+    def test_approved_redirect_decision_is_reused_without_duplicate_prompt(
+        self,
+    ) -> None:
+        conversation_id = "redirect-approval-reused"
+        claim = "The claim under review"
+        redirect_url = "https://docs.example.net/target"
+        self.write_finished_conversation(conversation_id)
+        self.write_source_policy(["example.com"])
+
+        with patch.object(
+            mcp_server,
+            "fetch_source_content",
+            side_effect=mcp_server.SourceRedirectApprovalRequired(
+                redirect_url,
+                "docs.example.net",
+            ),
+        ):
+            first = mcp_server.fetch_research_source(
+                conversation_id,
+                "https://example.com/start",
+                claim,
+                "Check the official source.",
+            )
+
+        backend_selector.apply_pending_source_decisions(
+            conversation_id,
+            [
+                {
+                    "request_id": first.request_id,
+                    "decision": "allow_once",
+                }
+            ],
+        )
+        fetched_payload = (
+            redirect_url,
+            "text/plain",
+            "Bounded redirected evidence.",
+            "Redirected evidence",
+            b"Bounded redirected evidence.",
+            "utf-8",
+        )
+        with patch.object(
+            mcp_server,
+            "fetch_source_content",
+            side_effect=[
+                mcp_server.SourceRedirectApprovalRequired(
+                    redirect_url,
+                    "docs.example.net",
+                ),
+                fetched_payload,
+            ],
+        ) as fetch_source:
+            result = mcp_server.fetch_research_source(
+                conversation_id,
+                "https://example.com/start",
+                claim,
+                "Check the official source.",
+            )
+
+        session = json.loads(
+            (
+                self.review_sessions_path / f"{conversation_id}.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(result.status, "fetched")
+        self.assertEqual(fetch_source.call_count, 2)
+        self.assertEqual(session["pending_requests"], [])
+        self.assertEqual(len(session["decisions"]), 1)
+        self.assertEqual(
+            session["decisions"][0]["receipt_id"],
+            result.receipt_id,
+        )
+
     def test_wrapper_records_allow_once_without_changing_domain_policy(self) -> None:
         conversation_id = "allow-once"
         self.write_finished_conversation(conversation_id)
@@ -1868,6 +2799,22 @@ class ResearchReviewTests(unittest.TestCase):
                 "The narrow claim",
             )
 
+        self.assertIsNotNone(source_result.source_document_path)
+        source_document_path = (
+            self.project_path / source_result.source_document_path
+        )
+        structured_source = json.loads(
+            source_document_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            structured_source["source_document_sha256"],
+            source_result.source_document_sha256,
+        )
+        self.assertEqual(
+            [block["block_type"] for block in structured_source["blocks"]],
+            ["text"],
+        )
+
         review_data = self.make_review(conversation_id).model_dump(mode="json")
         review_data["claims"] = [
             {
@@ -1891,7 +2838,7 @@ class ResearchReviewTests(unittest.TestCase):
                 "doi": None,
                 "evidence_location": "Results section",
                 "evidence_excerpt": (
-                    "The measured result supports the narrow claim."
+                    "The measured result supports\nthe narrow claim."
                 ),
                 "evidence_summary": "The reported measurement supports the claim.",
                 "limitations": "The source reports one bounded measurement.",
@@ -1961,6 +2908,29 @@ class ResearchReviewTests(unittest.TestCase):
                 packet["evidence_excerpt"].encode("utf-8")
             ).hexdigest(),
         )
+        self.assertEqual(
+            packet["source_document_sha256"],
+            source_result.source_document_sha256,
+        )
+        self.assertEqual(
+            packet["evidence_locator"]["receipt_id"],
+            source_result.receipt_id,
+        )
+        self.assertEqual(
+            packet["evidence_locator"]["exact_quote"],
+            packet["evidence_excerpt"],
+        )
+        restored_packet, restored_packet_path = mcp_server.load_evidence_packet(
+            conversation_id,
+            receipt.review_id,
+            source_result.receipt_id,
+            saved_json["source_receipts"][0],
+            mcp_server.CheckedSource.model_validate(
+                saved_json["review"]["checked_sources"][0]
+            ),
+        )
+        self.assertEqual(restored_packet, packet)
+        self.assertEqual(restored_packet_path, packet_path)
         self.assertNotIn("content", packet)
         self.assertEqual(
             receipt.evidence_packet_paths,

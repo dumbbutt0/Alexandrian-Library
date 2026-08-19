@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import book_synthesis
+import cover_design
 
 
 class BookshelfError(RuntimeError):
@@ -439,6 +440,21 @@ def project_final_book(
 
     relative_assembly_path = assembly_path.relative_to(project_path).as_posix()
     relative_book_path = book_path.relative_to(project_path).as_posix()
+    canonical_cover_path = cover_design.design_path(project_path, book_id)
+    try:
+        design = cover_design.load_and_verify(project_path, book_id)
+    except cover_design.CoverDesignError as error:
+        if canonical_cover_path.is_file():
+            raise BookshelfError(str(error)) from error
+        try:
+            design = cover_design.create_default_design(
+                project_path,
+                book_id,
+                designer_host="bookshelf_projection_fallback",
+            )
+        except cover_design.CoverDesignError as fallback_error:
+            raise BookshelfError(str(fallback_error)) from fallback_error
+    cover_asset = design["asset"]
     return {
         "work_id": book_id,
         "book_id": book_id,
@@ -479,6 +495,24 @@ def project_final_book(
         "source_count": len(source_receipt_ids),
         "review_ids": review_ids,
         "knowledge_node_ids": knowledge_node_ids,
+        "cover": {
+            "design_path": str(
+                cover_design.design_path(project_path, book_id).relative_to(
+                    project_path
+                )
+            ),
+            "design_sha256": design["design_sha256"],
+            "quote": design["quote"],
+            "quote_location": design["quote_location"],
+            "concept": design["concept"],
+            "visual_motifs": design["visual_motifs"],
+            "palette": design["palette"],
+            "asset_status": cover_asset["status"],
+            "asset_path": cover_asset["path"],
+            "asset_sha256": cover_asset["sha256"],
+            "asset_mime_type": cover_asset["mime_type"],
+            "asset_url": f"/api/v1/books/{book_id}/cover",
+        },
     }
 
 
@@ -505,6 +539,8 @@ def render_index(catalog: dict) -> str:
                 f"- Edition: `{book['edition']}`",
                 f"- Chapters: `{book['chapter_count']}`",
                 f"- Checked sources: `{book['source_count']}`",
+                f"- Cover status: `{book['cover']['asset_status']}`",
+                f"- Cover SHA-256: `{book['cover']['asset_sha256']}`",
                 f"- [Read the final book]({book_link})",
                 "- [Explore related knowledge](../knowledge/index.md)",
                 "",

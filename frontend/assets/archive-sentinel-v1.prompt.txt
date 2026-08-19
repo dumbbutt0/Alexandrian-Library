@@ -1,0 +1,12 @@
+Use case: stylized-concept
+Asset type: wide frontend environment artwork for the Alexandrian Library shelf
+Input images: Image 1 is the edit target and visual identity anchor.
+Primary request: Recompose Image 1 into an original wide 16:9 “Archive Sentinel” environment. Preserve the recognizable half engraved-paper, half stained-glass eye and the two engraved hands, but transform the portrait cover composition into a spacious library backdrop. Move the eye to the upper center as a monumental watchful celestial window. Move the hands far apart into the lower left and lower right, palms and fingers angled upward so they appear to support a long horizontal wooden bookshelf that will be overlaid by HTML across the lower third. Leave the central lower third visually open and dark enough for interactive books and shelf controls.
+Scene/backdrop: a midnight forbidden archive combining star field, precise evidence geometry, torn archival paper, stained glass, faint manuscript fragments, and shadowed gothic architecture.
+Style/medium: the same original fusion of stained glass, xerox-punk halftone, anatomical engraving, distressed paper, and scientific annotation as Image 1; curated and intelligent, not horror.
+Composition/framing: wide 16:9; eye centered in upper half; hands symmetrically separated near bottom corners; generous negative space across the lower middle for the actual CSS shelf and books; no book mockup.
+Lighting/mood: cobalt celestial light from the eye, warm amber glow rising from the future shelf, mysterious but readable.
+Color palette: carbon black, midnight cobalt, bone white, parchment, amber gold, restrained crimson.
+Constraints: preserve the defining eye and hand visual language from Image 1 while changing the layout; no readable words, letters, numbers, logos, watermark, existing IP, crosses, embedded shelf, embedded books, UI controls, or title text. Do not put detailed imagery behind the lower-center book area.
+
+Generation mode: built-in image generation tool.

@@ -13,12 +13,22 @@ const state = {
   headings: [],
   workflow: null,
   workflows: [],
+  publishedWorkflows: [],
+  workflowFilter: "published",
+  jobs: new Map(),
+  handledJobs: new Set(),
+  activityTimer: null,
+  lastCanonicalWorkflowSyncAt: 0,
   workflowBusy: false,
   worktableLoaded: false,
   readiness: null,
   provenance: null,
+  runReceipt: null,
   readerBookId: null,
   readerBookHash: null,
+  evidenceNumbers: new Map(),
+  nextEvidenceNumber: 1,
+  inquiryStarter: "understand",
 };
 
 const VISUAL_REFERENCE_BOOKS = [
@@ -70,6 +80,21 @@ const VISUAL_REFERENCE_BOOKS = [
 const SHELF_DISPLAY_MINIMUM = 5;
 const DEMO_VISUAL_REFERENCES = new URLSearchParams(window.location.search)
   .get("demo") === "1";
+const GUIDED_INQUIRY_EXAMPLE = "How can an offline AI assistant preserve useful human agency during a 72-hour network outage without encouraging overreliance, overstating its evidence, or silently taking decisions that should remain human-owned?";
+const INQUIRY_STARTERS = {
+  understand: {
+    placeholder: "What complicated subject do you want to understand without getting lost?",
+    status: "The Library will build a clear mental model and preserve meaningful disagreement.",
+  },
+  belief: {
+    placeholder: "What do you believe—and what evidence would be strong enough to change your mind?",
+    status: "The Library will test the belief instead of merely confirming it.",
+  },
+  material: {
+    placeholder: "What should your notes, conversations, links, or argument become?",
+    status: "Describe the material and the book you want it to become.",
+  },
+};
 
 const views = {
   library: document.querySelector("#library-view"),
@@ -78,6 +103,7 @@ const views = {
 };
 
 const shelf = document.querySelector("#bookshelf");
+const firstVisitExample = document.querySelector("#first-visit-example");
 const inspector = document.querySelector("#book-inspector");
 const shelfBookTemplate = document.querySelector("#shelf-book-template");
 const leftPage = document.querySelector("#left-page");
@@ -91,12 +117,22 @@ const tocList = document.querySelector("#toc-list");
 const tocToggle = document.querySelector("#toc-toggle");
 const plainToggle = document.querySelector("#plain-toggle");
 const evidenceToggle = document.querySelector("#evidence-toggle");
+const runReceiptToggle = document.querySelector("#run-receipt-toggle");
+const readerExportMenu = document.querySelector("#reader-export-menu");
+const exportMarkdown = document.querySelector("#export-markdown");
+const exportEpub = document.querySelector("#export-epub");
+const exportEvidence = document.querySelector("#export-evidence");
+const exportCoverCard = document.querySelector("#export-cover-card");
+const exportQuoteCard = document.querySelector("#export-quote-card");
 const provenancePanel = document.querySelector("#provenance-panel");
 const provenanceList = document.querySelector("#provenance-list");
+const runReceiptPanel = document.querySelector("#run-receipt-panel");
+const runReceiptContent = document.querySelector("#run-receipt-content");
 const previousVolumeButton = document.querySelector("#previous-volume");
 const nextVolumeButton = document.querySelector("#next-volume");
 const catalogTrack = document.querySelector("#catalog-track");
 const catalogEnd = document.querySelector("#catalog-end");
+const catalogStage = document.querySelector(".catalog-stage");
 const bookshelfViewport = document.querySelector(".bookshelf-viewport");
 const shelfRoom = document.querySelector(".shelf-room");
 const bookFocusStage = document.querySelector("#book-focus-stage");
@@ -113,8 +149,42 @@ const conversationComposer = document.querySelector("#conversation-composer");
 const turnInput = document.querySelector("#turn-input");
 const workflowActionZone = document.querySelector("#workflow-action-zone");
 const workflowStatus = document.querySelector("#workflow-status");
+const workflowProgress = document.querySelector("#workflow-progress");
+const workflowProgressAgent = document.querySelector("#workflow-progress-agent");
+const workflowProgressPhase = document.querySelector("#workflow-progress-phase");
+const workflowProgressPercent = document.querySelector("#workflow-progress-percent");
+const workflowProgressFill = document.querySelector("#workflow-progress-fill");
+const workflowProgressElapsed = document.querySelector("#workflow-progress-elapsed");
+const workflowActivityTitle = document.querySelector("#workflow-activity-title");
+const workflowActivityDetail = document.querySelector("#workflow-activity-detail");
+const workflowTransitionAgent = document.querySelector("#workflow-transition-agent");
+const workflowTransitionPhase = document.querySelector("#workflow-transition-phase");
+const workflowTransitionPercent = document.querySelector("#workflow-transition-percent");
+const workflowTransitionFill = document.querySelector("#workflow-transition-fill");
+const finishReadiness = document.querySelector("#finish-readiness");
+const finishReadinessTitle = document.querySelector("#finish-readiness-title");
+const finishReadinessStatus = document.querySelector("#finish-readiness-status");
+const finishReadinessSummary = document.querySelector("#finish-readiness-summary");
+const finishReadinessChecks = document.querySelector("#finish-readiness-checks");
+const finishAutoList = document.querySelector("#finish-auto-list");
+const finishPauseList = document.querySelector("#finish-pause-list");
+const workflowTimelinePanel = document.querySelector("#workflow-timeline-panel");
+const workflowTimeline = document.querySelector("#workflow-timeline");
+const workflowTimelineCount = document.querySelector("#workflow-timeline-count");
+const agentToolbar = document.querySelector("#agent-toolbar");
+const activeAgentLabel = document.querySelector("#active-agent-label");
+const agentSwitcher = document.querySelector("#agent-switcher");
+const bookSeed = document.querySelector("#book-seed");
+const bookSeedTitle = document.querySelector("#book-seed-title");
+const bookSeedCoverTitle = document.querySelector("#book-seed-cover-title");
+const bookSeedQuestion = document.querySelector("#book-seed-question");
+const bookSeedStateTitle = document.querySelector("#book-seed-state-title");
+const bookSeedStateDetail = document.querySelector("#book-seed-state-detail");
+const publishedWorkflowCount = document.querySelector("#published-workflow-count");
+const activeWorkflowCount = document.querySelector("#active-workflow-count");
 
 function routeTo(route) {
+  document.body.dataset.activeRoute = route;
   Object.entries(views).forEach(([name, element]) => {
     element.classList.toggle("is-active", name === route);
   });
@@ -123,7 +193,11 @@ function routeTo(route) {
   });
   tocPanel.classList.remove("is-open");
   tocToggle.setAttribute("aria-expanded", "false");
-  if (route !== "reader") hideProvenance();
+  if (route !== "reader") {
+    hideProvenance();
+    hideRunReceipt();
+    readerExportMenu.open = false;
+  }
   if (route === "library") {
     document.title = "The Library — Inquirion Labs";
   } else if (route === "worktable") {
@@ -176,10 +250,116 @@ function normalizedBookDepth(book) {
 }
 
 function coverAssetForBook(book) {
-  if (book.title.startsWith("Branches Across the Boundary")) {
-    return "/assets/branches-cover-holy-cyber-v3.png";
+  return book.cover?.asset_url || "";
+}
+
+function coverQuoteForBook(book) {
+  return book.cover?.quote || "";
+}
+
+function activeReaderBook() {
+  const catalogBook = state.catalog?.books?.find(
+    (book) => book.book_id === state.readerBookId,
+  );
+  return catalogBook || state.selectedBook;
+}
+
+function shareCardFilename(title, kind) {
+  const safeTitle = String(title || "inquirion-book")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 72);
+  return `${safeTitle || "inquirion-book"}-${kind}-card.png`;
+}
+
+function canvasTextLines(context, text, maxWidth, maxLines = 8) {
+  const words = String(text || "").trim().split(/\s+/).filter(Boolean);
+  const lines = [];
+  let line = "";
+  words.forEach((word) => {
+    const candidate = line ? `${line} ${word}` : word;
+    if (context.measureText(candidate).width <= maxWidth || !line) {
+      line = candidate;
+      return;
+    }
+    lines.push(line);
+    line = word;
+  });
+  if (line) lines.push(line);
+  if (lines.length <= maxLines) return lines;
+  const visible = lines.slice(0, maxLines);
+  let finalLine = visible[maxLines - 1];
+  while (finalLine && context.measureText(`${finalLine}…`).width > maxWidth) {
+    finalLine = finalLine.split(" ").slice(0, -1).join(" ");
   }
-  return "";
+  visible[maxLines - 1] = `${finalLine || ""}…`;
+  return visible;
+}
+
+function drawCanvasLines(context, lines, x, y, lineHeight) {
+  lines.forEach((line, index) => context.fillText(line, x, y + index * lineHeight));
+}
+
+function exportShareCard(kind) {
+  const book = activeReaderBook();
+  if (!book) return;
+  const canvas = document.createElement("canvas");
+  canvas.width = 1200;
+  canvas.height = 675;
+  const context = canvas.getContext("2d");
+  if (!context) return;
+
+  const recordedPalette = book.cover?.palette;
+  const palette = Array.isArray(recordedPalette) && recordedPalette.length >= 2
+    ? recordedPalette
+    : bookPalette(0);
+  const background = context.createLinearGradient(0, 0, canvas.width, canvas.height);
+  background.addColorStop(0, palette[0]);
+  background.addColorStop(1, palette[1]);
+  context.fillStyle = background;
+  context.fillRect(0, 0, canvas.width, canvas.height);
+
+  const glow = context.createRadialGradient(600, 500, 0, 600, 500, 600);
+  glow.addColorStop(0, "rgba(236, 194, 115, 0.28)");
+  glow.addColorStop(1, "rgba(236, 194, 115, 0)");
+  context.fillStyle = glow;
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.strokeStyle = "rgba(244, 224, 185, 0.42)";
+  context.lineWidth = 2;
+  context.strokeRect(44, 44, 1112, 587);
+
+  context.fillStyle = "#f2dfb8";
+  context.font = "600 22px Georgia, serif";
+  context.letterSpacing = "3px";
+  context.fillText("INQUIRION LIBRARY · VERIFIED EDITION", 82, 105);
+
+  const isQuote = kind === "quote";
+  const mainText = isQuote
+    ? coverQuoteForBook(book) || book.central_question || book.title
+    : book.title;
+  context.fillStyle = "#fffaf0";
+  context.font = isQuote ? "italic 600 54px Georgia, serif" : "700 64px Georgia, serif";
+  const lines = canvasTextLines(context, isQuote ? `“${mainText}”` : mainText, 950, isQuote ? 5 : 4);
+  drawCanvasLines(context, lines, 82, isQuote ? 230 : 225, isQuote ? 68 : 76);
+
+  context.fillStyle = "rgba(255, 250, 240, 0.76)";
+  context.font = "400 27px system-ui, sans-serif";
+  const supportingText = isQuote
+    ? book.title
+    : book.central_question || coverQuoteForBook(book) || "An Alexandrian Narrative Research Book";
+  const supportLines = canvasTextLines(context, supportingText, 950, 3);
+  const supportY = Math.max(455, 225 + lines.length * 76 + 30);
+  drawCanvasLines(context, supportLines, 82, Math.min(supportY, 520), 38);
+
+  context.fillStyle = "rgba(242, 223, 184, 0.9)";
+  context.font = "500 20px system-ui, sans-serif";
+  context.fillText("Read like a compelling book. Inspect like a research artifact.", 82, 594);
+
+  const link = document.createElement("a");
+  link.download = shareCardFilename(book.title, kind);
+  link.href = canvas.toDataURL("image/png");
+  link.click();
 }
 
 function catalogWithVisualReferences(catalog) {
@@ -248,6 +428,7 @@ function syncVolumeNavigation() {
 
 function renderSelectedBookInspector(book, index) {
   inspector.replaceChildren();
+  inspector.scrollTop = 0;
   const position = createElement("div", "catalog-index");
   position.setAttribute("aria-label", "Catalog position");
   position.append(
@@ -308,16 +489,45 @@ function renderSelectedBookInspector(book, index) {
 }
 
 function centerBookInShelf(bookObject, behavior = "smooth") {
+  const overflows = updateShelfGeometry();
+  if (!overflows) {
+    bookshelfViewport.scrollTo({ left: 0, behavior: "auto" });
+    return;
+  }
   const desiredLeft = bookObject.offsetLeft
     + bookObject.offsetWidth / 2
     - bookshelfViewport.clientWidth / 2;
+  const maximumLeft = Math.max(
+    0,
+    bookshelfViewport.scrollWidth - bookshelfViewport.clientWidth,
+  );
   bookshelfViewport.scrollTo({
-    left: Math.max(0, desiredLeft),
+    left: Math.min(maximumLeft, Math.max(0, desiredLeft)),
     behavior,
   });
   shelfRoom.scrollLeft = 0;
   const archiveFrame = shelfRoom.closest(".archive-frame");
   if (archiveFrame) archiveFrame.scrollLeft = 0;
+}
+
+function updateShelfGeometry() {
+  const books = Array.from(shelf.querySelectorAll(".shelf-book"));
+  if (!books.length) {
+    shelf.classList.remove("books-overflow");
+    return false;
+  }
+  const viewportWidth = bookshelfViewport.clientWidth;
+  const gap = Number.parseFloat(getComputedStyle(shelf).columnGap) || 0;
+  const contentWidth = books.reduce(
+    (total, bookObject) => total + bookObject.offsetWidth,
+    gap * Math.max(0, books.length - 1),
+  );
+  const edgeSpace = Math.max(24, Math.min(72, viewportWidth * 0.055));
+  const overflows = contentWidth + edgeSpace * 2 > viewportWidth;
+  shelf.style.setProperty("--shelf-edge-space", `${edgeSpace}px`);
+  shelf.classList.toggle("books-overflow", overflows);
+  if (!overflows) bookshelfViewport.scrollLeft = 0;
+  return overflows;
 }
 
 function positionBookForFocus(bookObject) {
@@ -327,20 +537,43 @@ function positionBookForFocus(bookObject) {
   const bookWidth = Number.parseFloat(
     getComputedStyle(bookObject).getPropertyValue("--book-width"),
   );
+  const bookHeight = Number.parseFloat(
+    getComputedStyle(bookObject).getPropertyValue("--book-height"),
+  );
+  const bookDepth = Number.parseFloat(
+    getComputedStyle(bookObject).getPropertyValue("--book-depth"),
+  );
+  const safeWidth = Math.hypot(bookWidth, bookDepth);
+  const inset = Math.min(24, stageBounds.width * 0.055);
+  const inspectionScale = window.matchMedia("(max-width: 720px)").matches
+    ? 1.46
+    : 1.72;
   const scale = Math.max(
     1,
     Math.min(
-      1.52,
-      stageBounds.width / bookWidth,
-      stageBounds.height / bookObject.offsetHeight,
+      inspectionScale,
+      (stageBounds.width - inset * 2) / safeWidth,
     ),
   );
   const shelfCenterX = bookBounds.left + bookBounds.width / 2;
   const shelfCenterY = bookBounds.top + bookBounds.height / 2;
+  const shelfTransform = getComputedStyle(bookObject).transform;
+  const transformValues = shelfTransform === "none"
+    ? []
+    : shelfTransform
+      .slice(shelfTransform.indexOf("(") + 1, -1)
+      .split(",")
+      .map(Number);
+  const shelfOffsetY = shelfTransform.startsWith("matrix3d(")
+    ? transformValues[13] || 0
+    : transformValues[5] || 0;
   const focusX = stageBounds.left + stageBounds.width / 2
     - shelfCenterX;
+  const scaleOriginCorrection = (scale - 1) * bookHeight / 2;
   const focusY = stageBounds.top + stageBounds.height / 2
-    - shelfCenterY;
+    - shelfCenterY
+    + scaleOriginCorrection
+    + shelfOffsetY;
   bookObject.style.setProperty("--focus-x", `${focusX}px`);
   bookObject.style.setProperty("--focus-y", `${focusY}px`);
   bookObject.style.setProperty("--focus-scale", scale.toFixed(4));
@@ -373,6 +606,7 @@ function setInspectionMode(inspecting) {
   const nextState = Boolean(inspecting);
   if (nextState === state.inspecting) return;
   state.inspecting = nextState;
+  catalogStage.classList.toggle("has-focused-book", nextState);
   shelfRoom.classList.toggle("has-focused-book", nextState);
   bookObject.setAttribute("aria-pressed", String(nextState));
   if (nextState) {
@@ -421,6 +655,7 @@ function bindBookMotion(bookObject) {
         }
       }, 250);
     }
+    window.requestAnimationFrame(() => recenterFocusedBook(bookObject));
   };
   const resetGlint = () => {
     if (dragging) return;
@@ -497,6 +732,10 @@ function selectVolumeAt(index, options = {}) {
     !state.catalog?.books.length
     || state.transitioning
   ) return;
+  const pagePosition = {
+    left: window.scrollX,
+    top: window.scrollY,
+  };
   const boundedIndex = Math.max(0, Math.min(state.catalog.books.length - 1, index));
   if (boundedIndex === state.selectedIndex) {
     if (focusAfter) setInspectionMode(true);
@@ -528,7 +767,14 @@ function selectVolumeAt(index, options = {}) {
   centerBookInShelf(bookObject, focusAfter ? "auto" : "smooth");
   syncVolumeNavigation();
   renderSelectedBookInspector(book, boundedIndex);
-  if (focusAfter) window.requestAnimationFrame(() => setInspectionMode(true));
+  window.requestAnimationFrame(() => {
+    if (focusAfter) setInspectionMode(true);
+    window.scrollTo({
+      left: pagePosition.left,
+      top: pagePosition.top,
+      behavior: "instant",
+    });
+  });
 }
 
 function moveShelf(direction) {
@@ -547,8 +793,10 @@ function renderShelf(catalog) {
   state.selectedIndex = -1;
   state.inspecting = false;
   state.transitioning = false;
+  catalogStage.classList.remove("has-focused-book");
   shelfRoom.classList.remove("has-focused-book");
   shelf.classList.remove("has-selection");
+  shelf.classList.remove("books-overflow");
   document.querySelector("#book-count").textContent = catalog.reference_book_count
     ? `${catalog.verified_book_count} verified · ${catalog.reference_book_count} reference`
     : `${catalog.book_count} ${catalog.book_count === 1 ? "volume" : "volumes"}`;
@@ -561,20 +809,23 @@ function renderShelf(catalog) {
   catalogTrack.replaceChildren();
   previousVolumeButton.disabled = true;
   nextVolumeButton.disabled = !catalog.books.length;
+  firstVisitExample.hidden = Boolean(catalog.books.length);
   if (!catalog.books.length) {
-    shelf.append(createElement("p", "empty-shelf", "The shelf awaits its first finalized work."));
     renderClosedShelfInspector();
     return;
   }
   catalog.books.forEach((book, index) => {
     const bookObject = shelfBookTemplate.content.firstElementChild.cloneNode(true);
-    const palette = bookPalette(index);
+    const recordedPalette = book.cover?.palette;
+    const palette = Array.isArray(recordedPalette) && recordedPalette.length >= 2
+      ? recordedPalette
+      : bookPalette(index);
     const bookHeight = normalizedBookHeight(book);
     const bookDepth = normalizedBookDepth(book);
     bookObject.style.setProperty("--cover-a", palette[0]);
     bookObject.style.setProperty("--cover-b", palette[1]);
     bookObject.style.setProperty("--book-height", `${bookHeight}px`);
-    bookObject.style.setProperty("--book-width", `${Math.round(bookHeight * 0.68)}px`);
+    bookObject.style.setProperty("--book-width", `${Math.round(bookHeight * (2 / 3))}px`);
     bookObject.style.setProperty("--book-depth", `${bookDepth}px`);
     bookObject.style.setProperty("--book-half-depth", `${bookDepth / 2}px`);
     bookObject.style.setProperty("--book-back-depth", `${bookDepth / -2}px`);
@@ -586,6 +837,10 @@ function renderShelf(catalog) {
     bookObject.querySelector(".cover-title").textContent = coverTitle;
     bookObject.querySelector(".cover-subtitle").textContent =
       subtitleParts.join(":").trim();
+    const coverQuote = coverQuoteForBook(book);
+    const coverQuoteNode = bookObject.querySelector(".cover-quote");
+    coverQuoteNode.textContent = coverQuote;
+    coverQuoteNode.hidden = !coverQuote;
     bookObject.querySelector(".cover-edition").textContent =
       book.reference_only ? "VISUAL REFERENCE" : `EDITION ${book.edition}`;
     bookObject.querySelector(".back-question").textContent = book.central_question;
@@ -620,7 +875,7 @@ function renderShelf(catalog) {
         return;
       }
       if (state.selectedIndex === index) {
-        setInspectionMode(true);
+        setInspectionMode(!state.inspecting);
       } else {
         selectVolumeAt(index, { focusAfter: true });
       }
@@ -634,6 +889,7 @@ function renderShelf(catalog) {
     tick.addEventListener("click", () => selectVolumeAt(index));
     catalogTrack.append(tick);
   });
+  updateShelfGeometry();
   let restoredIndex = 0;
   try {
     const restoredId = localStorage.getItem("alexandrian-selected-book");
@@ -655,8 +911,16 @@ function createElement(tag, className = "", text = "") {
 function evidenceIds(value) {
   return value
     .split(/[,;]/)
-    .map((item) => item.trim())
+    .map((item) => item.trim().replace(/^`+|`+$/g, "").trim())
     .filter(Boolean);
+}
+
+function evidenceNumber(receiptId) {
+  if (!state.evidenceNumbers.has(receiptId)) {
+    state.evidenceNumbers.set(receiptId, state.nextEvidenceNumber);
+    state.nextEvidenceNumber += 1;
+  }
+  return state.evidenceNumbers.get(receiptId);
 }
 
 function appendEvidenceText(element, text) {
@@ -665,13 +929,18 @@ function appendEvidenceText(element, text) {
   let match;
   while ((match = pattern.exec(text)) !== null) {
     element.append(document.createTextNode(text.slice(cursor, match.index)));
-    const button = createElement("button", "evidence-marker", match[0]);
-    button.type = "button";
     const ids = evidenceIds(match[1]);
-    button.dataset.evidenceIds = ids.join(",");
-    button.setAttribute("aria-label", `Show ${ids.length} evidence record${ids.length === 1 ? "" : "s"}`);
-    button.addEventListener("click", () => showProvenance(ids));
-    element.append(button);
+    const markerGroup = createElement("span", "evidence-marker-group");
+    ids.forEach((receiptId) => {
+      const number = evidenceNumber(receiptId);
+      const button = createElement("button", "evidence-marker", `[${number}]`);
+      button.type = "button";
+      button.dataset.evidenceIds = receiptId;
+      button.setAttribute("aria-label", `Open evidence ${number}`);
+      button.addEventListener("click", () => showProvenance([receiptId]));
+      markerGroup.append(button);
+    });
+    element.append(markerGroup);
     cursor = pattern.lastIndex;
   }
   element.append(document.createTextNode(text.slice(cursor)));
@@ -714,6 +983,7 @@ function restoreReaderPosition() {
 }
 
 function showProvenance(filterIds = []) {
+  hideRunReceipt();
   provenancePanel.classList.add("is-open");
   provenancePanel.setAttribute("aria-hidden", "false");
   evidenceToggle.setAttribute("aria-expanded", "true");
@@ -725,28 +995,171 @@ function showProvenance(filterIds = []) {
     return;
   }
   const requested = new Set(filterIds);
-  const records = requested.size
+  const records = (requested.size
     ? state.provenance.sources.filter((source) => requested.has(source.receipt_id))
-    : state.provenance.sources;
+    : state.provenance.sources
+  ).slice().sort((left, right) => (
+    evidenceNumber(left.receipt_id) - evidenceNumber(right.receipt_id)
+  ));
   records.forEach((source) => {
     const article = createElement("article", "provenance-record");
-    article.append(
-      createElement("small", "", source.receipt_id),
+    const number = evidenceNumber(source.receipt_id);
+    const heading = createElement("div", "provenance-record-heading");
+    heading.append(
+      createElement("span", "provenance-number", `[${number}]`),
       createElement("strong", "", source.title || source.domain || "Untitled source"),
-      createElement("p", "", source.final_url || source.requested_url || "URL unavailable"),
     );
-    if (source.claim_checked) {
-      article.append(createElement("p", "", `Claim checked: ${source.claim_checked}`));
+    article.append(heading);
+
+    const url = source.final_url || source.requested_url;
+    if (url && /^https?:\/\//i.test(url)) {
+      const sourceLink = createElement("a", "provenance-source-link", source.domain || "Open source");
+      sourceLink.href = url;
+      sourceLink.target = "_blank";
+      sourceLink.rel = "noopener noreferrer nofollow";
+      article.append(sourceLink);
     }
     if (source.finding) {
-      article.append(createElement("p", "", `Finding: ${source.finding}`));
+      const finding = createElement(
+        "span",
+        `evidence-finding evidence-finding-${source.finding}`,
+        source.finding.replaceAll("_", " "),
+      );
+      article.classList.toggle("is-contradiction", source.finding === "contradicts");
+      article.append(finding);
     }
-    if (source.limitations) {
-      article.append(createElement("p", "", `Limits: ${source.limitations}`));
+    if (source.claim_checked) {
+      const claim = createElement("section", "evidence-section");
+      claim.append(
+        createElement("small", "evidence-label", "Claim checked"),
+        createElement("p", "", source.claim_checked),
+      );
+      article.append(claim);
     }
+    if (source.evidence_excerpt) {
+      const passage = createElement("section", "evidence-section evidence-passage");
+      passage.append(
+        createElement("small", "evidence-label", "Exact supporting passage"),
+        createElement("blockquote", "", source.evidence_excerpt),
+      );
+      article.append(passage);
+    }
+    const location = source.evidence_location
+      || source.evidence_locator?.heading_path?.join(" › ")
+      || (source.evidence_locator?.page_number
+        ? `Page ${source.evidence_locator.page_number}`
+        : "Location not recorded");
+    const locationSection = createElement("section", "evidence-section");
+    locationSection.append(
+      createElement("small", "evidence-label", "Location"),
+      createElement("p", "", location),
+    );
+    article.append(locationSection);
+    if (source.evidence_locator?.page_number && !/page\s+\d+/i.test(location)) {
+      locationSection.querySelector("p").append(
+        document.createTextNode(` · Page ${source.evidence_locator.page_number}`),
+      );
+    }
+    if (source.assessment) {
+      const assessment = createElement("section", "evidence-section");
+      assessment.append(
+        createElement("small", "evidence-label", "What the source establishes"),
+        createElement("p", "", source.assessment),
+      );
+      article.append(assessment);
+    }
+    const limitations = createElement("section", "evidence-section evidence-limits");
+    limitations.append(
+      createElement("small", "evidence-label", "Limits and uncertainty"),
+      createElement("p", "", source.limitations || "No limitations were recorded."),
+    );
+    article.append(limitations);
+
+    const receiptDetails = document.createElement("details");
+    receiptDetails.className = "evidence-receipt-details";
+    receiptDetails.append(createElement("summary", "", "Receipt and verification"));
+    receiptDetails.append(
+      createElement("p", "", `Receipt: ${source.receipt_id}`),
+      createElement("p", "", `Retrieved: ${source.retrieved_at || "Not recorded"}`),
+      createElement("p", "", `Content hash: ${source.content_sha256 || "Not recorded"}`),
+    );
+    article.append(receiptDetails);
     provenanceList.append(article);
   });
-  if (!records.length) {
+  const statuses = requested.size ? [] : (state.provenance.evidence_statuses || []);
+  if (statuses.length) {
+    const heading = createElement("div", "provenance-section-heading");
+    heading.append(
+      createElement("p", "eyebrow", "Unverified evidence trail"),
+      createElement(
+        "p",
+        "",
+        "These records are public provenance, not verified citations.",
+      ),
+    );
+    provenanceList.append(heading);
+    statuses.forEach((status, index) => {
+      const article = createElement("article", "provenance-record is-unverified");
+      const recordHeading = createElement("div", "provenance-record-heading");
+      recordHeading.append(
+        createElement("span", "provenance-number", `U${index + 1}`),
+        createElement("strong", "", status.question || "Unverified source attempt"),
+      );
+      article.append(recordHeading);
+      article.append(
+        createElement(
+          "span",
+          "evidence-finding evidence-finding-unverified",
+          String(status.status || "not verified").replaceAll("_", " "),
+        ),
+      );
+      const url = status.candidate_source_url;
+      if (url && /^https?:\/\//i.test(url)) {
+        const link = createElement("a", "provenance-source-link", "Open attempted source");
+        link.href = url;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer nofollow";
+        article.append(link);
+      }
+      const reason = createElement("section", "evidence-section evidence-limits");
+      reason.append(
+        createElement("small", "evidence-label", "Why it was not admitted"),
+        createElement("p", "", status.reason || "No verification receipt was created."),
+      );
+      article.append(reason);
+      provenanceList.append(article);
+    });
+  }
+  const gaps = requested.size ? [] : (state.provenance.evidence_gaps || []);
+  if (gaps.length) {
+    const heading = createElement("div", "provenance-section-heading");
+    heading.append(
+      createElement("p", "eyebrow", "Bounded evidence gaps"),
+      createElement("p", "", "Open limits preserved by the published edition."),
+    );
+    provenanceList.append(heading);
+    gaps.forEach((gap) => {
+      const article = createElement("article", "provenance-record is-evidence-gap");
+      article.append(
+        createElement("strong", "", gap.text || "Unresolved evidence gap"),
+        createElement(
+          "span",
+          "evidence-finding evidence-finding-unverified",
+          String(gap.disposition || "unresolved").replaceAll("_", " "),
+        ),
+      );
+      if (gap.closure_reason) {
+        const boundary = createElement("section", "evidence-section");
+        boundary.append(
+          createElement("small", "evidence-label", "Publication boundary"),
+          createElement("p", "", gap.closure_reason),
+        );
+        article.append(boundary);
+      }
+      provenanceList.append(article);
+    });
+  }
+  if (!records.length && !statuses.length && !gaps.length) {
     provenanceList.append(
       createElement("p", "provenance-empty", "No source matched this evidence marker."),
     );
@@ -757,6 +1170,92 @@ function hideProvenance() {
   provenancePanel.classList.remove("is-open");
   provenancePanel.setAttribute("aria-hidden", "true");
   evidenceToggle.setAttribute("aria-expanded", "false");
+}
+
+function receiptValue(label, value) {
+  const item = createElement("section", "evidence-section");
+  item.append(
+    createElement("small", "evidence-label", label),
+    createElement("p", "", value === null || value === undefined || value === "" ? "Not recorded" : String(value)),
+  );
+  return item;
+}
+
+function showRunReceipt() {
+  hideProvenance();
+  runReceiptPanel.classList.add("is-open");
+  runReceiptPanel.setAttribute("aria-hidden", "false");
+  runReceiptToggle.setAttribute("aria-expanded", "true");
+  runReceiptContent.replaceChildren();
+  const receipt = state.runReceipt;
+  if (!receipt) {
+    runReceiptContent.append(
+      createElement("p", "provenance-empty", "The workflow run receipt is unavailable."),
+    );
+    return;
+  }
+
+  const summary = createElement("article", "provenance-record");
+  const reviewLabel = receipt.review_state?.label || "Review state unavailable";
+  summary.append(
+    createElement("div", "provenance-record-heading", reviewLabel),
+    receiptValue("Providers used", (receipt.provider_sequence || []).join(" → ") || "None recorded"),
+    receiptValue("Provider switches", receipt.provider_switch_count),
+    receiptValue("Observed server restarts", receipt.observed_restart_count),
+    receiptValue("Mechanical retries", receipt.mechanical_retry_count),
+  );
+  runReceiptContent.append(summary);
+
+  const decisions = receipt.source_decision_counts || {};
+  const sources = createElement("article", "provenance-record");
+  sources.append(
+    createElement("div", "provenance-record-heading", "Source authority"),
+    receiptValue("Rejected", decisions.reject || 0),
+    receiptValue("Allowed once", decisions.allow_once || 0),
+    receiptValue("Allowed sites", decisions.allow_domain || 0),
+  );
+  runReceiptContent.append(sources);
+
+  const guardrails = receipt.finish_guardrails || { enabled: false };
+  const guardrailRecord = createElement("article", "provenance-record");
+  guardrailRecord.append(
+    createElement("div", "provenance-record-heading", "Finish guardrails"),
+    receiptValue("Enabled", guardrails.enabled ? "Yes" : "No"),
+    receiptValue("Policy", guardrails.policy_version),
+    receiptValue("Authority scope", guardrails.scope),
+    receiptValue("Source authority", guardrails.source_authority),
+    receiptValue(
+      "Nondelegable holds",
+      (guardrails.nondelegable_checkpoint_kinds || []).join(", "),
+    ),
+  );
+  runReceiptContent.append(guardrailRecord);
+
+  const timings = receipt.timings || {};
+  const timing = createElement("article", "provenance-record");
+  timing.append(
+    createElement("div", "provenance-record-heading", "Observed timing"),
+    receiptValue("Research conversation", timings.conversation_seconds == null ? null : `${timings.conversation_seconds}s`),
+    receiptValue("Background runtime", timings.background_runtime_seconds == null ? null : `${timings.background_runtime_seconds}s`),
+    receiptValue("Provider transitions", timings.transition_seconds == null ? null : `${timings.transition_seconds}s`),
+  );
+  runReceiptContent.append(timing);
+
+  const artifacts = receipt.artifacts || {};
+  const artifact = createElement("article", "provenance-record");
+  artifact.append(
+    createElement("div", "provenance-record-heading", "Durable artifacts"),
+    receiptValue("Book SHA-256", artifacts.book_sha256),
+    receiptValue("Assembly SHA-256", artifacts.assembly_sha256),
+    receiptValue("Synthesis audit SHA-256", artifacts.synthesis_audit_sha256),
+  );
+  runReceiptContent.append(artifact);
+}
+
+function hideRunReceipt() {
+  runReceiptPanel.classList.remove("is-open");
+  runReceiptPanel.setAttribute("aria-hidden", "true");
+  runReceiptToggle.setAttribute("aria-expanded", "false");
 }
 
 function inlineText(text) {
@@ -925,7 +1424,15 @@ function renderBlock(block) {
   }
   if (block.type === "quote") {
     const quote = document.createElement("blockquote");
-    appendEvidenceText(quote, block.text);
+    const contradiction = block.text.match(/^\[!CONTRADICTION\]\s*(.*)$/i)
+      || block.text.match(/^Contradiction:\s*(.*)$/i);
+    if (contradiction) {
+      quote.className = "contradiction-callout";
+      quote.append(createElement("strong", "contradiction-label", "Contradiction"));
+      appendEvidenceText(quote, contradiction[1]);
+    } else {
+      appendEvidenceText(quote, block.text);
+    }
     return quote;
   }
   if (block.type === "rule") return document.createElement("hr");
@@ -1050,9 +1557,20 @@ async function openSelectedBook(book) {
   leftPage.replaceChildren(createElement("p", "", "Opening the verified volume…"));
   rightPage.replaceChildren();
   hideProvenance();
+  hideRunReceipt();
   state.provenance = null;
+  state.runReceipt = null;
+  state.evidenceNumbers = new Map();
+  state.nextEvidenceNumber = 1;
   evidenceToggle.disabled = true;
-  evidenceToggle.textContent = "Evidence";
+  evidenceToggle.textContent = "Why trust this?";
+  runReceiptToggle.disabled = true;
+  runReceiptToggle.textContent = "Build record";
+  const exportBase = `/api/v1/books/${encodeURIComponent(book.book_id)}/exports`;
+  exportMarkdown.href = `${exportBase}/markdown`;
+  exportEpub.href = `${exportBase}/epub`;
+  exportEvidence.href = `${exportBase}/evidence-manifest`;
+  readerExportMenu.open = false;
   try {
     const payload = await fetchJson(`/api/v1/books/${encodeURIComponent(book.book_id)}`);
     state.blocks = markdownBlocks(payload.markdown);
@@ -1075,10 +1593,24 @@ async function openSelectedBook(book) {
         `/api/v1/books/${encodeURIComponent(book.book_id)}/provenance`,
       );
       evidenceToggle.disabled = false;
-      evidenceToggle.textContent = `Evidence (${state.provenance.source_count})`;
+      const verifiedCount = state.provenance.source_count || 0;
+      const openCount = state.provenance.evidence_status_count || 0;
+      evidenceToggle.textContent = openCount
+        ? `Why trust this? (${verifiedCount} verified · ${openCount} open)`
+        : `Why trust this? (${verifiedCount})`;
     } catch (provenanceError) {
       evidenceToggle.disabled = true;
       evidenceToggle.textContent = "Evidence unavailable";
+    }
+    try {
+      state.runReceipt = await fetchJson(
+        `/api/v1/books/${encodeURIComponent(book.book_id)}/run-receipt`,
+      );
+      runReceiptToggle.disabled = false;
+      runReceiptToggle.textContent = "Build record";
+    } catch (receiptError) {
+      runReceiptToggle.disabled = true;
+      runReceiptToggle.textContent = "Receipt unavailable";
     }
   } catch (error) {
     leftPage.replaceChildren(
@@ -1098,12 +1630,290 @@ function setWorkflowStatus(message = "", tone = "") {
 function setWorkflowBusy(busy, message = "") {
   state.workflowBusy = busy;
   document.querySelectorAll(
-    "#worktable-view button, #worktable-view textarea, #worktable-view select, #worktable-view input",
+    ".workflow-console button, .workflow-console textarea, .workflow-console select, .workflow-console input",
   ).forEach((control) => {
     control.disabled = busy;
   });
-  if (!busy) applyProviderReadiness();
+  if (!busy) {
+    const activeJob = activeJobFor(state.workflow?.conversation_id);
+    if (activeJob) {
+      conversationComposer.querySelectorAll("button, textarea").forEach((control) => {
+        control.disabled = true;
+      });
+    }
+    applyProviderReadiness();
+  }
   if (message) setWorkflowStatus(message, busy ? "working" : "");
+}
+
+function formatElapsed(seconds) {
+  const total = Math.max(0, Math.floor(Number(seconds) || 0));
+  const minutes = Math.floor(total / 60);
+  return `${String(minutes).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+}
+
+function activeJobFor(conversationId) {
+  const job = state.jobs.get(conversationId);
+  return job && ["queued", "running"].includes(job.status) ? job : null;
+}
+
+function normalizedWorkflowProgress(workflow) {
+  const raw = Number(workflow?.progress?.percent ?? workflow?.overall_progress);
+  const bounded = Math.max(1, Math.min(100, Number.isFinite(raw) ? raw : 1));
+  return workflow?.stage === "complete" ? 100 : Math.min(99, bounded);
+}
+
+function estimatedJobProgress(_job, workflow = state.workflow) {
+  return normalizedWorkflowProgress(workflow);
+}
+
+function renderWorkflowProgress() {
+  const conversationId = state.workflow?.conversation_id;
+  const job = conversationId ? activeJobFor(conversationId) : null;
+  const bookCreation = state.workflow?.book_creation;
+  const experience = workflowExperience(state.workflow);
+  const persistentBuild = Boolean(bookCreation?.active);
+  workflowProgress.hidden = !job && !persistentBuild;
+  if (!job && !persistentBuild) return;
+  if (!job) {
+    const progress = normalizedWorkflowProgress(state.workflow);
+    workflowProgressAgent.textContent = "Overall book completion";
+    workflowProgressPhase.textContent = experience.headline;
+    workflowProgressPercent.textContent = `${Math.round(progress)}%`;
+    workflowProgressFill.style.width = `${progress}%`;
+    workflowTransitionAgent.textContent = "Current activity";
+    workflowTransitionPhase.textContent = experience.attention_required
+      ? "Waiting for your decision"
+      : "Saved and ready to resume";
+    workflowTransitionPercent.textContent = "Paused";
+    workflowTransitionFill.style.width = "0%";
+    workflowProgressElapsed.textContent = "Progress safely preserved";
+    workflowActivityTitle.textContent = experience.attention_required
+      ? "The Library needs you"
+      : "No process is running";
+    workflowActivityDetail.textContent = experience.detail;
+    return;
+  }
+  const progress = estimatedJobProgress(job, state.workflow);
+  const transitionProgress = Math.max(
+    1,
+    Math.min(100, Number(job.transition_progress ?? 1) || 1),
+  );
+  workflowProgressAgent.textContent = "Overall book completion";
+  workflowProgressPhase.textContent = experience.headline;
+  workflowProgressPercent.textContent = `${Math.round(progress)}%`;
+  workflowProgressFill.style.width = `${progress}%`;
+  workflowTransitionAgent.textContent = "What is happening now";
+  workflowTransitionPhase.textContent = job.transition_phase || job.phase;
+  workflowTransitionPercent.textContent = `${Math.round(transitionProgress)}%`;
+  workflowTransitionFill.style.width = `${transitionProgress}%`;
+  workflowProgressElapsed.textContent = `${formatElapsed(job.elapsed_seconds)} elapsed`;
+  const event = job.latest_transition_event;
+  const attempt = Number(event?.mechanical_attempt || 0);
+  workflowActivityTitle.textContent = "The Library is working";
+  workflowActivityDetail.textContent = event
+    ? `${job.transition_phase || String(event.phase || job.phase).replaceAll("_", " ")}${attempt ? ` · recovery attempt ${attempt}` : ""}`
+    : "The next durable step is queued. You can leave without losing completed work.";
+}
+
+function workflowFromJobResult(job) {
+  if (!job?.result) return null;
+  if (job.result.workflow) return job.result.workflow;
+  if (job.result.conversation_id && job.result.stage) return job.result;
+  return null;
+}
+
+function renderFinishReadiness(workflow) {
+  const readiness = workflow?.finish_readiness;
+  finishReadiness.hidden = !readiness;
+  if (!readiness) return;
+  const statusLabels = {
+    ready: "Ready",
+    needs_context: "Add context",
+    advancing: "Progressing",
+    decision_required: "Your decision",
+    recovery_required: "Recovery needed",
+    complete: "Complete",
+  };
+  const titleLabels = {
+    ready: "Ready for one guarded Finish",
+    needs_context: "The inquiry needs more context",
+    advancing: "The book is progressing",
+    decision_required: "A human-owned decision is waiting",
+    recovery_required: "A durable recovery choice is waiting",
+    complete: "The verified edition is complete",
+  };
+  finishReadiness.dataset.status = readiness.status;
+  finishReadinessTitle.textContent = titleLabels[readiness.status] || "Finish readiness";
+  finishReadinessStatus.textContent = statusLabels[readiness.status] || readiness.status;
+  finishReadinessSummary.textContent = readiness.summary || "";
+  finishReadinessChecks.replaceChildren();
+  (readiness.checks || []).forEach((check) => {
+    const item = createElement("div", `finish-check is-${check.status}`);
+    item.append(
+      createElement("span", "finish-check-mark", check.status === "pass" ? "✓" : "!"),
+      createElement("strong", "", check.label),
+      createElement("small", "", check.detail),
+    );
+    finishReadinessChecks.append(item);
+  });
+  finishAutoList.replaceChildren(
+    ...(readiness.will_continue_automatically || []).map((value) =>
+      createElement("li", "", value)),
+  );
+  finishPauseList.replaceChildren(
+    ...(readiness.will_pause_for || []).map((value) =>
+      createElement("li", "", value)),
+  );
+  const finishButton = document.querySelector("#finish-inquiry");
+  if (workflow.stage === "conversation_active") {
+    finishButton.disabled = !readiness.finish_available
+      || Boolean(activeJobFor(workflow.conversation_id))
+      || state.workflowBusy;
+  }
+}
+
+function renderWorkflowTimeline(workflow) {
+  const events = workflow?.timeline || [];
+  workflowTimelinePanel.hidden = !events.length;
+  workflowTimelineCount.textContent = events.length ? `· ${events.length}` : "";
+  workflowTimeline.replaceChildren();
+  events.forEach((event) => {
+    const item = createElement("li", `timeline-item is-${event.status || "complete"}`);
+    const copy = document.createElement("div");
+    copy.append(
+      createElement("strong", "", event.label || "Workflow event"),
+      createElement("small", "", event.detail || "Durable transition"),
+    );
+    const metaParts = [];
+    if (event.provider) metaParts.push(event.provider);
+    if (event.attempt) metaParts.push(`attempt ${event.attempt}`);
+    if (event.recorded_at) {
+      const recorded = new Date(event.recorded_at);
+      if (!Number.isNaN(recorded.valueOf())) {
+        metaParts.push(recorded.toLocaleString([], { dateStyle: "medium", timeStyle: "short" }));
+      }
+    }
+    item.append(
+      createElement("span", "timeline-node", event.status === "complete" ? "✓" : "•"),
+      copy,
+      createElement("span", "timeline-meta", metaParts.join(" · ")),
+    );
+    workflowTimeline.append(item);
+  });
+}
+
+async function handleFinishedJob(job) {
+  if (state.handledJobs.has(job.job_id)) return;
+  state.handledJobs.add(job.job_id);
+  const selected = state.workflow?.conversation_id === job.conversation_id;
+  if (job.status === "completed") {
+    if (selected) {
+      state.workflow = workflowFromJobResult(job) || await fetchJson(
+        `/api/v1/workflows/${encodeURIComponent(job.conversation_id)}`,
+      );
+      renderWorkflow();
+      setWorkflowStatus(
+        job.kind === "finish_and_advance"
+          ? state.workflow.stage === "complete"
+            ? "Finish guardrails completed the verified book."
+            : state.workflow.finish_policy?.enabled
+              ? "Finish guardrails paused at a nondelegable durable decision."
+              : "Conversation sealed and advanced to the next durable hold."
+          : job.kind === "advance_workflow"
+            ? "Workflow reached the next durable hold."
+            : job.kind === "background_book"
+              ? state.workflow.stage === "editorial_checkpoint"
+                ? "Book is ready for your final editorial review."
+                : state.workflow.stage === "complete"
+                  ? "The verified book is complete."
+                  : "Background build paused at the next durable decision."
+            : "Provider response saved to the durable transcript.",
+      );
+    }
+  } else if (job.status === "failed" && selected) {
+    state.workflow = await fetchJson(
+      `/api/v1/workflows/${encodeURIComponent(job.conversation_id)}`,
+    ).catch(() => state.workflow);
+    renderWorkflow();
+    setWorkflowStatus(job.error?.message || "Provider work stopped.", "error");
+  }
+  await refreshWorkflowList();
+}
+
+async function syncSelectedWorkflowDuringJob(latestByConversation) {
+  const conversationId = state.workflow?.conversation_id;
+  const job = conversationId
+    ? latestByConversation.get(conversationId)
+    : null;
+  if (!job || !["queued", "running"].includes(job.status)) return;
+  const now = Date.now();
+  if (now - state.lastCanonicalWorkflowSyncAt < 2500) return;
+  state.lastCanonicalWorkflowSyncAt = now;
+  const canonical = await fetchJson(
+    `/api/v1/workflows/${encodeURIComponent(conversationId)}`,
+  );
+  if (
+    canonical.revision !== state.workflow.revision
+    || canonical.stage !== state.workflow.stage
+    || canonical.message_count !== state.workflow.message_count
+  ) {
+    state.workflow = canonical;
+    state.workflows = state.workflows.map((workflow) =>
+      workflow.conversation_id === canonical.conversation_id
+        ? canonical
+        : workflow
+    );
+    renderWorkflow();
+  }
+}
+
+async function refreshJobs() {
+  const payload = await fetchJson("/api/v1/jobs");
+  const latestByConversation = new Map();
+  (payload.jobs || []).forEach((job) => {
+    if (!latestByConversation.has(job.conversation_id)) {
+      latestByConversation.set(job.conversation_id, job);
+    }
+  });
+  state.jobs = latestByConversation;
+  for (const job of latestByConversation.values()) {
+    if (["completed", "failed"].includes(job.status)) {
+      await handleFinishedJob(job);
+    }
+  }
+  await syncSelectedWorkflowDuringJob(latestByConversation);
+  renderWorkflowProgress();
+  renderWorkflowList();
+  const hasActive = [...latestByConversation.values()].some((job) =>
+    ["queued", "running"].includes(job.status));
+  window.clearTimeout(state.activityTimer);
+  if (hasActive) {
+    state.activityTimer = window.setTimeout(() => {
+      refreshJobs().catch((error) => setWorkflowStatus(error.message, "error"));
+    }, 1000);
+  }
+}
+
+function trackJob(job) {
+  state.jobs.set(job.conversation_id, job);
+  state.handledJobs.delete(job.job_id);
+  renderWorkflowProgress();
+  renderWorkflowList();
+  window.clearTimeout(state.activityTimer);
+  state.activityTimer = window.setTimeout(() => {
+    refreshJobs().catch((error) => setWorkflowStatus(error.message, "error"));
+  }, 500);
+}
+
+async function startWorkflowJob(url, payload) {
+  const job = await fetchJson(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  trackJob(job);
+  return job;
 }
 
 function applyProviderReadiness() {
@@ -1132,6 +1942,28 @@ function applyProviderReadiness() {
   }
   const begin = document.querySelector("#begin-inquiry");
   begin.disabled = state.workflowBusy || !inputs.some((input) => !input.disabled);
+  applyAgentSwitcher();
+}
+
+function applyAgentSwitcher() {
+  const providers = state.readiness?.providers || {};
+  const activeJob = state.workflow
+    ? activeJobFor(state.workflow.conversation_id)
+    : null;
+  agentSwitcher.querySelectorAll("[data-switch-provider]").forEach((button) => {
+    const provider = button.dataset.switchProvider;
+    const ready = Boolean(providers[provider]?.full_workflow_ready);
+    const selected = state.workflow?.provider === provider;
+    button.classList.toggle("is-active", selected);
+    button.setAttribute("aria-pressed", String(selected));
+    button.disabled = (
+      !ready
+      || selected
+      || Boolean(activeJob)
+      || state.workflowBusy
+      || state.workflow?.stage !== "conversation_active"
+    );
+  });
 }
 
 async function loadReadiness() {
@@ -1143,50 +1975,175 @@ async function loadReadiness() {
   }
 }
 
+function provisionalBookTitle(question) {
+  const cleaned = String(question || "")
+    .trim()
+    .replace(/[?!.,;:]+$/u, "")
+    .replace(/\s+/gu, " ");
+  if (!cleaned) return "A question takes form";
+  const withoutLead = cleaned.replace(
+    /^(how|why|what|when|where|who|can|could|should|would|does|do|is|are|will)\s+/iu,
+    "",
+  );
+  const words = (withoutLead || cleaned).split(" ").slice(0, 9);
+  const title = words.join(" ");
+  const capitalized = title.charAt(0).toLocaleUpperCase() + title.slice(1);
+  return (withoutLead || cleaned).split(" ").length > words.length
+    ? `${capitalized}…`
+    : capitalized;
+}
+
+function workflowExperience(workflow) {
+  return workflow?.experience || {
+    state: workflow?.stage === "complete" ? "complete" : "starting",
+    headline: workflow?.stage_label || "Prepare the next durable step",
+    detail: "The inquiry remains preserved while the Library determines what comes next.",
+    attention_required: false,
+    can_leave: true,
+  };
+}
+
 function workflowName(workflow) {
   const opening = String(workflow.opening_question || "").trim();
-  if (opening) return opening;
+  if (opening) return provisionalBookTitle(opening);
   return `Inquiry ${workflow.conversation_id.slice(0, 15)}`;
+}
+
+function renderBookSeed(workflow) {
+  const question = String(workflow?.opening_question || "").trim();
+  const visible = Boolean(question) && workflow?.stage === "conversation_active";
+  bookSeed.hidden = !visible;
+  if (!visible) return;
+  const title = workflow.display_title || provisionalBookTitle(question);
+  const experience = workflowExperience(workflow);
+  bookSeedTitle.textContent = title;
+  bookSeedCoverTitle.textContent = title;
+  bookSeedQuestion.textContent = question;
+  bookSeedStateTitle.textContent = experience.headline;
+  bookSeedStateDetail.textContent = experience.detail;
+  bookSeed.dataset.experienceState = experience.state;
+}
+
+function publishedWorkflowFromBook(book) {
+  const prefix = "book-";
+  return {
+    conversation_id: book.book_id.startsWith(prefix)
+      ? book.book_id.slice(prefix.length)
+      : book.book_id,
+    book_id: book.book_id,
+    opening_question: book.central_question,
+    display_title: book.title,
+    stage: "complete",
+    stage_label: "review edition ready",
+    review_state: {
+      status: "generated_for_review",
+      label: "Review edition ready",
+      human_approval_recorded: false,
+    },
+    provider: null,
+    publication: book,
+  };
+}
+
+function currentWorkflowCollection() {
+  return state.workflowFilter === "published"
+    ? state.publishedWorkflows
+    : state.workflows;
+}
+
+function setWorkflowFilter(filter) {
+  state.workflowFilter = filter === "active" ? "active" : "published";
+  document.querySelectorAll(".workflow-filter").forEach((button) => {
+    const selected = button.id === `workflow-filter-${state.workflowFilter}`;
+    button.classList.toggle("is-active", selected);
+    button.setAttribute("aria-pressed", String(selected));
+  });
+  renderWorkflowList();
 }
 
 function renderWorkflowList() {
   workflowList.replaceChildren();
-  if (!state.workflows.length) {
+  publishedWorkflowCount.textContent = String(state.publishedWorkflows.length);
+  activeWorkflowCount.textContent = String(state.workflows.length);
+  const collection = currentWorkflowCollection();
+  if (!collection.length) {
     workflowList.append(
-      createElement("p", "workflow-list-empty", "No unfinished inquiry is waiting."),
+      createElement(
+        "p",
+        "workflow-list-empty",
+        state.workflowFilter === "published"
+          ? "No inquiry has reached a verified volume yet."
+          : "No unfinished inquiry is waiting.",
+      ),
     );
     return;
   }
-  [...state.workflows].reverse().forEach((workflow, index) => {
+  [...collection].reverse().forEach((workflow, index) => {
     const button = createElement("button", "workflow-list-item");
     button.type = "button";
     button.classList.toggle(
       "is-selected",
       workflow.conversation_id === state.workflow?.conversation_id,
     );
+    const job = state.jobs.get(workflow.conversation_id);
+    const accurateProgress = normalizedWorkflowProgress(workflow);
+    const experience = workflowExperience(workflow);
+    const isRunning = Boolean(job && ["queued", "running"].includes(job.status));
+    button.classList.toggle(
+      "is-running",
+      isRunning,
+    );
+    const readyForReview = workflow.stage === "editorial_checkpoint"
+      || workflow.review_state?.status === "generated_for_review";
+    const bookCreationActive = Boolean(workflow.book_creation?.active);
+    button.classList.toggle("is-ready-for-review", readyForReview);
+    button.classList.toggle("is-building-book", bookCreationActive);
     const numeral = createElement(
       "span",
       "",
-      String(state.workflows.length - index).padStart(2, "0"),
+      String(collection.length - index).padStart(2, "0"),
     );
     const copy = document.createElement("span");
     copy.append(
-      createElement("strong", "", workflowName(workflow)),
+      createElement("strong", "", workflow.display_title || workflowName(workflow)),
       createElement(
         "small",
         "",
-        `${workflow.stage_label} · ${workflow.provider || "provider pending"}`,
+        isRunning
+          ? `${experience.headline} · ${Math.round(accurateProgress)}% complete`
+          : readyForReview
+            ? "Review edition ready for you"
+          : bookCreationActive
+            ? `${experience.headline} · ${Math.round(accurateProgress)}% complete`
+            : experience.headline,
       ),
     );
+    if (isRunning || bookCreationActive) {
+      const miniTrack = createElement("span", "workflow-mini-progress");
+      const miniFill = createElement("span");
+      miniFill.style.width = `${accurateProgress}%`;
+      miniTrack.append(miniFill);
+      copy.append(miniTrack);
+    }
     button.append(numeral, copy);
+    if (readyForReview) {
+      const readyDot = createElement("span", "workflow-ready-dot");
+      readyDot.setAttribute("aria-label", "Ready for review");
+      readyDot.title = "Ready for review";
+      button.append(readyDot);
+    }
     button.addEventListener("click", () => selectWorkflow(workflow.conversation_id));
     workflowList.append(button);
   });
 }
 
 async function refreshWorkflowList() {
-  const payload = await fetchJson("/api/v1/workflows");
+  const [payload, catalog] = await Promise.all([
+    fetchJson("/api/v1/workflows"),
+    fetchJson("/api/v1/catalog"),
+  ]);
   state.workflows = payload.workflows || [];
+  state.publishedWorkflows = (catalog.books || []).map(publishedWorkflowFromBook);
   renderWorkflowList();
 }
 
@@ -1200,6 +2157,7 @@ function showNewInquiry() {
   workflowConsoleTitle.classList.remove("is-long");
   workflowConsoleTitle.removeAttribute("title");
   setWorkflowStatus();
+  setWorkflowFilter("active");
   renderWorkflowList();
   document.querySelector("#inquiry-input").focus({ preventScroll: true });
 }
@@ -1221,14 +2179,24 @@ function renderTranscript(messages = []) {
       "article",
       `transcript-message ${message.role === "assistant" ? "is-assistant" : "is-user"}`,
     );
-    article.append(
+    const identity = createElement("div", "transcript-identity");
+    identity.append(
+      createElement(
+        "span",
+        "transcript-avatar",
+        message.role === "assistant" ? "A" : "Y",
+      ),
       createElement(
         "small",
         "",
-        message.role === "assistant" ? "Librarian" : "Inquirer",
+        message.role === "assistant"
+          ? `Librarian · ${message.agent_host || state.workflow?.provider || "provider"}`
+          : "You",
       ),
-      createElement("p", "", message.content || ""),
     );
+    const body = createElement("div", "transcript-body");
+    body.append(createElement("p", "", message.content || ""));
+    article.append(identity, body);
     conversationTranscript.append(article);
   });
   conversationTranscript.scrollTop = conversationTranscript.scrollHeight;
@@ -1510,22 +2478,42 @@ function renderSourceCheckpoint(action) {
       createElement("small", "", request.url || ""),
       createElement("small", "", request.reason_for_source || ""),
     );
-    const select = decisionSelect(["allow_once", "allow_domain", "reject"]);
-    select.options[0].textContent = "Allow this URL once";
-    select.options[1].textContent = "Trust this domain";
-    select.options[2].textContent = "Reject for this pass";
-    rows.push({ request_id: request.request_id, select });
-    row.append(copy, select);
+    const choices = createElement("div", "source-decision-buttons");
+    choices.setAttribute("role", "radiogroup");
+    choices.setAttribute("aria-label", `Source decision for ${request.domain || request.url}`);
+    const choiceDefinitions = [
+      ["reject", "Reject", "reject"],
+      ["allow_once", "Allow once", "once"],
+      ["allow_domain", "Allow site", "site"],
+    ];
+    const inputs = [];
+    choiceDefinitions.forEach(([value, label, tone]) => {
+      const choice = createElement("label", `source-choice is-${tone}`);
+      const input = document.createElement("input");
+      input.type = "radio";
+      input.name = `source-${request.request_id}`;
+      input.value = value;
+      inputs.push(input);
+      choice.append(input, createElement("span", "", label));
+      choices.append(choice);
+    });
+    rows.push({ request_id: request.request_id, inputs });
+    row.append(copy, choices);
     form.append(row);
   });
   submitCheckpointButton(form, "Record source decisions");
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
+    const missing = rows.some((row) => !row.inputs.some((input) => input.checked));
+    if (missing) {
+      setWorkflowStatus("Choose reject, allow once, or allow site for every source.", "error");
+      return;
+    }
     const decision = {
       kind: action.decision_kind,
       decisions: rows.map((row) => ({
         request_id: row.request_id,
-        decision: row.select.value,
+        decision: row.inputs.find((input) => input.checked).value,
       })),
     };
     if (chapter) {
@@ -1540,6 +2528,144 @@ function renderSourceCheckpoint(action) {
   });
   card.append(form);
   return card;
+}
+
+function checkpointExplanation(title, copy) {
+  const item = createElement("div", "checkpoint-explanation");
+  item.append(
+    createElement("strong", "", title),
+    createElement("p", "", copy),
+  );
+  return item;
+}
+
+function chapterQuestionTitle(question) {
+  const normalizedQuestion = question.toLowerCase();
+  if (question.includes("why_it_matters")) return "Confirm why this matters";
+  if (question.includes("original_intuition")) return "Confirm how your belief changed";
+  if (question.includes("REQ3") || normalizedQuestion.includes("first bounded task")) {
+    return "Define the first bounded study";
+  }
+  if (
+    question.includes("REQ4")
+    || normalizedQuestion.includes("remain owned by the human")
+  ) {
+    return "Set the human decision boundary";
+  }
+  if (question.includes("BR2") || normalizedQuestion.includes("divergent")) {
+    return "Choose the intended scope";
+  }
+  return "Confirm the chapter framing";
+}
+
+function chapterQuestionImpact(question) {
+  const normalizedQuestion = question.toLowerCase();
+  if (question.includes("why_it_matters")) {
+    return "Changes only the chapter’s explanation of your personal motivation; it does not alter the evidence findings.";
+  }
+  if (question.includes("original_intuition")) {
+    return "Controls how the book distinguishes your starting belief from what the conversation later challenged or complicated.";
+  }
+  if (question.includes("REQ3") || normalizedQuestion.includes("first bounded task")) {
+    return "Defines the pilot task, participant group, scoring rubric, and what the chapter may call comprehension.";
+  }
+  if (
+    question.includes("REQ4")
+    || normalizedQuestion.includes("remain owned by the human")
+  ) {
+    return "Defines which judgments stay human-owned and which source-grounded material may be compressed into a reusable book artifact.";
+  }
+  if (question.includes("BR2") || question.toLowerCase().includes("divergent")) {
+    return "Determines which mathematics the alignment section discusses. Leaving it ambiguous is a valid, explicit choice.";
+  }
+  return "Supplies a user-authored boundary that the provider is not allowed to invent.";
+}
+
+function chapterQuickChoices(question) {
+  const normalizedQuestion = question.toLowerCase();
+  if (question.includes("why_it_matters")) {
+    return [[
+      "Accurate as written",
+      "Yes. The limited account accurately captures why this question matters to me.",
+    ]];
+  }
+  if (question.includes("original_intuition")) {
+    return [
+      [
+        "Preserve",
+        "Preserve it as my starting belief; the later conversation challenges it but does not replace it.",
+      ],
+      [
+        "Change",
+        "Change it: I no longer think mathematics is broadly skippable for the AI areas I want to study.",
+      ],
+      [
+        "Complicate",
+        "Complicate it: some AI work can be math-light, but my specific interests require mathematical foundations and judgment.",
+      ],
+    ];
+  }
+  if (question.includes("BR2") || normalizedQuestion.includes("divergent")) {
+    return [
+      ["Technical divergence", "Use technical divergence and distribution shift."],
+      ["Divergent behavior", "Use divergent behavior, including goal misgeneralization and deployment differences."],
+      ["Interpretability", "Use mechanistic interpretability."],
+      ["More than one", "Cover technical divergence, divergent behavior, and mechanistic interpretability as distinct related scopes."],
+      ["Keep ambiguous", "Leave divergent/alignment deliberately ambiguous and do not make claims that require choosing one meaning."],
+    ];
+  }
+  if (
+    normalizedQuestion.includes("independence")
+    && normalizedQuestion.includes("technical fortress")
+  ) {
+    return [
+      [
+        "Layered resilience",
+        "For me, independence means retaining useful local capability when centralized providers or internet access are temporarily unavailable. I am imagining service, network, or institutional disruption—not total isolation. Reject ‘technical fortress’ as too absolute; frame my starting belief as a desire for practical resilience.",
+      ],
+      [
+        "Fortress was my starting frame",
+        "For me, independence means minimizing reliance on external providers during serious infrastructure or institutional failure. ‘Technical fortress’ accurately describes my starting belief, even though the chapter may later complicate it.",
+      ],
+      [
+        "Keep the scope open",
+        "Treat independence as a working question rather than a settled definition. Do not choose a specific failure scenario or attribute the ‘technical fortress’ frame to me without further input.",
+      ],
+    ];
+  }
+  if (
+    normalizedQuestion.includes("layered resilience")
+    && normalizedQuestion.includes("technical literacy")
+  ) {
+    return [
+      [
+        "Approve; keep forecast open",
+        "Yes. Describe my view as moving from local-model access toward layered resilience. Keep the claim that technical literacy will determine future advantage as an open motivation, not a settled forecast.",
+      ],
+      [
+        "Approve with a caveat",
+        "Yes. Describe the move toward layered resilience, but add the caveat that technical literacy may improve agency and adaptability without by itself determining who has future advantage.",
+      ],
+      [
+        "Do not claim a settled shift",
+        "Do not present layered resilience as a settled change in my view. Frame it as a possibility the inquiry surfaced, and keep the technical-literacy forecast explicitly unresolved.",
+      ],
+    ];
+  }
+  return [
+    [
+      "Use cautious framing",
+      "Use the framing proposed in this question as my current working view, but present it cautiously rather than as a settled conclusion.",
+    ],
+    [
+      "Keep it open",
+      "Leave this point explicitly open and do not attribute a settled position to me.",
+    ],
+    [
+      "Do not use this framing",
+      "Do not use the proposed framing as written. Preserve the uncertainty and avoid inferring my intent.",
+    ],
+  ];
 }
 
 function renderChapterCheckpoint(action) {
@@ -1564,19 +2690,119 @@ function renderChapterCheckpoint(action) {
   const form = createElement("form", "checkpoint-form");
   let buildDecision;
   if (action.decision_kind === "chapter_human_input") {
-    const responses = (context.questions || []).map((question) => {
+    card.classList.add("chapter-decision-checkpoint");
+    const explainer = createElement("div", "checkpoint-explainer");
+    explainer.append(
+      checkpointExplanation(
+        "What is blocked",
+        `Chapter ${context.chapter_id || "the current chapter"} can continue, but it cannot present your motivation, belief change, or intended meaning as settled without your decision.`,
+      ),
+      checkpointExplanation(
+        "Why the agent cannot decide",
+        "These are authorship choices, not research facts. Evidence can inform them, but only you can confirm what you meant or deliberately leave it open.",
+      ),
+      checkpointExplanation(
+        "What happens next",
+        "Your answers are saved with this chapter revision. The controller then resumes automatically; it will use the answers only for the named framing fields.",
+      ),
+    );
+    card.append(explainer);
+    const questions = context.questions || [];
+    const deferPanel = createElement("div", "chapter-defer-panel");
+    const deferCopy = document.createElement("div");
+    deferCopy.append(
+      createElement("strong", "", "Don’t want to decide these now?"),
+      createElement(
+        "p",
+        "",
+        "Keep every item explicitly unresolved and narrow the chapter so it cannot depend on an invented answer.",
+      ),
+    );
+    const deferButton = createElement(
+      "button",
+      "secondary-button chapter-defer-button",
+      "Keep all open and continue",
+    );
+    deferButton.type = "button";
+    deferButton.append(createElement("span", "", "→"));
+    deferPanel.append(deferCopy, deferButton);
+    form.append(deferPanel);
+    const responses = questions.map((question, index) => {
       const control = textArea(3);
-      form.append(labeledField(question, control));
+      const questionCard = createElement("section", "chapter-question-card");
+      questionCard.append(
+        createElement("small", "chapter-question-number", `Decision ${index + 1}`),
+        createElement("strong", "chapter-question-title", chapterQuestionTitle(question)),
+        createElement("p", "chapter-question-impact", chapterQuestionImpact(question)),
+        labeledField(
+          question,
+          control,
+          "checkpoint-field chapter-question-response",
+        ),
+      );
+      const quickChoices = chapterQuickChoices(question);
+      if (quickChoices.length) {
+        const choices = createElement("div", "chapter-quick-choices");
+        choices.setAttribute("aria-label", `Quick answers for decision ${index + 1}`);
+        choices.append(createElement("small", "chapter-quick-choices-label", "Suggested answers — choose one, then edit if needed"));
+        quickChoices.forEach(([label, response]) => {
+          const button = createElement("button", "chapter-quick-choice", label);
+          button.type = "button";
+          button.setAttribute("aria-pressed", "false");
+          button.addEventListener("click", () => {
+            control.value = response;
+            choices.querySelectorAll("button").forEach((item) => {
+              item.classList.toggle("is-selected", item === button);
+              item.setAttribute("aria-pressed", String(item === button));
+            });
+            control.focus({ preventScroll: true });
+          });
+          choices.append(button);
+        });
+        control.addEventListener("input", () => {
+          choices.querySelectorAll("button").forEach((item) => {
+            const selected = quickChoices.some(
+              ([label, response]) => item.textContent === label && control.value === response,
+            );
+            item.classList.toggle("is-selected", selected);
+            item.setAttribute("aria-pressed", String(selected));
+          });
+        });
+        questionCard.append(choices);
+      }
+      form.append(questionCard);
       return control;
     });
-    const note = textArea(2, "Why these answers are authorized");
-    form.append(labeledField("Authorization note", note));
+    deferButton.addEventListener("click", async () => {
+      responses.forEach((control, index) => {
+        const choices = chapterQuickChoices(questions[index]);
+        const openChoice = choices.find(([label]) => (
+          /keep.*open|ambiguous|unresolved/i.test(label)
+        ));
+        control.value = openChoice?.[1] || (
+          "Keep this decision explicitly unresolved. Do not attribute a "
+          + "settled position to me, and narrow the chapter so it does not "
+          + "depend on an invented answer."
+        );
+        control.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      await submitWorkflowDecision({
+        kind: action.decision_kind,
+        book_id: context.book_id,
+        chapter_id: context.chapter_id,
+        responses: responses.map((control) => control.value.trim()),
+        authorization_note: (
+          "Inquiry author explicitly deferred all chapter-framing decisions; "
+          + "the chapter must preserve them as unresolved and narrow its claims."
+        ),
+      });
+    });
     buildDecision = () => ({
       kind: action.decision_kind,
       book_id: context.book_id,
       chapter_id: context.chapter_id,
       responses: responses.map((control) => control.value.trim()),
-      authorization_note: note.value.trim(),
+      authorization_note: "Inquiry author supplied these chapter-framing decisions in the worktable.",
     });
   } else {
     const fieldName = action.decision_kind === "chapter_artifact_review"
@@ -1586,6 +2812,28 @@ function renderChapterCheckpoint(action) {
         : "approval_note";
     const note = textArea(3, "Record the concrete human basis for this action");
     form.append(labeledField("Decision basis", note));
+    if (action.decision_kind === "final_pass_repair") {
+      const suggestedNote = `I authorize exactly one correction of the audited ${context.chapter_id || "chapter"} defect and one independent terminal evaluation, with no new research, source fetching, or return to normal drafting.`;
+      const choices = createElement("div", "chapter-quick-choices");
+      choices.setAttribute("aria-label", "Suggested authorization note");
+      choices.append(createElement("small", "chapter-quick-choices-label", "Suggested decision basis — review before submitting"));
+      const button = createElement("button", "chapter-quick-choice", "Use bounded-repair authorization");
+      button.type = "button";
+      button.setAttribute("aria-pressed", "false");
+      button.addEventListener("click", () => {
+        note.value = suggestedNote;
+        button.classList.add("is-selected");
+        button.setAttribute("aria-pressed", "true");
+        note.focus({ preventScroll: true });
+      });
+      note.addEventListener("input", () => {
+        const selected = note.value === suggestedNote;
+        button.classList.toggle("is-selected", selected);
+        button.setAttribute("aria-pressed", String(selected));
+      });
+      choices.append(button);
+      form.append(choices);
+    }
     buildDecision = () => ({
       kind: action.decision_kind,
       book_id: context.book_id,
@@ -1593,10 +2841,23 @@ function renderChapterCheckpoint(action) {
       [fieldName]: note.value.trim(),
     });
   }
-  submitCheckpointButton(form, "Authorize this exact transition");
+  submitCheckpointButton(
+    form,
+    action.decision_kind === "chapter_human_input"
+      ? "Save answers and continue automatically"
+      : "Authorize this exact transition",
+  );
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    await submitWorkflowDecision(buildDecision());
+    const decision = buildDecision();
+    if (
+      decision.kind === "chapter_human_input"
+      && decision.responses.some((response) => !response)
+    ) {
+      setWorkflowStatus("Answer each chapter-framing decision before continuing.", "error");
+      return;
+    }
+    await submitWorkflowDecision(decision);
   });
   card.append(form);
   return card;
@@ -1604,7 +2865,44 @@ function renderChapterCheckpoint(action) {
 
 function renderWorkflowAction() {
   workflowActionZone.replaceChildren();
+  workflowActionZone.classList.remove("with-source-mode-control");
+  workflowActionZone.classList.remove("with-mode-controls");
   if (!state.workflow || state.workflow.stage === "conversation_active") return;
+  if (state.workflow.stage !== "complete") {
+    const controls = createElement("div", "workflow-mode-controls");
+    const automaticSources = state.workflow.research_mode === "auto_approve";
+    const sourceButton = createElement(
+      "button",
+      `workflow-source-mode-toggle${automaticSources ? " is-active" : ""}`,
+      automaticSources ? "Auto sources on" : "Auto-approve sources",
+    );
+    sourceButton.type = "button";
+    sourceButton.setAttribute("aria-pressed", String(automaticSources));
+    sourceButton.title = automaticSources
+      ? "Unknown URLs are allowed once for this inquiry. Click to review each new source instead."
+      : "Allow each unknown URL once for this inquiry. This never grants site-wide trust.";
+    sourceButton.disabled = Boolean(activeJobFor(state.workflow.conversation_id))
+      || state.workflowBusy;
+    sourceButton.addEventListener("click", toggleWorkflowSourceMode);
+    const automaticQuestions = state.workflow.question_mode === "auto_defer";
+    const questionButton = createElement(
+      "button",
+      `workflow-question-mode-toggle${automaticQuestions ? " is-active" : ""}`,
+      automaticQuestions ? "Auto questions on" : "Auto-defer questions",
+    );
+    questionButton.type = "button";
+    questionButton.setAttribute("aria-pressed", String(automaticQuestions));
+    questionButton.title = automaticQuestions
+      ? "New chapter-framing questions are kept explicitly unresolved. Click to answer future questions manually."
+      : "Keep future chapter-framing questions unresolved and continue automatically. This never invents your views or accepts a draft.";
+    questionButton.disabled = Boolean(activeJobFor(state.workflow.conversation_id))
+      || state.workflowBusy;
+    questionButton.addEventListener("click", toggleWorkflowQuestionMode);
+    controls.append(sourceButton, questionButton);
+    workflowActionZone.classList.add("with-source-mode-control");
+    workflowActionZone.classList.add("with-mode-controls");
+    workflowActionZone.append(controls);
+  }
   const action = state.workflow.pending_action || {};
 
   if (action.kind === "human_checkpoint") {
@@ -1629,7 +2927,12 @@ function renderWorkflowAction() {
     );
     const button = createElement("button", "primary-button compact");
     button.type = "button";
-    button.append(document.createTextNode("Advance workflow"), createElement("span", "", "→"));
+    const activeJob = activeJobFor(state.workflow.conversation_id);
+    button.disabled = Boolean(activeJob);
+    button.append(
+      document.createTextNode(activeJob ? "Workflow is advancing" : "Advance workflow"),
+      createElement("span", "", "→"),
+    );
     button.addEventListener("click", advanceWorkflow);
     card.append(button);
     workflowActionZone.append(card);
@@ -1664,6 +2967,134 @@ function renderWorkflowAction() {
   );
 }
 
+async function toggleWorkflowSourceMode() {
+  if (!state.workflow || state.workflowBusy) return;
+  const enabling = state.workflow.research_mode !== "auto_approve";
+  const researchMode = enabling ? "auto_approve" : "safe";
+  setWorkflowBusy(
+    true,
+    enabling
+      ? "Recording automatic one-time source authority…"
+      : "Returning source decisions to manual review…",
+  );
+  try {
+    const result = await fetchJson(
+      `/api/v1/workflows/${encodeURIComponent(state.workflow.conversation_id)}/source-mode`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          research_mode: researchMode,
+          expected_stage: state.workflow.stage,
+          expected_revision: state.workflow.revision,
+        }),
+      },
+    );
+    state.workflow = result.workflow;
+    await refreshWorkflowList();
+    renderWorkflow();
+    const resolved = Number(result.pending_sources_resolved || 0);
+    const nextAction = state.workflow.pending_action || {};
+    if (
+      enabling
+      && resolved > 0
+      && nextAction.kind === "backend_transition"
+      && nextAction.command_available
+    ) {
+      setWorkflowStatus(
+        `${resolved} waiting source${resolved === 1 ? "" : "s"} approved once. Continuing automatically…`,
+        "working",
+      );
+      await startWorkflowJob(
+        `/api/v1/workflows/${encodeURIComponent(state.workflow.conversation_id)}/advance/async`,
+        {
+          expected_stage: state.workflow.stage,
+          expected_revision: state.workflow.revision,
+        },
+      );
+      renderWorkflow();
+    } else {
+      setWorkflowStatus(
+        enabling
+          ? "Automatic one-time source approval is on for this inquiry."
+          : "New unknown sources will wait for your decision.",
+      );
+    }
+  } catch (error) {
+    setWorkflowStatus(error.message, "error");
+    if (error.status === 409) {
+      state.workflowBusy = false;
+      await selectWorkflow(state.workflow.conversation_id);
+    }
+  } finally {
+    setWorkflowBusy(false);
+  }
+}
+
+async function toggleWorkflowQuestionMode() {
+  if (!state.workflow || state.workflowBusy) return;
+  const enabling = state.workflow.question_mode !== "auto_defer";
+  const questionMode = enabling ? "auto_defer" : "manual";
+  setWorkflowBusy(
+    true,
+    enabling
+      ? "Recording automatic question deferral…"
+      : "Returning chapter questions to manual review…",
+  );
+  try {
+    const result = await fetchJson(
+      `/api/v1/workflows/${encodeURIComponent(state.workflow.conversation_id)}/question-mode`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question_mode: questionMode,
+          expected_stage: state.workflow.stage,
+          expected_revision: state.workflow.revision,
+        }),
+      },
+    );
+    state.workflow = result.workflow;
+    await refreshWorkflowList();
+    renderWorkflow();
+    const resolved = Number(result.pending_questions_resolved || 0);
+    const nextAction = state.workflow.pending_action || {};
+    if (
+      enabling
+      && resolved > 0
+      && nextAction.kind === "backend_transition"
+      && nextAction.command_available
+    ) {
+      setWorkflowStatus(
+        `${resolved} waiting question${resolved === 1 ? "" : "s"} kept open. Continuing automatically…`,
+        "working",
+      );
+      await startWorkflowJob(
+        `/api/v1/workflows/${encodeURIComponent(state.workflow.conversation_id)}/advance/async`,
+        {
+          expected_stage: state.workflow.stage,
+          expected_revision: state.workflow.revision,
+        },
+      );
+      renderWorkflow();
+    } else {
+      setWorkflowStatus(
+        enabling
+          ? "Automatic question deferral is on for this inquiry."
+          : "New chapter questions will wait for your answer.",
+      );
+    }
+  } catch (error) {
+    setWorkflowStatus(error.message, "error");
+    if (error.status === 409) {
+      state.workflowBusy = false;
+      await selectWorkflow(state.workflow.conversation_id);
+    }
+  } finally {
+    setWorkflowBusy(false);
+  }
+}
+
 function renderWorkflow() {
   const workflow = state.workflow;
   if (!workflow) {
@@ -1672,9 +3103,13 @@ function renderWorkflow() {
   }
   newInquiryPanel.hidden = true;
   activeWorkflowPanel.hidden = false;
+  const experience = workflowExperience(workflow);
+  const progress = normalizedWorkflowProgress(workflow);
   workflowStageBadge.hidden = false;
-  workflowStageLabel.textContent = workflow.stage_label;
-  workflowConsoleKicker.textContent = `${workflow.provider || "Provider pending"} · ${workflow.research_mode.replaceAll("_", " ")}`;
+  workflowStageLabel.textContent = experience.headline;
+  workflowConsoleKicker.textContent = workflow.book_creation?.active
+    ? `${Math.round(progress)}% complete · You can leave without losing progress`
+    : experience.detail;
   const title = workflowName(workflow);
   workflowConsoleTitle.textContent = title;
   workflowConsoleTitle.classList.toggle("is-long", title.length > 160);
@@ -1684,7 +3119,23 @@ function renderWorkflow() {
     workflowConsoleTitle.removeAttribute("title");
   }
   renderTranscript(workflow.messages || []);
+  renderBookSeed(workflow);
   conversationComposer.hidden = workflow.stage !== "conversation_active";
+  agentToolbar.hidden = workflow.stage !== "conversation_active";
+  activeAgentLabel.textContent = workflow.provider
+    ? workflow.provider[0].toUpperCase() + workflow.provider.slice(1)
+    : "Provider pending";
+  const activeJob = activeJobFor(workflow.conversation_id);
+  conversationComposer.querySelectorAll("button, textarea").forEach((control) => {
+    control.disabled = Boolean(activeJob) || state.workflowBusy;
+  });
+  turnInput.placeholder = activeJob
+    ? `${workflow.provider || "The provider"} is writing this turn…`
+    : "Ask the next question, challenge the answer, or add context…";
+  applyAgentSwitcher();
+  renderWorkflowProgress();
+  renderFinishReadiness(workflow);
+  renderWorkflowTimeline(workflow);
   renderWorkflowAction();
   renderWorkflowList();
 }
@@ -1722,7 +3173,23 @@ async function submitWorkflowDecision(decision) {
     state.workflow = result.workflow;
     await refreshWorkflowList();
     renderWorkflow();
-    setWorkflowStatus("Decision recorded. Canonical state advanced.");
+    const nextAction = state.workflow.pending_action || {};
+    if (
+      nextAction.kind === "backend_transition"
+      && nextAction.command_available
+    ) {
+      setWorkflowStatus("Decision recorded. Continuing the workflow automatically…", "working");
+      await startWorkflowJob(
+        `/api/v1/workflows/${encodeURIComponent(state.workflow.conversation_id)}/advance/async`,
+        {
+          expected_stage: state.workflow.stage,
+          expected_revision: state.workflow.revision,
+        },
+      );
+      renderWorkflow();
+    } else {
+      setWorkflowStatus("Decision recorded at the next durable hold.");
+    }
   } catch (error) {
     setWorkflowStatus(error.message, "error");
     if (error.status === 409) {
@@ -1735,32 +3202,23 @@ async function submitWorkflowDecision(decision) {
 }
 
 async function advanceWorkflow() {
-  if (!state.workflow || state.workflowBusy) return;
-  setWorkflowBusy(true, "The bounded controller is working. This may take several minutes…");
+  if (!state.workflow || state.workflowBusy || activeJobFor(state.workflow.conversation_id)) return;
+  setWorkflowStatus("The bounded controller is starting in the background…", "working");
   try {
-    const result = await fetchJson(
-      `/api/v1/workflows/${encodeURIComponent(state.workflow.conversation_id)}/advance`,
+    await startWorkflowJob(
+      `/api/v1/workflows/${encodeURIComponent(state.workflow.conversation_id)}/advance/async`,
       {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          expected_stage: state.workflow.stage,
-          expected_revision: state.workflow.revision,
-        }),
+        expected_stage: state.workflow.stage,
+        expected_revision: state.workflow.revision,
       },
     );
-    state.workflow = result.workflow;
-    await refreshWorkflowList();
     renderWorkflow();
-    setWorkflowStatus("Stopped at the next durable workflow state.");
   } catch (error) {
     setWorkflowStatus(error.message, "error");
     if (error.status === 409) {
       state.workflowBusy = false;
       await selectWorkflow(state.workflow.conversation_id);
     }
-  } finally {
-    setWorkflowBusy(false);
   }
 }
 
@@ -1768,6 +3226,7 @@ async function initializeWorktable() {
   if (state.workflowBusy) return;
   try {
     await Promise.all([refreshWorkflowList(), loadReadiness()]);
+    await refreshJobs();
     state.worktableLoaded = true;
   } catch (error) {
     workflowList.replaceChildren(
@@ -1797,17 +3256,6 @@ nextButton.addEventListener("click", () => turnPage(1));
 previousVolumeButton.addEventListener("click", () => moveShelf(-1));
 nextVolumeButton.addEventListener("click", () => moveShelf(1));
 
-let shelfWheelLocked = false;
-bookshelfViewport.addEventListener("wheel", (event) => {
-  if (Math.abs(event.deltaY) < 24 || shelfWheelLocked) return;
-  event.preventDefault();
-  shelfWheelLocked = true;
-  moveShelf(event.deltaY > 0 ? 1 : -1);
-  window.setTimeout(() => {
-    shelfWheelLocked = false;
-  }, 420);
-}, { passive: false });
-
 plainToggle.addEventListener("click", () => {
   state.plain = !state.plain;
   openBook.classList.toggle("is-plain", state.plain);
@@ -1823,15 +3271,74 @@ evidenceToggle.addEventListener("click", () => {
   }
 });
 
+runReceiptToggle.addEventListener("click", () => {
+  if (runReceiptPanel.classList.contains("is-open")) {
+    hideRunReceipt();
+  } else {
+    showRunReceipt();
+  }
+});
+
 document.querySelector("#provenance-close").addEventListener(
   "click",
   hideProvenance,
 );
 
+document.querySelector("#run-receipt-close").addEventListener(
+  "click",
+  hideRunReceipt,
+);
+
+document.querySelector("#export-pdf").addEventListener("click", () => {
+  readerExportMenu.open = false;
+  window.print();
+});
+
+exportCoverCard.addEventListener("click", () => {
+  readerExportMenu.open = false;
+  exportShareCard("cover");
+});
+
+exportQuoteCard.addEventListener("click", () => {
+  readerExportMenu.open = false;
+  exportShareCard("quote");
+});
+
 tocToggle.addEventListener("click", () => {
   const open = !tocPanel.classList.contains("is-open");
   tocPanel.classList.toggle("is-open", open);
   tocToggle.setAttribute("aria-expanded", String(open));
+});
+
+function selectInquiryStarter(starter) {
+  const selected = INQUIRY_STARTERS[starter] ? starter : "understand";
+  state.inquiryStarter = selected;
+  const inquiryInput = document.querySelector("#inquiry-input");
+  inquiryInput.placeholder = INQUIRY_STARTERS[selected].placeholder;
+  document.querySelector("#inquiry-status").textContent =
+    INQUIRY_STARTERS[selected].status;
+  document.querySelectorAll("[data-inquiry-starter]").forEach((button) => {
+    const active = button.dataset.inquiryStarter === selected;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+}
+
+document.querySelectorAll("[data-inquiry-starter]").forEach((button) => {
+  button.addEventListener("click", () => {
+    selectInquiryStarter(button.dataset.inquiryStarter);
+    document.querySelector("#inquiry-input").focus();
+  });
+});
+selectInquiryStarter(state.inquiryStarter);
+
+document.querySelector("#sample-inquiry-button").addEventListener("click", () => {
+  const inquiryInput = document.querySelector("#inquiry-input");
+  inquiryInput.value = GUIDED_INQUIRY_EXAMPLE;
+  inquiryInput.focus();
+  inquiryInput.setSelectionRange(inquiryInput.value.length, inquiryInput.value.length);
+  document.querySelector("#inquiry-status").textContent =
+    "Example loaded. Edit it freely; nothing is recorded until you begin the inquiry.";
 });
 
 document.querySelector("#begin-inquiry").addEventListener("click", async () => {
@@ -1850,7 +3357,8 @@ document.querySelector("#begin-inquiry").addEventListener("click", async () => {
   }
   const provider = selectedProvider.value;
   const researchMode = document.querySelector('input[name="research-mode"]:checked').value;
-  status.textContent = "Creating the durable inquiry…";
+  const runMode = document.querySelector('input[name="inquiry-run-mode"]:checked').value;
+  status.textContent = "Preserving your question and beginning the book…";
   setWorkflowBusy(true);
   let created = null;
   try {
@@ -1859,24 +3367,44 @@ document.querySelector("#begin-inquiry").addEventListener("click", async () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ provider, research_mode: researchMode }),
     });
-    status.textContent = `Waiting for ${provider} to answer the opening question…`;
-    const turn = await fetchJson(
-      `/api/v1/conversations/${encodeURIComponent(created.conversation_id)}/turns`,
+    state.workflow = {
+      ...created,
+      opening_question: inquiry,
+      messages: [{ role: "user", content: inquiry }],
+    };
+    document.querySelector("#inquiry-input").value = "";
+    setWorkflowFilter("active");
+    await refreshWorkflowList();
+    const createdIndex = state.workflows.findIndex(
+      (workflow) => workflow.conversation_id === created.conversation_id,
+    );
+    if (createdIndex >= 0) {
+      state.workflows[createdIndex] = {
+        ...state.workflows[createdIndex],
+        opening_question: inquiry,
+      };
+    }
+    renderWorkflow();
+    setWorkflowBusy(false);
+    await startWorkflowJob(
+      runMode === "background_book"
+        ? `/api/v1/conversations/${encodeURIComponent(created.conversation_id)}/build/async`
+        : `/api/v1/conversations/${encodeURIComponent(created.conversation_id)}/turns/async`,
       {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          content: inquiry,
-          expected_stage: created.stage,
-          expected_revision: created.revision,
-        }),
+        content: inquiry,
+        expected_stage: created.stage,
+        expected_revision: created.revision,
       },
     );
-    state.workflow = turn.workflow;
-    document.querySelector("#inquiry-input").value = "";
-    await refreshWorkflowList();
-    renderWorkflow();
-    setWorkflowStatus("Opening turn saved to the durable transcript.");
+    status.textContent = runMode === "background_book"
+      ? "The Library is building your book in the background."
+      : "The Library is preparing the opening response.";
+    setWorkflowStatus(
+      runMode === "background_book"
+        ? "The book will continue to final review or the next decision. You can start another inquiry now."
+        : "Your question is preserved. You can stay here or begin another inquiry while the opening response is prepared.",
+      "working",
+    );
   } catch (error) {
     status.textContent = error.message;
     if (created?.conversation_id) {
@@ -1900,33 +3428,38 @@ document.querySelector("#begin-inquiry").addEventListener("click", async () => {
 });
 
 newInquiryButton.addEventListener("click", showNewInquiry);
+document.querySelector("#workflow-filter-published").addEventListener(
+  "click",
+  () => setWorkflowFilter("published"),
+);
+document.querySelector("#workflow-filter-active").addEventListener(
+  "click",
+  () => setWorkflowFilter("active"),
+);
 
-document.querySelector("#send-turn").addEventListener("click", async () => {
-  if (!state.workflow || state.workflowBusy) return;
-  const content = turnInput.value.trim();
-  if (!content) {
-    setWorkflowStatus("Write the next question or observation first.", "error");
-    return;
-  }
-  setWorkflowBusy(true, `Waiting for ${state.workflow.provider}…`);
+agentSwitcher.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-switch-provider]");
+  if (!button || button.disabled || !state.workflow || state.workflowBusy) return;
+  const provider = button.dataset.switchProvider;
+  setWorkflowBusy(true, `Switching the next turn to ${provider}…`);
   try {
-    const result = await fetchJson(
-      `/api/v1/conversations/${encodeURIComponent(state.workflow.conversation_id)}/turns`,
+    state.workflow = await fetchJson(
+      `/api/v1/conversations/${encodeURIComponent(state.workflow.conversation_id)}/provider`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          content,
+          provider,
           expected_stage: state.workflow.stage,
           expected_revision: state.workflow.revision,
         }),
       },
     );
-    state.workflow = result.workflow;
-    turnInput.value = "";
     await refreshWorkflowList();
     renderWorkflow();
-    setWorkflowStatus("Turn saved.");
+    setWorkflowStatus(
+      `${provider} will receive the complete durable transcript on the next turn.`,
+    );
   } catch (error) {
     setWorkflowStatus(error.message, "error");
   } finally {
@@ -1934,28 +3467,52 @@ document.querySelector("#send-turn").addEventListener("click", async () => {
   }
 });
 
-document.querySelector("#finish-inquiry").addEventListener("click", async () => {
-  if (!state.workflow || state.workflowBusy) return;
-  setWorkflowBusy(true, "Sealing the conversation and preparing independent review…");
+document.querySelector("#send-turn").addEventListener("click", async () => {
+  if (!state.workflow || state.workflowBusy || activeJobFor(state.workflow.conversation_id)) return;
+  const content = turnInput.value.trim();
+  if (!content) {
+    setWorkflowStatus("Write the next question or observation first.", "error");
+    return;
+  }
+  const expectedStage = state.workflow.stage;
+  const expectedRevision = state.workflow.revision;
+  state.workflow.messages = [...(state.workflow.messages || []), { role: "user", content }];
+  turnInput.value = "";
+  renderWorkflow();
+  setWorkflowStatus(`${state.workflow.provider} is writing in the background.`, "working");
   try {
-    state.workflow = await fetchJson(
-      `/api/v1/conversations/${encodeURIComponent(state.workflow.conversation_id)}/finish`,
+    await startWorkflowJob(
+      `/api/v1/conversations/${encodeURIComponent(state.workflow.conversation_id)}/turns/async`,
       {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          expected_stage: state.workflow.stage,
-          expected_revision: state.workflow.revision,
-        }),
+        content,
+        expected_stage: expectedStage,
+        expected_revision: expectedRevision,
       },
     );
-    await refreshWorkflowList();
+  } catch (error) {
+    state.workflow = await fetchJson(
+      `/api/v1/workflows/${encodeURIComponent(state.workflow.conversation_id)}`,
+    ).catch(() => state.workflow);
     renderWorkflow();
-    setWorkflowStatus("Conversation sealed. The review stage is ready to advance.");
+    setWorkflowStatus(error.message, "error");
+  }
+});
+
+document.querySelector("#finish-inquiry").addEventListener("click", async () => {
+  if (!state.workflow || state.workflowBusy || activeJobFor(state.workflow.conversation_id)) return;
+  setWorkflowStatus("Sealing the conversation and continuing with inquiry-scoped guardrails…", "working");
+  try {
+    await startWorkflowJob(
+      `/api/v1/conversations/${encodeURIComponent(state.workflow.conversation_id)}/finish/async`,
+      {
+        finish_mode: "guardrails",
+        expected_stage: state.workflow.stage,
+        expected_revision: state.workflow.revision,
+      },
+    );
+    renderWorkflow();
   } catch (error) {
     setWorkflowStatus(error.message, "error");
-  } finally {
-    setWorkflowBusy(false);
   }
 });
 
@@ -2003,6 +3560,7 @@ let resizeTimer;
 window.addEventListener("resize", () => {
   window.clearTimeout(resizeTimer);
   resizeTimer = window.setTimeout(() => {
+    updateShelfGeometry();
     if (state.inspecting) recenterFocusedBook(selectedShelfBook());
     if (!state.blocks.length || state.plain) return;
     const previousPage = state.pageIndex;

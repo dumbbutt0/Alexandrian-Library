@@ -298,6 +298,31 @@ class BookAssemblyTests(unittest.TestCase):
         self.assertEqual(receipt["source_receipt_ids"], ["SRC1"])
         self.assertFalse((self.book_directory / "book.md").exists())
 
+    def test_assembles_performance_runtime_completion(self) -> None:
+        run_path = self.book_directory / "runs" / "CH1.json"
+        run = json.loads(run_path.read_text(encoding="utf-8"))
+        run.update(
+            {
+                "workflow_runtime_version": "performance-v2",
+                "final_pass_requested": False,
+                "final_pass_source_draft_id": None,
+            }
+        )
+        self.write_json(run_path, run)
+
+        receipt = book_assembler.assemble_candidate_book(
+            self.project_path,
+            self.book_id,
+        )
+
+        self.assertEqual(receipt["chapter_count"], 2)
+        self.assertIn(
+            "Exact first chapter.",
+            (self.project_path / receipt["candidate_path"]).read_text(
+                encoding="utf-8"
+            ),
+        )
+
     def test_assembles_exact_human_accepted_draft(self) -> None:
         assessment_path = (
             self.book_directory / "assessments" / "CH1" / "A2.json"

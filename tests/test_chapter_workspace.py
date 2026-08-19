@@ -1,6 +1,7 @@
 import hashlib
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -346,6 +347,29 @@ class ChapterWorkspaceTests(unittest.TestCase):
         return mcp_server.initialize_chapter_workspace(
             self.make_proposal()
         )
+
+    def test_deterministic_bootstrap_maps_context_without_prose(self) -> None:
+        proposal = chapter_workspace.build_deterministic_initial_workspace(
+            self.context
+        )
+        receipt = mcp_server.initialize_chapter_workspace(proposal)
+        _, _, document = chapter_workspace.load_current_workspace(
+            self.book_directory,
+            self.chapter_id,
+        )
+
+        self.assertEqual(receipt.workspace_version, 1)
+        self.assertEqual(document["workspace"]["draft_versions"], [])
+        self.assertEqual(
+            document["workspace"]["spine"]["evidence_and_reasoning"][
+                "claim_ids"
+            ],
+            ["review-test:C1"],
+        )
+        validated = chapter_workspace.ChapterWorkspaceProposal.model_validate(
+            document["workspace"]
+        )
+        self.assertEqual(chapter_workspace.completion_blockers(validated), [])
 
     def close_completion_contract(
         self,
@@ -754,6 +778,23 @@ class ChapterWorkspaceTests(unittest.TestCase):
                 self.make_proposal()
             )
 
+    def test_allows_the_global_knowledge_projection_to_grow(self) -> None:
+        graph_path = self.project_path / "data" / "knowledge" / "graph.json"
+        self.write_json(
+            graph_path,
+            {
+                "source": "knowledge_graph",
+                "new_unrelated_node": "added after chapter preparation",
+            },
+        )
+
+        receipt = mcp_server.initialize_chapter_workspace(
+            self.make_proposal()
+        )
+
+        self.assertEqual(receipt.workspace_version, 1)
+        self.assertEqual(receipt.book_id, self.book_id)
+
     def test_rejects_a_concurrent_revision_lock(self) -> None:
         self.initialize()
         lock_path = (
@@ -833,6 +874,7 @@ class ChapterWorkspaceTests(unittest.TestCase):
             metadata["source_workspace_sha256"],
             workspace_receipt.workspace_sha256,
         )
+        self.assertEqual(metadata["citation_contract"]["version"], "1.0")
 
         mutated_data = proposal.model_dump(mode="json")
         mutated_data["draft_versions"][0]["provider"] = "claude"
@@ -843,6 +885,52 @@ class ChapterWorkspaceTests(unittest.TestCase):
                 ),
                 3,
             )
+
+    def test_evidence_backed_draft_claim_requires_inline_marker(self) -> None:
+        self.context["claims"][0]["source_receipt_ids"] = ["source-1"]
+        self.context["context_sha256"] = (
+            mcp_server.canonical_document_sha256(
+                self.context,
+                "context_sha256",
+            )
+        )
+        self.write_json(self.context_path, self.context)
+        self.initialize()
+        workspace_receipt = self.close_completion_contract()
+        submission_values = {
+            "book_id": self.book_id,
+            "chapter_id": self.chapter_id,
+            "context_sha256": self.context["context_sha256"],
+            "expected_workspace_version": 2,
+            "expected_workspace_sha256": workspace_receipt.workspace_sha256,
+        }
+
+        with self.assertRaisesRegex(ToolError, "Missing: review-test:C1"):
+            mcp_server.save_chapter_draft(
+                mcp_server.ChapterDraftSubmission(
+                    **submission_values,
+                    markdown="The evidence chain remains visible.",
+                )
+            )
+
+        receipt = mcp_server.save_chapter_draft(
+            mcp_server.ChapterDraftSubmission(
+                **submission_values,
+                markdown=(
+                    "The evidence chain remains visible. "
+                    "[Evidence: source-1]"
+                ),
+            )
+        )
+        metadata = json.loads(
+            (self.project_path / receipt.metadata_path).read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(
+            metadata["citation_contract"]["cited_receipt_ids"],
+            ["source-1"],
+        )
 
     def test_draft_is_rejected_until_completion_contract_is_terminal(
         self,
@@ -1475,6 +1563,16 @@ class ChapterWorkspaceTests(unittest.TestCase):
             / f"{fetched.receipt_id}.json"
         )
         self.assertTrue(durable_path.is_file())
+        self.assertIsNotNone(fetched.source_document_path)
+        structured_path = self.project_path / fetched.source_document_path
+        self.assertTrue(structured_path.is_file())
+        structured_source = json.loads(
+            structured_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            structured_source["source_document_sha256"],
+            fetched.source_document_sha256,
+        )
         session = json.loads(session_path.read_text(encoding="utf-8"))
         self.assertEqual(
             session["fetched_sources"][0]["receipt_id"],
@@ -1581,8 +1679,149 @@ class ChapterWorkspaceTests(unittest.TestCase):
                 request["research_question"],
                 "This URL was not planned.",
             )
+        pending_batch = mcp_server.fetch_chapter_research_source_batch(
+            self.book_id,
+            self.chapter_id,
+            assessment_receipt.assessment_id,
+        )
+        self.assertEqual(pending_batch["status"], "approval_required")
+        self.assertEqual(pending_batch["processed_candidate_count"], 1)
+
+        session = json.loads(session_path.read_text(encoding="utf-8"))
+        session["decisions"] = [
+            {
+                **request_record,
+                "decision": "reject",
+                "decided_at": "2026-07-26T00:01:00+00:00",
+            }
+            for request_record in session["pending_requests"]
+        ]
+        session["pending_requests"] = []
+        self.write_json(session_path, session)
+        completed_batch = mcp_server.fetch_chapter_research_source_batch(
+            self.book_id,
+            self.chapter_id,
+            assessment_receipt.assessment_id,
+        )
+        self.assertEqual(completed_batch["status"], "complete")
+        self.assertEqual(completed_batch["processed_candidate_count"], 2)
+        self.assertEqual(
+            [item["status"] for item in completed_batch["results"]],
+            ["rejected", "rejected"],
+        )
         with self.assertRaisesRegex(ToolError, "already"):
             mcp_server.submit_chapter_research_source_plan(submission)
+
+    def test_authorized_source_batch_fetches_concurrently_and_commits_in_order(
+        self,
+    ) -> None:
+        self.write_json(
+            mcp_server.SOURCE_POLICY_PATH,
+            {
+                "approved_domains": ["example.com"],
+                "allow_subdomains": False,
+                "max_response_bytes": 500000,
+                "max_text_characters": 30000,
+                "timeout_seconds": 15,
+            },
+        )
+        workspace_receipt = self.initialize()
+        request = self.make_research_request()
+        assessment_receipt = mcp_server.submit_chapter_assessment(
+            mcp_server.ChapterAssessmentSubmission(
+                book_id=self.book_id,
+                chapter_id=self.chapter_id,
+                context_sha256=self.context["context_sha256"],
+                workspace_version=workspace_receipt.workspace_version,
+                workspace_sha256=workspace_receipt.workspace_sha256,
+                draft_id=None,
+                criteria=self.make_assessment_criteria(),
+                outcome="continue_research",
+                most_important_gap=request["why_required"],
+                required_next_actions=["Research the request."],
+                human_input_requests=[],
+                research_request=request,
+            )
+        )
+        session_path = mcp_server.chapter_research_session_path(
+            self.book_id,
+            self.chapter_id,
+            assessment_receipt.assessment_id,
+        )
+        self.write_json(
+            session_path,
+            {
+                "book_id": self.book_id,
+                "chapter_id": self.chapter_id,
+                "assessment_id": assessment_receipt.assessment_id,
+                "created_at": "2026-07-26T00:00:00+00:00",
+                "research_mode": "safe",
+                "source_protocol": "batch_v1",
+                "pending_requests": [],
+                "decisions": [],
+                "fetched_sources": [],
+            },
+        )
+        submission = mcp_server.ChapterResearchSourcePlanSubmission(
+            book_id=self.book_id,
+            chapter_id=self.chapter_id,
+            assessment_id=assessment_receipt.assessment_id,
+            assessment_sha256=assessment_receipt.assessment_sha256,
+            context_sha256=self.context["context_sha256"],
+            workspace_version=workspace_receipt.workspace_version,
+            workspace_sha256=workspace_receipt.workspace_sha256,
+            research_request=request,
+            candidates=[
+                {
+                    "candidate_id": "S1",
+                    "url": "https://example.com/first",
+                    "evidence_target": "First primary result.",
+                    "reason_for_source": "Check the first result.",
+                },
+                {
+                    "candidate_id": "S2",
+                    "url": "https://example.com/second",
+                    "evidence_target": "Second primary result.",
+                    "reason_for_source": "Check the second result.",
+                },
+            ],
+        )
+        mcp_server.submit_chapter_research_source_plan(submission)
+        rendezvous = threading.Barrier(2, timeout=2)
+
+        def concurrent_fetch(url: str, _policy: object) -> tuple:
+            rendezvous.wait()
+            text = f"Evidence from {url}."
+            return (
+                url,
+                "text/plain",
+                text,
+                url.rsplit("/", 1)[-1].title(),
+                text.encode("utf-8"),
+            )
+
+        with patch.object(
+            mcp_server,
+            "fetch_source_content",
+            side_effect=concurrent_fetch,
+        ):
+            batch = mcp_server.fetch_chapter_research_source_batch(
+                self.book_id,
+                self.chapter_id,
+                assessment_receipt.assessment_id,
+            )
+
+        self.assertEqual(batch["status"], "complete")
+        self.assertEqual(batch["retrieval_mode"], "concurrent_authorized")
+        self.assertEqual(
+            [item["final_url"] for item in batch["results"]],
+            ["https://example.com/first", "https://example.com/second"],
+        )
+        session = json.loads(session_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            [item["requested_url"] for item in session["fetched_sources"]],
+            ["https://example.com/first", "https://example.com/second"],
+        )
 
     def test_recovery_authorization_blocks_new_chapter_fetches(self) -> None:
         workspace_receipt = self.initialize()
@@ -1697,6 +1936,17 @@ class ChapterWorkspaceTests(unittest.TestCase):
 
         with self.assertRaises(ToolError):
             mcp_server.submit_chapter_assessment(submission)
+
+        run_path = self.book_directory / "runs" / "CH1.json"
+        performance_run = json.loads(run_path.read_text(encoding="utf-8"))
+        performance_run["workflow_runtime_version"] = "performance-v2"
+        self.write_json(run_path, performance_run)
+        mcp_server.validate_chapter_completion_gate(
+            self.book_directory,
+            submission,
+        )
+        performance_run["workflow_runtime_version"] = "workflow-runtime-v1"
+        self.write_json(run_path, performance_run)
 
         second_draft = mcp_server.save_chapter_draft(
             mcp_server.ChapterDraftSubmission(

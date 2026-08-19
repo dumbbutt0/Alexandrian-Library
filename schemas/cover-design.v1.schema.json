@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://inquirion.local/schemas/cover-design.v1.schema.json",
+  "title": "Alexandrian Cover Design V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "book_id",
+    "created_at",
+    "designer_host",
+    "assembly_path",
+    "assembly_sha256",
+    "book_sha256",
+    "quote",
+    "quote_location",
+    "concept",
+    "visual_motifs",
+    "palette",
+    "image_prompt",
+    "fallback_style",
+    "asset",
+    "design_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "book_id": {"type": "string", "pattern": "^book-[A-Za-z0-9._-]+$"},
+    "created_at": {"type": "string", "minLength": 1},
+    "updated_at": {"type": "string", "minLength": 1},
+    "designer_host": {"type": "string", "minLength": 1},
+    "assembly_path": {"type": "string", "minLength": 1},
+    "assembly_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "book_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "core_question": {"type": "string", "minLength": 1, "maxLength": 1000},
+    "question_tension": {"type": "string", "minLength": 40, "maxLength": 1200},
+    "dominant_symbol": {"type": "string", "minLength": 3, "maxLength": 160},
+    "diversity_statement": {"type": "string", "minLength": 40, "maxLength": 1200},
+    "quote": {"type": "string", "minLength": 20, "maxLength": 180},
+    "quote_location": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["character_start", "character_end", "section_heading"],
+      "properties": {
+        "character_start": {"type": "integer", "minimum": 0},
+        "character_end": {"type": "integer", "minimum": 1},
+        "section_heading": {"type": ["string", "null"]}
+      }
+    },
+    "concept": {"type": "string", "minLength": 40, "maxLength": 1200},
+    "visual_motifs": {"type": "array", "minItems": 3, "maxItems": 8, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "palette": {"type": "array", "minItems": 4, "maxItems": 8, "uniqueItems": true, "items": {"type": "string", "pattern": "^#[0-9A-Fa-f]{6}$"}},
+    "image_prompt": {"type": "string", "minLength": 200, "maxLength": 5000},
+    "fallback_style": {"enum": ["archive_geometry", "evidence_threads", "stained_glass_diagram"]},
+    "asset": {
+      "type": "object",
+      "required": ["status", "kind", "path", "mime_type", "sha256"],
+      "properties": {
+        "status": {"enum": ["fallback", "generated"]},
+        "kind": {"enum": ["deterministic_svg", "generated_raster"]},
+        "render_profile": {"type": "string", "minLength": 1},
+        "path": {"type": "string", "minLength": 1},
+        "mime_type": {"enum": ["image/svg+xml", "image/jpeg", "image/png", "image/webp"]},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "generated_by": {"type": "string"},
+        "prompt_path": {"type": "string"},
+        "prompt_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "design_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

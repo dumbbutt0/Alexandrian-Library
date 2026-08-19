@@ -555,6 +555,175 @@ def collect_reference_values(value: Any, key: str) -> set[str]:
     return set()
 
 
+def build_deterministic_initial_workspace(
+    context: dict,
+) -> ChapterWorkspaceProposal:
+    """Map approved context into a prose-free, draftable workspace skeleton."""
+    book_id = context.get("book_id")
+    chapter_id = context.get("chapter_id")
+    context_sha256 = context.get("context_sha256")
+    central_question = context.get("central_question")
+    if not all(
+        isinstance(value, str) and value
+        for value in (
+            book_id,
+            chapter_id,
+            context_sha256,
+            central_question,
+        )
+    ):
+        raise WorkspaceError(
+            "Approved context cannot bootstrap a chapter workspace."
+        )
+
+    claim_ids = sorted(
+        claim["claim_id"]
+        for claim in context.get("claims", [])
+        if isinstance(claim, dict) and isinstance(claim.get("claim_id"), str)
+    )
+    evidence_receipt_ids = sorted(
+        packet["receipt_id"]
+        for packet in context.get("evidence_packets", [])
+        if isinstance(packet, dict)
+        and isinstance(packet.get("receipt_id"), str)
+    )
+    knowledge_node_ids = sorted(
+        node["id"]
+        for node in context.get("knowledge", {}).get("nodes", [])
+        if isinstance(node, dict) and isinstance(node.get("id"), str)
+    )
+    open_questions = [
+        question
+        for question in context.get("open_questions", [])
+        if isinstance(question, str) and question
+    ]
+    signature = context.get("approved_curiosity_signature", {})
+    original_items = signature.get("original_intuition", [])
+    original_intuition = next(
+        (
+            item["text"]
+            for item in original_items
+            if isinstance(item, dict)
+            and isinstance(item.get("text"), str)
+            and item["text"]
+        ),
+        "Present the approved starting intuition and its limits.",
+    )
+
+    section_objectives = {
+        "central_question": central_question,
+        "original_intuition": original_intuition,
+        "why_it_matters": (
+            "Explain the approved stakes before moving into abstraction."
+        ),
+        "current_answer": (
+            "Develop the strongest answer permitted by the approved record."
+        ),
+        "evidence_and_reasoning": (
+            "Connect every approved claim to its evidence and limitations."
+        ),
+        "important_contradictions": (
+            "Keep approved contradictions and counterpressure visible."
+        ),
+        "evolution_of_understanding": (
+            "Show how the investigation changes or bounds the starting view."
+        ),
+        "practical_implications": (
+            "State only implications supported by the approved record."
+        ),
+        "unresolved_frontier": (
+            "Preserve every approved open question without false closure."
+        ),
+        "connection_to_larger_book": (
+            "Create the approved transition into the larger book argument."
+        ),
+    }
+    spine_sections = {}
+    for section_name in SPINE_SECTION_NAMES:
+        references = {}
+        questions = []
+        if section_name == "evidence_and_reasoning":
+            references = {
+                "claim_ids": claim_ids,
+                "evidence_receipt_ids": evidence_receipt_ids,
+                "knowledge_node_ids": knowledge_node_ids,
+            }
+        if section_name == "unresolved_frontier":
+            questions = open_questions
+        spine_sections[section_name] = SpineSection(
+            objective=section_objectives[section_name],
+            status=SectionStatus.ADDRESSED,
+            open_questions=questions,
+            **references,
+        )
+
+    category_by_kind = {
+        "research": RequirementCategory.SCIENTIFIC_MECHANISM,
+        "experiment": RequirementCategory.EXPERIMENT,
+        "human_decision": RequirementCategory.PHILOSOPHY,
+        "contradiction": RequirementCategory.PHILOSOPHY,
+    }
+    requirements = []
+    for index, requirement in enumerate(
+        context.get("open_requirements", []),
+        start=1,
+    ):
+        if not isinstance(requirement, dict):
+            continue
+        disposition = requirement.get("disposition")
+        status = RequirementStatus.UNADDRESSED
+        destination_id = None
+        closure_reason = None
+        if disposition == "completed":
+            status = RequirementStatus.SATISFIED
+        elif disposition == "bounded_unresolved":
+            status = RequirementStatus.BOUNDED_UNRESOLVED
+            closure_reason = ClosureReason.CURRENTLY_UNANSWERABLE
+        elif disposition == "routed_to_later":
+            status = RequirementStatus.ROUTED
+            destination_id = "later_work"
+            closure_reason = ClosureReason.MOVED_TO_OTHER_ARTIFACT
+        requirements.append(
+            DevelopmentRequirement(
+                requirement_id=f"REQ{index}",
+                category=category_by_kind.get(
+                    requirement.get("kind"),
+                    RequirementCategory.PHILOSOPHY,
+                ),
+                description=str(
+                    requirement.get("description")
+                    or "Approved chapter requirement"
+                ),
+                why_required=(
+                    "The approved chapter context requires this boundary to "
+                    "remain explicit."
+                ),
+                status=status,
+                destination_id=destination_id,
+                closure_reason=closure_reason,
+            )
+        )
+
+    proposal = ChapterWorkspaceProposal(
+        book_id=book_id,
+        chapter_id=chapter_id,
+        context_sha256=context_sha256,
+        current_position=CurrentPosition(
+            position_type=PositionType.UNRESOLVED_FRAMING,
+            statement=central_question,
+            confidence_basis=(
+                "The approved context defines the starting boundary; no "
+                "chapter conclusion has been drafted yet."
+            ),
+            unresolved_tensions=open_questions,
+        ),
+        spine=ChapterSpine(**spine_sections),
+        development_requirements=requirements,
+    )
+    validate_against_context(proposal, context)
+    return proposal
+
+
 def validate_against_context(
     proposal: ChapterWorkspaceProposal,
     context: dict,

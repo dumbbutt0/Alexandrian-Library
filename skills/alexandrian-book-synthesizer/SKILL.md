@@ -1,14 +1,14 @@
 ---
 name: alexandrian-book-synthesizer
-description: Create one bounded whole-book synthesis plan and one claim-mapped readable edition from an immutable Alexandrian candidate, or perform the one permitted correction after a blocking independent audit.
+description: Create one claim-mapped Alexandrian Narrative Research Book from a deterministic foundation, or perform the one permitted correction after a blocking independent audit, preserving an engaging nonfiction voice above inspectable evidence.
 ---
 
 # Alexandrian Book Synthesizer
 
 ## Purpose
 
-Transform one immutable candidate into a coherent, readable technical edition
-without changing its research meaning.
+Transform one immutable candidate into a coherent Alexandrian Narrative
+Research Book without changing its research meaning.
 
 This is an editorial operation, not a research operation. Preserve the
 candidate, sources, uncertainty, curiosity, and intellectual history.
@@ -23,6 +23,34 @@ sources, search the web, run commands, write files directly, or invent claim,
 receipt, chapter, or attempt identities.
 
 Use only the Alexandrian synthesis MCP tools for durable changes.
+
+## Streamlined Whole-Book Attempt
+
+When the wrapper supplies existing `context_path`, `inventory_path`, and
+`plan_path` for `synthesis_required`, those artifacts are the complete
+deterministic foundation. Read them and the candidate completely. Do not call
+`prepare_book_synthesis_context` or `initialize_book_synthesis`, and do not
+recreate inventory or plan fields.
+
+Perform one whole-book editorial pass. Shape a developing nonfiction argument,
+improve transitions, remove declining-information repetition, stabilize
+terminology, and preserve the accepted chapter structure unless the supplied
+plan explicitly permits a move. Do not add research or resolve an open claim.
+Map every inventory claim
+in its supplied order to an exact excerpt and location in the resulting
+edition, then call `save_book_synthesis_attempt` exactly once and stop. The
+independent global audit is a separate provider transition.
+
+When S2 supplies `correction_mode: targeted_excerpt_patch`, do not request or
+reconstruct the complete candidate or S1 edition. Use only the hash-bound
+correction packet. For each target, replace its exact offending excerpt with a
+bounded passage that contains the supplied authoritative excerpt verbatim.
+Copy the transition template exactly and call
+`save_book_synthesis_correction` once. The wrapper applies those patches to S1,
+rechecks every unaffected claim mapping, validates citation grounding, and
+assembles the immutable S2 edition deterministically. If the wrapper instead
+supplies `correction_mode: complete_edition`, use the legacy complete S2
+contract through `save_book_synthesis_attempt`.
 
 ## Staged First Attempt
 
@@ -122,7 +150,17 @@ completed shards deterministically.
 Read one complete source packet and its supplied task. Produce one complete
 replacement chapter. Apply only its chapter job, relevant plan operations,
 terminology, and, for S2, the bound correction audit. Map every assigned claim
-in order to an exact output excerpt. Call
+in order to an exact output excerpt. For every assigned claim whose inventory
+entry contains `evidence_receipt_ids`, place
+`[Evidence: exact-receipt-id]` in the same paragraph as the mapped edition
+excerpt. Use only that claim's supplied receipts. Give each sourced claim its
+own marker occurrence; the reader converts the internal receipt marker to a
+numbered citation.
+
+When an assigned claim has `resolution_status: contradicted`, place its mapped
+excerpt in a blockquote beginning `> [!CONTRADICTION]` and retain the evidence
+marker inside that block. Never convert a contradiction into an unmarked
+assertion. Call
 `save_staged_synthesis_edition_unit` once and stop.
 
 The wrapper assembles saved units deterministically. Do not assemble the book
@@ -139,32 +177,67 @@ claims, evidence, certainty, or scope.
 
 ## One Correction
 
-For attempt S2, read the complete supplied S1 correction context. Address only
-its blocking findings in the routed chapter. Treat each supplied correction
-target as an exact obligation. Restore its authoritative excerpt exactly and
-do not retain its offending excerpt as the mapped claim. The wrapper rejects a
-target that does not restore the exact authoritative claim and reuses every
-unchanged S1 unit by hash.
+For attempt S2, read only the supplied correction context. A targeted excerpt
+packet is complete for that transition; a legacy complete-edition packet is
+used only when a blocker has no unique safe text target. Address only its
+blocking findings in the routed chapter or excerpt. Treat each supplied
+correction target as an exact obligation. Restore its authoritative excerpt
+exactly and do not retain its offending excerpt as the mapped claim. The
+wrapper rejects a target that does not restore the exact authoritative claim
+and reuses every unchanged S1 unit or passage by hash.
 
 Do not create a third attempt, expand the plan, add research, or improve
 unrelated material.
 
-## Proposed Alexandrian accessibility profile
+## Alexandrian Narrative Research Book standard
 
-Use the project-owned, provisionally named accessibility profile:
+Govern the main chapters by this principle:
 
-- Keep terminology stable and define technical terms before relying on them.
-- Prefer direct sentences and active voice where they improve clarity.
-- Give a paragraph one principal job where practical.
-- Put important limitations next to the claims they qualify.
-- Move detailed implementation records to appendices when the lesson remains
-  understandable without them.
-- Preserve a running example when it materially improves learning.
-- Remove declining-information repetition while retaining necessary reminders.
+> Read like a compelling book. Inspect like a research artifact.
 
-Do not mechanically rewrite quotations, code, equations, citations, schemas,
-or personal reflection. Do not settle its public name or claim ASD-STE100
-compliance.
+Use the conversation as the narrative engine. Preserve the user's starting
+belief, the questions or disagreements that create tension, the discoveries
+and reversals produced by research, the evidence that changes or fails to
+change the argument, and the unresolved question that opens the next inquiry.
+Never invent a belief change or first-person voice that the transcript does not
+support.
+
+Shape each chapter according to its material rather than a rigid template, but
+make these movements available:
+
+1. Open with a consequential question, contradiction, concrete situation, or
+   surprising claim—not objectives or a summary.
+2. Establish why the obvious answer is insufficient.
+3. Develop the investigation as an argument through ideas and evidence, not a
+   source inventory.
+4. Let the strongest counterargument, unexpected connection, or contrary
+   evidence create a genuine turn.
+5. Synthesize what can now be concluded, what remains uncertain, and how the
+   reader's model should change.
+6. End with an implication or unresolved question that makes continuation
+   natural.
+
+Give the edition a recognizable authorial voice, varied sentence and paragraph
+rhythm, concrete examples before abstraction, and analogies that clarify
+without pretending to prove. Use smooth transitions between evidence and
+interpretation. Use pull quotes, diagrams, marginal definitions, and
+subheadings only when they materially improve orientation. Vary chapter
+length, pacing, and internal structure according to the argument.
+
+Avoid generic AI-textbook scaffolding: do not write “In this chapter, we will
+explore,” repeat predictable three-item lists, place a heading every two
+paragraphs, summarize what the reader just read, narrate every disclaimer, give
+each source its own paragraph, or make the conclusion repeat the introduction.
+
+Keep the evidence architecture beneath the reading layer. Natural narrative
+sentences still map to exact grounded claims; small evidence markers resolve to
+source receipts and verified locations; concise uncertainty statements retain
+their complete limitations records; quotations remain verbatim; and synthesis
+remains bound to the claim audit and provenance hashes.
+
+Use ASD-STE100-inspired clarity only for definitions, instructions, interface
+copy, summaries, and technical procedures. Do not make controlled technical
+prose the chapters' main voice and do not claim ASD-STE100 compliance.
 
 ## Preservation Standard
 
@@ -178,8 +251,9 @@ The edition must:
 - Keep contradictions, counterevidence, limitations, falsification conditions,
   and deliberately unresolved questions visible.
 - Give every chapter a distinct job and create honest transitions.
-- Keep internal provenance identifiers out of reader-facing prose when their
-  display is not necessary, while retaining them in the claim mapping.
+- Keep internal provenance identifiers out of visible reader prose except for
+  required `[Evidence: ...]` markers; the reader replaces those markers with
+  numbered citations.
 
 Map every required inventory claim to an exact edition excerpt and location.
 Do not hide an omitted claim by mapping it to unrelated prose.

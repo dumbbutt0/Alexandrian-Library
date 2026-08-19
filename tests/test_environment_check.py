@@ -32,10 +32,13 @@ class EnvironmentCheckTests(unittest.TestCase):
             ".codex/config.example.toml": "",
             "backend_selector.py": "",
             "workflow_service.py": "",
+            "transition_runtime.py": "",
             "frontend_server.py": "",
             "frontend/index.html": "",
             "frontend/styles.css": "",
             "frontend/app.js": "",
+            "citation_grounding.py": "",
+            "source_document.py": "",
         }
         for relative_path, content in files.items():
             path = self.project_path / relative_path
@@ -73,7 +76,11 @@ class EnvironmentCheckTests(unittest.TestCase):
         )
 
     def collect_with_programs(self, programs: dict[str, str | None]) -> list:
-        versions = {"mcp": "1.27.2", "pydantic": "2.13.3"}
+        versions = {
+            "mcp": "1.27.2",
+            "pydantic": "2.13.3",
+            "pypdf": "6.14.2",
+        }
 
         def which(program: str) -> str | None:
             return programs.get(program)
@@ -187,7 +194,11 @@ class EnvironmentCheckTests(unittest.TestCase):
         )
 
     def test_dependency_check_accepts_declared_lower_bounds(self) -> None:
-        versions = {"mcp": "1.27.0", "pydantic": "2.0.0"}
+        versions = {
+            "mcp": "1.27.0",
+            "pydantic": "2.0.0",
+            "pypdf": "5.0.0",
+        }
 
         with (
             patch.object(
@@ -212,7 +223,7 @@ class EnvironmentCheckTests(unittest.TestCase):
         ]
         self.assertEqual(
             [result.status for result in dependency_results],
-            ["available", "available"],
+            ["available", "available", "available"],
         )
 
     def test_minimum_python_grammar_rejects_python_311_syntax(

@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://alexandrian.local/schemas/evidence-locator.v1.schema.json",
+  "title": "Alexandrian Evidence Locator V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "locator_id",
+    "receipt_id",
+    "source_document_sha256",
+    "block_id",
+    "block_type",
+    "heading_path",
+    "page_number",
+    "character_start",
+    "character_end",
+    "exact_quote",
+    "exact_quote_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "locator_id": {
+      "type": "string",
+      "pattern": "^locator-[0-9a-f]{24}$"
+    },
+    "receipt_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$"
+    },
+    "source_document_sha256": {"$ref": "#/$defs/sha256"},
+    "block_id": {"type": "string", "pattern": "^B[0-9]{6}$"},
+    "block_type": {"type": "string", "minLength": 1},
+    "heading_path": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "page_number": {
+      "anyOf": [
+        {"type": "integer", "minimum": 1},
+        {"type": "null"}
+      ]
+    },
+    "character_start": {"type": "integer", "minimum": 0},
+    "character_end": {"type": "integer", "minimum": 1},
+    "exact_quote": {"type": "string", "minLength": 1, "maxLength": 4000},
+    "exact_quote_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

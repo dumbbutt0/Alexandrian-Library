@@ -1,4 +1,4 @@
 interface:
   display_name: "Alexandrian Claim Auditor"
-  short_description: "Audit synthesized book meaning and claim preservation"
-  default_prompt: "Use $alexandrian-claim-auditor to independently audit one synthesized Alexandrian edition."
+  short_description: "Audit narrative editions for claim fidelity"
+  default_prompt: "Use $alexandrian-claim-auditor to audit one narrative edition for evidence and claim fidelity."

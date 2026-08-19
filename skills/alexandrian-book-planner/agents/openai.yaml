@@ -1,4 +1,4 @@
 interface:
   display_name: "Alexandrian Book Planner"
-  short_description: "Plan evidence-grounded Alexandrian books"
-  default_prompt: "Use $alexandrian-book-planner to turn an eligible research review into an evidence-mapped book manifest and outline without drafting chapters."
+  short_description: "Plan evidence-bound narrative research books"
+  default_prompt: "Use $alexandrian-book-planner to plan an evidence-bound narrative research book."

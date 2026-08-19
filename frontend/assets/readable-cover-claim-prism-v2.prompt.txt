@@ -1,0 +1,14 @@
+Use case: stylized-concept
+Asset type: portrait book-cover artwork for a digital 3D library UI
+Input images: recent user references and generated images establish the forbidden-archive mood only; do not reuse the Archive Sentinel eye or hands, and do not copy any supplied composition, wording, or recognizable artwork.
+Primary request: Create an entirely original cover image for "Readable Without Overclaiming", a research book about improving accessibility while preserving evidential scope, attribution, uncertainty, and claim strength.
+Scene/backdrop: a near-black editorial evidence chamber rendered as flat 2:3 cover art, not a book mockup.
+Subject: a tall luminous sentence-like ribbon made only of abstract marks passes through a precision instrument resembling a brass prism and a balance scale. On entry the ribbon is dense and tangled; on exit it becomes clear and spacious, but every colored evidence thread remains continuous and none is cut. Surround it with restrained claim brackets, provenance threads, measuring marks, torn archival paper, and small stained-glass fragments. The metaphor must communicate clarity without loss or inflation.
+Style/medium: original fusion of anatomical/scientific engraving, 1970s editorial collage, xerox halftone, illuminated manuscript geometry, stained-glass accents, and archival design. Intellectual, severe, and beautiful rather than corporate or generic.
+Composition/framing: vertical 2:3; central brass prism-scale instrument; strong silhouette at thumbnail size; quiet dark areas near top and bottom for live HTML title and edition typography.
+Lighting/mood: careful examination, protected meaning, warm intelligence, forbidden editorial laboratory.
+Color palette: carbon black, bone white, parchment cream, brass gold, cobalt blue, restrained crimson and cyan.
+Materials/textures: etched brass, torn vellum, ink rub, fine graph paper, oxidized foil, subtle CRT grain.
+Constraints: no eye, no hands, no human figure, no readable words, letters, numbers, quotes, logos, watermark, crosses, recognizable existing artwork, generic fantasy imagery, or embedded title. Do not depict evidence threads being cut, discarded, or simplified away.
+
+Generation mode: built-in image generation tool.

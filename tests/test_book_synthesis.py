@@ -6,6 +6,7 @@ from copy import deepcopy
 from pathlib import Path
 
 import book_synthesis
+import mcp_server
 
 
 class BookSynthesisTests(unittest.TestCase):
@@ -346,6 +347,83 @@ class BookSynthesisTests(unittest.TestCase):
                 "Third attempt",
             )
 
+    def test_targeted_second_attempt_patches_only_exact_blocking_excerpt(
+        self,
+    ) -> None:
+        self.initialize()
+        _, first = self.save_attempt(1)
+        self.audit(1, first, "strengthened")
+        packet = book_synthesis.targeted_correction_packet(
+            self.project_path,
+            self.book_id,
+        )
+
+        self.assertIsNotNone(packet)
+        assert packet is not None
+        target = packet["targets"][0]
+        second = book_synthesis.save_targeted_correction(
+            self.project_path,
+            {
+                "book_id": self.book_id,
+                "context_sha256": packet["context_sha256"],
+                "inventory_sha256": packet["inventory_sha256"],
+                "plan_sha256": packet["plan_sha256"],
+                "correction_audit_sha256": packet[
+                    "correction_audit_sha256"
+                ],
+                "packet_sha256": packet["packet_sha256"],
+                "patches": [
+                    {
+                        "claim_id": target["claim_id"],
+                        "target_excerpt": target["target_excerpt"],
+                        "replacement_text": (
+                            "Within the approved boundary, "
+                            + target["authoritative_excerpt"]
+                        ),
+                        "edition_location": "Synthesized paragraph 1",
+                    }
+                ],
+                "change_summary": ["Restored the bounded claim."],
+            },
+        )
+
+        corrected_text = (
+            self.book_directory
+            / "synthesis"
+            / "attempts"
+            / "S2"
+            / "book.md"
+        ).read_text(encoding="utf-8")
+        self.assertEqual(second["correction_mode"], "targeted_excerpt_patch")
+        self.assertIn("Within the approved boundary", corrected_text)
+        self.assertIn("A local implementation remains untested.", corrected_text)
+
+    def test_targeted_second_attempt_input_omits_complete_books(self) -> None:
+        self.initialize()
+        _, first = self.save_attempt(1)
+        self.audit(1, first, "strengthened")
+
+        original_project_path = mcp_server.PROJECT_PATH
+        try:
+            mcp_server.PROJECT_PATH = self.project_path
+            result = mcp_server.read_book_synthesis_attempt_input(
+                self.book_id,
+                2,
+            )
+        finally:
+            mcp_server.PROJECT_PATH = original_project_path
+
+        self.assertEqual(
+            result["transition_contract"]["required_tool"],
+            "save_book_synthesis_correction",
+        )
+        self.assertEqual(
+            result["correction_packet"]["mode"],
+            "targeted_excerpt_patch",
+        )
+        self.assertNotIn("candidate_markdown", result)
+        self.assertNotIn("prior_book_markdown", result)
+
     def test_second_blocking_audit_holds_the_cycle(self) -> None:
         self.initialize()
         _, first = self.save_attempt(1)
@@ -552,6 +630,74 @@ class BookSynthesisTests(unittest.TestCase):
             book_synthesis.workflow_state(self.project_path, self.book_id),
             "ready_for_editorial",
         )
+
+    def test_streamlined_foundation_derives_bookkeeping_without_provider_calls(self) -> None:
+        result = book_synthesis.initialize_streamlined_synthesis(
+            self.project_path,
+            self.book_id,
+            self.candidate,
+            self.profile_path,
+            reason="Use one editorial pass and one global audit.",
+            authorized_by="human_editor",
+        )
+        context, inventory, plan = book_synthesis.load_initialized_synthesis(
+            self.project_path,
+            self.book_id,
+        )
+
+        self.assertEqual(result["status"], "streamlined_foundation_installed")
+        self.assertEqual(
+            context["protocol_version"],
+            book_synthesis.STREAMLINED_PROTOCOL,
+        )
+        self.assertEqual(
+            [claim["claim_id"] for claim in inventory["claims"]],
+            ["review-synthesis-test:C1"],
+        )
+        self.assertEqual(
+            plan["protected_claim_ids"],
+            ["review-synthesis-test:C1"],
+        )
+        self.assertEqual(
+            book_synthesis.workflow_state(self.project_path, self.book_id),
+            "synthesis_required",
+        )
+        self.assertTrue(
+            (self.book_directory / "synthesis" / "streamlined_foundation.json").is_file()
+        )
+
+    def test_streamlined_foundation_inventories_inline_evidence_claims(self) -> None:
+        self.candidate_text += (
+            "\nA checked observation remains narrow. [Evidence: SRC1]\n"
+        )
+        self.candidate_path.write_text(self.candidate_text, encoding="utf-8")
+        self.candidate["candidate_sha256"] = self.sha256(self.candidate_path)
+        self.write_json(
+            self.book_directory / "candidate_assembly.json",
+            self.candidate,
+        )
+
+        book_synthesis.initialize_streamlined_synthesis(
+            self.project_path,
+            self.book_id,
+            self.candidate,
+            self.profile_path,
+            reason="Preserve accepted evidence relationships.",
+            authorized_by="human_editor",
+        )
+        _, inventory, plan = book_synthesis.load_initialized_synthesis(
+            self.project_path,
+            self.book_id,
+        )
+
+        evidence_claim = inventory["claims"][1]
+        self.assertEqual(evidence_claim["claim_id"], "SC1")
+        self.assertEqual(evidence_claim["evidence_receipt_ids"], ["SRC1"])
+        self.assertIn("[Evidence: SRC1]", evidence_claim["candidate_excerpt"])
+        self.assertEqual(plan["protected_claim_ids"], [
+            "review-synthesis-test:C1",
+            "SC1",
+        ])
 
     def test_tampered_selected_edition_invalidates_receipt(self) -> None:
         self.initialize()

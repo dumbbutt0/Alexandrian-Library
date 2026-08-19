@@ -28,11 +28,12 @@ BLOCKING_CLAIM_STATUSES = {
     "contradicted",
     "meaning_changed",
 }
-PROFILE_NAME = "Proposed Alexandrian accessibility profile"
-PROFILE_VERSION = "unversioned"
+PROFILE_NAME = "Alexandrian Narrative Research Book"
+PROFILE_VERSION = "1.0"
 MAX_ATTEMPTS = 2
 AUDITED_PLAN_PROTOCOL = "audited-plan-v2"
 SHARDED_PLAN_PROTOCOL = "chapter-sharded-plan-v1"
+STREAMLINED_PROTOCOL = "streamlined-whole-book-v1"
 DEFAULT_SYNTHESIS_PROTOCOL = SHARDED_PLAN_PROTOCOL
 AUDITED_PLAN_PROTOCOLS = {
     AUDITED_PLAN_PROTOCOL,
@@ -621,6 +622,8 @@ def authorize_fresh_synthesis_cycle(
     book_id: str,
     reason: str,
     human_decision_artifacts: list[dict] | None = None,
+    *,
+    protocol_version: str = AUDITED_PLAN_PROTOCOL,
 ) -> dict:
     """Authorize cycle 002 while preserving the terminal held cycle 001."""
     project_path = project_path.resolve()
@@ -684,7 +687,7 @@ def authorize_fresh_synthesis_cycle(
         "schema_version": "1.0",
         "book_id": book_id,
         "cycle_id": "cycle-002",
-        "protocol_version": AUDITED_PLAN_PROTOCOL,
+        "protocol_version": protocol_version,
         "candidate_path": str(candidate_path.relative_to(project_path)),
         "candidate_sha256": receipt["candidate_sha256"],
         "prior_cycle_id": "cycle-001",
@@ -712,7 +715,10 @@ def authorize_fresh_synthesis_cycle(
         "cycles": [
             {
                 "cycle_id": "cycle-001",
-                "protocol_version": "staged-v1",
+                "protocol_version": receipt.get(
+                    "protocol_version",
+                    "staged-v1",
+                ),
                 "root_path": str(legacy_root.relative_to(project_path)),
                 "terminal_status": "synthesis_held",
                 "terminal_receipt_path": str(
@@ -722,7 +728,7 @@ def authorize_fresh_synthesis_cycle(
             },
             {
                 "cycle_id": "cycle-002",
-                "protocol_version": AUDITED_PLAN_PROTOCOL,
+                "protocol_version": protocol_version,
                 "root_path": str(cycle_two_root.relative_to(project_path)),
                 "authorization_path": str(
                     authorization_path.relative_to(project_path)
@@ -3078,6 +3084,276 @@ def build_context(
     return context
 
 
+def _streamlined_candidate_excerpt(
+    candidate_text: str,
+    claim_text: str,
+) -> tuple[str, str]:
+    """Select one deterministic, semantically nearby candidate excerpt."""
+    if claim_text in candidate_text:
+        offset = candidate_text.index(claim_text)
+        return claim_text, f"Candidate line {candidate_text[:offset].count(chr(10)) + 1}"
+
+    claim_terms = {
+        term
+        for term in re.findall(r"[a-z0-9]+", claim_text.lower())
+        if len(term) >= 4
+    }
+    candidates: list[tuple[int, int, str]] = []
+    cursor = 0
+    for raw_block in candidate_text.split("\n\n"):
+        offset = candidate_text.find(raw_block, cursor)
+        cursor = max(cursor, offset + len(raw_block))
+        block = raw_block.strip()
+        if (
+            not block
+            or block.startswith("#")
+            or block == "---"
+            or block.startswith("Book mode:")
+        ):
+            continue
+        block_terms = set(re.findall(r"[a-z0-9]+", block.lower()))
+        candidates.append((len(claim_terms & block_terms), offset, block))
+    if not candidates:
+        raise BookSynthesisError("Candidate has no prose for claim mapping.")
+    _, offset, excerpt = max(candidates, key=lambda item: (item[0], -item[1]))
+    if len(excerpt) > 520:
+        excerpt = excerpt[:520]
+        if " " in excerpt:
+            excerpt = excerpt.rsplit(" ", 1)[0]
+    return excerpt, f"Candidate line {candidate_text[:offset].count(chr(10)) + 1}"
+
+
+def _streamlined_evidence_claims(
+    candidate_text: str,
+    allowed_receipts: list[str],
+) -> list[dict]:
+    """Inventory every candidate paragraph with an inline evidence binding."""
+    allowed = set(allowed_receipts)
+    claims = []
+    cursor = 0
+    for raw_block in candidate_text.split("\n\n"):
+        offset = candidate_text.find(raw_block, cursor)
+        cursor = max(cursor, offset + len(raw_block))
+        block = raw_block.strip()
+        receipt_ids = list(
+            dict.fromkeys(
+                re.findall(r"\[Evidence: ([A-Za-z0-9._-]+)\]", block)
+            )
+        )
+        if not receipt_ids:
+            continue
+        unknown = sorted(set(receipt_ids) - allowed)
+        if unknown:
+            raise BookSynthesisError(
+                "Candidate evidence markers are not admitted by the assembly: "
+                + ", ".join(unknown)
+            )
+        claims.append(
+            {
+                "claim_id": f"SC{len(claims) + 1}",
+                "source_kind": "candidate_only",
+                "statement": block,
+                "candidate_excerpt": block,
+                "candidate_location": (
+                    f"Candidate line {candidate_text[:offset].count(chr(10)) + 1}"
+                ),
+                "certainty": "bounded_by_accepted_chapter",
+                "scope_and_conditions": (
+                    "Preserve this material claim and every same-paragraph "
+                    "evidence receipt relationship."
+                ),
+                "evidence_receipt_ids": receipt_ids,
+                "required_in_edition": True,
+                "importance_reason": (
+                    "The accepted candidate binds this material claim to "
+                    "durable evidence receipts."
+                ),
+            }
+        )
+    return claims
+
+
+def initialize_streamlined_synthesis(
+    project_path: Path,
+    book_id: str,
+    candidate: dict,
+    profile_path: Path,
+    *,
+    reason: str,
+    authorized_by: str,
+) -> dict:
+    """Install a deterministic foundation for one edit and one global audit."""
+    if not isinstance(reason, str) or not reason.strip():
+        raise BookSynthesisError("Streamlined synthesis needs a concrete reason.")
+    if not isinstance(authorized_by, str) or not authorized_by.strip():
+        raise BookSynthesisError("Streamlined synthesis needs decision authority.")
+    project_path = project_path.resolve()
+    directory = synthesis_directory(project_path, book_id)
+    if directory.exists():
+        context, inventory, plan = load_initialized_synthesis(
+            project_path,
+            book_id,
+        )
+        if context.get("protocol_version") != STREAMLINED_PROTOCOL:
+            raise BookSynthesisError("A different synthesis foundation already exists.")
+        return {
+            "book_id": book_id,
+            "status": "streamlined_foundation_exists",
+            "context_sha256": context["context_sha256"],
+            "inventory_sha256": inventory["inventory_sha256"],
+            "plan_sha256": plan["plan_sha256"],
+        }
+
+    context = build_context(
+        project_path,
+        book_id,
+        candidate,
+        profile_path,
+        protocol_version=STREAMLINED_PROTOCOL,
+    )
+    if context.get("protocol_version") != STREAMLINED_PROTOCOL:
+        raise BookSynthesisError(
+            "An earlier cycle authorization prevents streamlined synthesis."
+        )
+    candidate_path = resolve_project_path(
+        project_path,
+        context["candidate_path"],
+        "Candidate book",
+    )
+    candidate_text = candidate_path.read_text(encoding="utf-8")
+    claims = []
+    for canonical in context["required_claims"]:
+        excerpt, location = _streamlined_candidate_excerpt(
+            candidate_text,
+            canonical["claim"],
+        )
+        claims.append(
+            {
+                "claim_id": canonical["claim_id"],
+                "source_kind": "canonical",
+                "statement": canonical["claim"],
+                "candidate_excerpt": excerpt,
+                "candidate_location": location,
+                "certainty": str(canonical.get("status") or "bounded"),
+                "scope_and_conditions": str(
+                    canonical.get("next_verification")
+                    or "Preserve the approved research-review scope."
+                ),
+                "evidence_receipt_ids": canonical.get(
+                    "source_receipt_ids",
+                    [],
+                ),
+                "required_in_edition": True,
+                "importance_reason": (
+                    "Required by the approved book manifest and review."
+                ),
+            }
+        )
+    claims.extend(
+        _streamlined_evidence_claims(
+            candidate_text,
+            context["source_receipt_ids"],
+        )
+    )
+    inventory = {
+        "book_id": book_id,
+        "context_sha256": context["context_sha256"],
+        "candidate_sha256": context["candidate_sha256"],
+        "central_question": context["central_question"],
+        "curiosity_signature": context["curiosity_signature"],
+        "claims": claims,
+        "definitions": [],
+        "contradictions": context["contradictions"],
+        "limitations": list(context["prohibited_overinterpretations"]),
+        "unresolved_questions": [
+            item.get("text", "").strip()
+            for item in context["curiosity_signature"].get(
+                "questions_that_must_remain_open",
+                [],
+            )
+            if isinstance(item, dict) and item.get("text", "").strip()
+        ],
+    }
+    protected_claim_ids = [claim["claim_id"] for claim in claims]
+    plan = {
+        "book_id": book_id,
+        "context_sha256": context["context_sha256"],
+        "candidate_sha256": context["candidate_sha256"],
+        "profile": context["profile"],
+        "central_answer": (
+            context.get("provisional_thesis")
+            if isinstance(context.get("provisional_thesis"), str)
+            and context["provisional_thesis"].strip()
+            else (
+                "Preserve and clarify the candidate's bounded answer to its "
+                "central question without adding research conclusions."
+            )
+        ),
+        "chapter_jobs": [
+            {
+                "chapter_id": chapter.get("chapter_id"),
+                "job": "Preserve the accepted chapter while improving whole-book flow.",
+            }
+            for chapter in read_json_object(
+                resolve_project_path(
+                    project_path,
+                    context["manifest_path"],
+                    "Book manifest",
+                ),
+                "Book manifest",
+            ).get("chapter_plan", [])
+            if isinstance(chapter, dict)
+            and chapter.get("material_disposition") in {"include", "appendix"}
+        ],
+        "operations": [
+            {
+                "operation_id": "OP1",
+                "kind": "transition",
+                "target": "WHOLE_BOOK",
+                "description": (
+                    "Improve transitions, remove declining-information repetition, "
+                    "and preserve every accepted chapter claim and limitation."
+                ),
+                "protected_claim_ids": protected_claim_ids,
+            }
+        ],
+        "terminology": [],
+        "protected_claim_ids": protected_claim_ids,
+    }
+    foundation = initialize_synthesis(
+        project_path,
+        context,
+        inventory,
+        plan,
+    )
+    receipt = {
+        "schema_version": "1.0",
+        "book_id": book_id,
+        "protocol_version": STREAMLINED_PROTOCOL,
+        "candidate_sha256": context["candidate_sha256"],
+        "context_sha256": foundation["context_sha256"],
+        "inventory_sha256": foundation["inventory_sha256"],
+        "plan_sha256": foundation["plan_sha256"],
+        "reason": reason.strip(),
+        "authorized_by": authorized_by.strip(),
+        "installed_at": current_utc_time(),
+    }
+    receipt["receipt_sha256"] = canonical_json_sha256(
+        receipt,
+        "receipt_sha256",
+    )
+    atomic_write_json(directory / "streamlined_foundation.json", receipt)
+    return {
+        **foundation,
+        "status": "streamlined_foundation_installed",
+        "protocol_version": STREAMLINED_PROTOCOL,
+        "receipt_path": str(
+            (directory / "streamlined_foundation.json").relative_to(project_path)
+        ),
+        "receipt_sha256": receipt["receipt_sha256"],
+    }
+
+
 def _validate_inventory(
     inventory: dict,
     context: dict,
@@ -3688,6 +3964,230 @@ def load_attempt(
     ):
         raise BookSynthesisError("Synthesis attempt hash does not match.")
     return book_path, submission
+
+
+def targeted_correction_packet(
+    project_path: Path,
+    book_id: str,
+) -> dict | None:
+    """Build a bounded S2 packet when every blocker has an exact text target."""
+    project_path = project_path.resolve()
+    context, inventory, plan = load_initialized_synthesis(
+        project_path,
+        book_id,
+    )
+    first_book_path, first_submission = load_attempt(
+        project_path,
+        book_id,
+        1,
+    )
+    first_audit = read_json_object(
+        attempt_directory(project_path, book_id, 1) / "audit.json",
+        "First synthesis audit",
+    )
+    if first_audit.get("overall_status") != "blocking":
+        return None
+    blockers = first_audit.get("computed_blockers")
+    if not isinstance(blockers, list) or not blockers:
+        return None
+    claim_results = {
+        result.get("claim_id"): result
+        for result in first_audit.get("claim_results", [])
+        if isinstance(result, dict) and isinstance(result.get("claim_id"), str)
+    }
+    inventory_by_id = {
+        claim["claim_id"]: claim for claim in inventory["claims"]
+    }
+    target_ids: list[str] = []
+    for blocker in blockers:
+        if not isinstance(blocker, str) or ":" not in blocker:
+            return None
+        claim_id, status = blocker.rsplit(":", 1)
+        if status not in BLOCKING_CLAIM_STATUSES - {"omitted"}:
+            return None
+        if claim_id in target_ids:
+            continue
+        result = claim_results.get(claim_id)
+        if (
+            result is None
+            or result.get("status") != status
+            or not isinstance(result.get("edition_excerpt"), str)
+            or not result["edition_excerpt"].strip()
+            or claim_id not in inventory_by_id
+        ):
+            return None
+        target_ids.append(claim_id)
+    prior_markdown = first_book_path.read_text(encoding="utf-8")
+    targets = []
+    seen_excerpts: set[str] = set()
+    for claim_id in target_ids:
+        result = claim_results[claim_id]
+        target_excerpt = result["edition_excerpt"]
+        if (
+            target_excerpt in seen_excerpts
+            or prior_markdown.count(target_excerpt) != 1
+        ):
+            return None
+        seen_excerpts.add(target_excerpt)
+        offset = prior_markdown.index(target_excerpt)
+        start = max(0, offset - 360)
+        end = min(
+            len(prior_markdown),
+            offset + len(target_excerpt) + 360,
+        )
+        targets.append(
+            {
+                "claim_id": claim_id,
+                "blocking_status": result["status"],
+                "target_excerpt": target_excerpt,
+                "authoritative_excerpt": inventory_by_id[claim_id][
+                    "candidate_excerpt"
+                ],
+                "audit_explanation": result["explanation"],
+                "context_before": prior_markdown[start:offset],
+                "context_after": prior_markdown[
+                    offset + len(target_excerpt):end
+                ],
+            }
+        )
+    packet = {
+        "schema_version": "1.0",
+        "mode": "targeted_excerpt_patch",
+        "book_id": book_id,
+        "context_sha256": context["context_sha256"],
+        "inventory_sha256": inventory["inventory_sha256"],
+        "plan_sha256": plan["plan_sha256"],
+        "prior_submission_sha256": first_submission["submission_sha256"],
+        "prior_book_sha256": first_submission["book_sha256"],
+        "correction_audit_sha256": first_audit["audit_sha256"],
+        "targets": targets,
+    }
+    packet["packet_sha256"] = canonical_json_sha256(
+        packet,
+        "packet_sha256",
+    )
+    return packet
+
+
+def save_targeted_correction(
+    project_path: Path,
+    submission: dict,
+    citation_validator: Callable[[str, list[dict], list[dict]], dict]
+    | None = None,
+) -> dict:
+    """Apply verified S2 excerpt replacements and install the assembled book."""
+    project_path = project_path.resolve()
+    book_id = submission.get("book_id")
+    if not isinstance(book_id, str):
+        raise BookSynthesisError("Targeted correction identity is invalid.")
+    packet = targeted_correction_packet(project_path, book_id)
+    if packet is None:
+        raise BookSynthesisError(
+            "This blocking audit requires a complete S2 correction."
+        )
+    for field in (
+        "context_sha256",
+        "inventory_sha256",
+        "plan_sha256",
+        "correction_audit_sha256",
+        "packet_sha256",
+    ):
+        if submission.get(field) != packet[field]:
+            raise BookSynthesisError("Targeted correction foundation is stale.")
+    patches = submission.get("patches")
+    expected_ids = [target["claim_id"] for target in packet["targets"]]
+    if (
+        not isinstance(patches, list)
+        or [patch.get("claim_id") for patch in patches] != expected_ids
+    ):
+        raise BookSynthesisError(
+            "Targeted correction must patch every blocking claim in order."
+        )
+    first_book_path, first_submission = load_attempt(
+        project_path,
+        book_id,
+        1,
+    )
+    markdown = first_book_path.read_text(encoding="utf-8")
+    corrected_mappings: dict[str, dict] = {}
+    patch_receipts = []
+    for target, patch in zip(packet["targets"], patches, strict=True):
+        if (
+            not isinstance(patch, dict)
+            or patch.get("target_excerpt") != target["target_excerpt"]
+            or not isinstance(patch.get("replacement_text"), str)
+            or not patch["replacement_text"].strip()
+            or target["authoritative_excerpt"]
+            not in patch["replacement_text"]
+            or not isinstance(patch.get("edition_location"), str)
+            or not patch["edition_location"].strip()
+            or markdown.count(target["target_excerpt"]) != 1
+        ):
+            raise BookSynthesisError("Targeted correction patch is invalid.")
+        markdown = markdown.replace(
+            target["target_excerpt"],
+            patch["replacement_text"],
+            1,
+        )
+        corrected_mappings[target["claim_id"]] = {
+            "claim_id": target["claim_id"],
+            "edition_excerpt": target["authoritative_excerpt"],
+            "edition_location": patch["edition_location"],
+        }
+        patch_receipts.append(
+            {
+                "claim_id": target["claim_id"],
+                "target_sha256": hashlib.sha256(
+                    target["target_excerpt"].encode("utf-8")
+                ).hexdigest(),
+                "replacement_sha256": hashlib.sha256(
+                    patch["replacement_text"].encode("utf-8")
+                ).hexdigest(),
+            }
+        )
+    mappings = []
+    for mapping in first_submission["claim_mappings"]:
+        selected = corrected_mappings.get(mapping["claim_id"], mapping)
+        if selected["edition_excerpt"] not in markdown:
+            raise BookSynthesisError(
+                "Targeted correction changed an unaffected claim mapping."
+            )
+        mappings.append(selected)
+    summaries = submission.get("change_summary")
+    if not isinstance(summaries, list) or any(
+        not isinstance(value, str) or not value.strip() for value in summaries
+    ):
+        raise BookSynthesisError(
+            "Targeted correction change summary is invalid."
+        )
+    _, inventory, _ = load_initialized_synthesis(project_path, book_id)
+    citation_contract = (
+        None
+        if citation_validator is None
+        else citation_validator(markdown, inventory.get("claims", []), mappings)
+    )
+    attempt_submission = {
+        "book_id": book_id,
+        "attempt": 2,
+        "context_sha256": packet["context_sha256"],
+        "inventory_sha256": packet["inventory_sha256"],
+        "plan_sha256": packet["plan_sha256"],
+        "correction_audit_sha256": packet[
+            "correction_audit_sha256"
+        ],
+        "claim_mappings": mappings,
+        "change_summary": summaries,
+        "correction_mode": "targeted_excerpt_patch",
+        "correction_packet_sha256": packet["packet_sha256"],
+        "patch_receipts": patch_receipts,
+    }
+    if citation_contract is not None:
+        attempt_submission["citation_contract"] = citation_contract
+    return save_attempt(
+        project_path,
+        attempt_submission,
+        markdown,
+    )
 
 
 def _audit_blockers(audit: dict, inventory: dict) -> list[str]:

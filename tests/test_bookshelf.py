@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import bookshelf
+import cover_design
 
 
 class BookshelfTests(unittest.TestCase):
@@ -81,7 +82,11 @@ class BookshelfTests(unittest.TestCase):
         book_directory.mkdir(parents=True)
         book_path = book_directory / "book.md"
         book_path.write_text(
-            "# A Final Test Book\n\nThe final content.\n",
+            (
+                "# A Final Test Book\n\n"
+                "The final content remains exact, readable, and available for "
+                "cover verification.\n"
+            ),
             encoding="utf-8",
         )
         candidate_path = book_directory / "candidate.md"
@@ -213,6 +218,14 @@ class BookshelfTests(unittest.TestCase):
         self.assertEqual(book["artifact_status"], "final")
         self.assertEqual(book["shelf_status"], "internal_smoke_test")
         self.assertEqual(book["edition"], 1)
+        self.assertEqual(book["cover"]["asset_status"], "fallback")
+        self.assertEqual(
+            book["cover"]["asset_url"],
+            "/api/v1/books/book-test/cover",
+        )
+        self.assertIn(book["cover"]["quote"], (
+            self.books_path / "book-test" / "book.md"
+        ).read_text(encoding="utf-8"))
         self.assertEqual(
             [chapter["chapter_id"] for chapter in book["chapters"]],
             ["CH1", "CH2"],
@@ -224,6 +237,37 @@ class BookshelfTests(unittest.TestCase):
         self.assertIn(
             "A Final Test Book",
             result["index_path"].read_text(encoding="utf-8"),
+        )
+
+    def test_generated_cover_binding_flows_into_catalog_projection(self) -> None:
+        self.create_final_book()
+        cover_design.create_default_design(
+            self.project_path,
+            "book-test",
+            designer_host="workflow-test",
+        )
+        generated = self.project_path / "generated-cover.png"
+        generated.write_bytes(b"generated-cover-raster")
+
+        design = cover_design.bind_generated_asset(
+            self.project_path,
+            "book-test",
+            generated,
+            generated_by="workflow-test",
+        )
+        result = self.build()
+        catalog = json.loads(
+            result["catalog_path"].read_text(encoding="utf-8")
+        )
+        projected = catalog["books"][0]["cover"]
+
+        self.assertEqual(projected["design_sha256"], design["design_sha256"])
+        self.assertEqual(projected["asset_status"], "generated")
+        self.assertEqual(projected["asset_mime_type"], "image/png")
+        self.assertEqual(projected["asset_sha256"], design["asset"]["sha256"])
+        self.assertEqual(
+            projected["asset_url"],
+            "/api/v1/books/book-test/cover",
         )
 
     def test_candidate_without_final_assembly_is_not_shelved(self) -> None:

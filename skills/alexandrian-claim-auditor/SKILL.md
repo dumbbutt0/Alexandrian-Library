@@ -1,6 +1,6 @@
 ---
 name: alexandrian-claim-auditor
-description: Independently compare one immutable Alexandrian candidate and preservation inventory with one synthesized edition, classify every material claim transformation, and submit exactly one hash-bound pass or blocking audit without editing the book.
+description: Independently compare one immutable Alexandrian candidate and preservation inventory with a synthesized narrative-research edition, classify every material claim transformation and evidence-layer regression, and submit exactly one hash-bound pass or blocking audit without editing the book.
 ---
 
 # Alexandrian Claim Auditor
@@ -13,6 +13,13 @@ This audit does not prove that claims are true. Earlier research review governs
 evidential validity. The audit determines whether synthesis changed what the
 candidate says, how confidently it says it, or what evidence and limitations
 qualify it.
+
+Treat the inline citation contract as part of the evidence relationship. Every
+inventoried claim with `evidence_receipt_ids` must retain an exact
+`[Evidence: receipt-id]` marker in the same paragraph as its mapped edition
+excerpt. A claim with `resolution_status: contradicted` must remain inside a
+visible `> [!CONTRADICTION]` block. Do not accept a citation attached to a
+different paragraph, an unknown receipt, or a flattened contradiction.
 
 ## Independence and Input Boundary
 
@@ -89,9 +96,22 @@ Also identify:
 - terminology drift
 - changes to the central question
 - distortion of the curiosity signature
+- narrative compression that merges separately qualified claims into one
+  smoother but less inspectable assertion
+- an analogy, hook, pull quote, diagram label, or transitional sentence that
+  introduces a factual claim without candidate authority
+- a quotation presented as verbatim when the preserved source passage does not
+  match it
 
 Any such finding is blocking. Do not overlook a problem merely because the
 edition is smoother or more persuasive.
+
+The Alexandrian Narrative Research Book standard changes the reading layer,
+not the evidence threshold. Permit varied rhythm, literary transitions,
+concrete examples, hooks, and bounded synthesis when every material statement
+still maps to its exact claim, authority, limitations, and provenance. Do not
+require citations to dominate the prose, but require the unobtrusive marker and
+verified locator contract to remain complete underneath it.
 
 ## Outcome
 

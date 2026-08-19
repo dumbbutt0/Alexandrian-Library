@@ -205,12 +205,19 @@ def load_completed_chapter(
         or not isinstance(final_draft.get("draft_id"), str)
     ):
         raise BookAssemblyError(f"{chapter_id} final draft is invalid.")
-    human_draft_acceptance = (
+    assessed_draft_acceptance = (
         run.get("completion_authority_kind")
-        == "human_draft_acceptance"
+        in {
+            "human_draft_acceptance",
+            "auto_deferred_draft_acceptance",
+        }
+    )
+    performance_completion = (
+        run.get("workflow_runtime_version") == "performance-v2"
     )
     if (
-        not human_draft_acceptance
+        not assessed_draft_acceptance
+        and not performance_completion
         and (
             run.get("final_pass_requested") is not True
             or run.get("final_pass_source_draft_id")
@@ -271,7 +278,7 @@ def load_completed_chapter(
     completion_authority_file_sha256 = None
     completion_human_input_path = None
     completion_human_input_file_sha256 = None
-    if human_draft_acceptance:
+    if assessed_draft_acceptance:
         completion_authority_path = resolve_project_file(
             project_path,
             run.get("completion_authority_path"),
@@ -362,7 +369,7 @@ def load_completed_chapter(
             assessment.get("outcome")
             != (
                 "human_input_required"
-                if human_draft_acceptance
+                if assessed_draft_acceptance
                 else "chapter_complete"
             )
         )

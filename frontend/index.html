@@ -7,7 +7,7 @@
   <title>The Library — Inquirion Labs</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
-<body>
+<body data-active-route="library">
   <div class="ambient ambient-one" aria-hidden="true"></div>
   <div class="ambient ambient-two" aria-hidden="true"></div>
 
@@ -54,12 +54,48 @@
           </aside>
 
           <div class="shelf-room" aria-label="Interactive three-dimensional bookshelf">
+            <div class="vault-atmosphere" aria-hidden="true">
+              <span class="vault-glyph glyph-one">OBSERVE / PRESERVE</span>
+              <span class="vault-glyph glyph-two">DO NOT ERASE THE BRANCH</span>
+              <span class="vault-glyph glyph-three">ASK WHAT THE EVIDENCE ALLOWS</span>
+            </div>
             <div class="room-arch" aria-hidden="true"></div>
+            <div class="shelf-rig" aria-hidden="true">
+              <span class="hanging-chain chain-left"></span>
+              <span class="hanging-chain chain-right"></span>
+              <span class="shelf-sticker sticker-restricted">RESTRICTED</span>
+              <span class="shelf-sticker sticker-question">WHO DECIDES?</span>
+              <span class="shelf-sticker sticker-preserve">PRESERVE THE TRACE</span>
+            </div>
             <div id="book-focus-stage" class="book-focus-stage" aria-hidden="true">
               <span class="focus-orbit"></span>
             </div>
+            <div class="shelf-support-art" aria-hidden="true"></div>
+            <div class="luminous-shelf" aria-hidden="true">
+              <span class="shelf-contact shelf-contact-left"></span>
+              <span class="shelf-contact shelf-contact-right"></span>
+            </div>
             <button id="previous-volume" class="shelf-arrow shelf-arrow-left" type="button" aria-label="Previous volume">←</button>
             <div class="bookshelf-viewport">
+              <section id="first-visit-example" class="first-visit-example" aria-labelledby="first-visit-title" hidden>
+                <div class="example-edition-cover" aria-hidden="true">
+                  <span>EXAMPLE EDITION</span>
+                  <strong>A Question Worth Keeping</strong>
+                  <small>READ · QUESTION · INSPECT</small>
+                </div>
+                <div class="first-visit-copy">
+                  <p class="eyebrow">See what your question can become</p>
+                  <h2 id="first-visit-title">Your shelf begins with one inquiry.</h2>
+                  <p>Shape the question through conversation, let the Library test it against evidence, and receive a book you can read like a story and inspect like a research artifact.</p>
+                  <div class="first-visit-steps" aria-label="How the Library works">
+                    <span><strong>01</strong> Ask</span>
+                    <span><strong>02</strong> Investigate</span>
+                    <span><strong>03</strong> Read</span>
+                  </div>
+                  <button class="primary-button compact" type="button" data-route="worktable">Begin your first book <span>→</span></button>
+                  <small>This example is not part of your enduring shelf.</small>
+                </div>
+              </section>
               <div id="bookshelf" class="bookshelf" role="list" aria-live="polite"></div>
             </div>
             <button id="next-volume" class="shelf-arrow shelf-arrow-right" type="button" aria-label="Next volume">→</button>
@@ -83,21 +119,44 @@
           <strong id="reader-title">Loading book…</strong>
         </div>
         <div class="reader-tools">
-          <button id="evidence-toggle" class="tool-button" type="button" aria-expanded="false" disabled>Evidence</button>
+          <button id="evidence-toggle" class="tool-button" type="button" aria-expanded="false" disabled>Why trust this?</button>
+          <button id="run-receipt-toggle" class="tool-button" type="button" aria-expanded="false" disabled>Build record</button>
           <button id="plain-toggle" class="tool-button" type="button" aria-pressed="false">Plain view</button>
           <button id="toc-toggle" class="tool-button" type="button" aria-expanded="false">Contents</button>
+          <details id="reader-export-menu" class="reader-export-menu">
+            <summary class="tool-button">Export</summary>
+            <div class="reader-export-options">
+              <a id="export-markdown" href="#" download>Markdown</a>
+              <a id="export-epub" href="#" download>EPUB</a>
+              <a id="export-evidence" href="#" download>Evidence manifest</a>
+              <button id="export-cover-card" type="button">Cover card PNG</button>
+              <button id="export-quote-card" type="button">Quote card PNG</button>
+              <button id="export-pdf" type="button">Print / Save PDF</button>
+            </div>
+          </details>
         </div>
       </div>
 
-      <aside id="provenance-panel" class="provenance-panel" aria-label="Verified evidence records" aria-hidden="true">
+      <aside id="provenance-panel" class="provenance-panel" aria-label="Evidence and verification records" aria-hidden="true">
         <div class="provenance-heading">
           <div>
             <p class="eyebrow">Publication provenance</p>
-            <h2>Verified evidence records</h2>
+            <h2>Evidence and verification</h2>
           </div>
           <button id="provenance-close" class="icon-button" type="button" aria-label="Close evidence records">×</button>
         </div>
         <div id="provenance-list" class="provenance-list"></div>
+      </aside>
+
+      <aside id="run-receipt-panel" class="provenance-panel" aria-label="End-to-end workflow run receipt" aria-hidden="true">
+        <div class="provenance-heading">
+          <div>
+            <p class="eyebrow">Acceptance evidence</p>
+            <h2>End-to-end run receipt</h2>
+          </div>
+          <button id="run-receipt-close" class="icon-button" type="button" aria-label="Close run receipt">×</button>
+        </div>
+        <div id="run-receipt-content" class="provenance-list"></div>
       </aside>
 
       <aside id="toc-panel" class="toc-panel" aria-label="Table of contents">
@@ -126,9 +185,9 @@
         <header class="worktable-masthead">
           <div>
             <p class="eyebrow">The governed worktable</p>
-            <h1 id="worktable-title">Begin at the question.</h1>
+            <h1 id="worktable-title">Turn a question into a book.</h1>
           </div>
-          <p>One inquiry, one durable lineage. The interface shows only actions authorized by the canonical workflow.</p>
+          <p>Begin with something you cannot leave alone. The Library preserves the conversation, tests it against evidence, and shapes it into a book you can inspect.</p>
           <button id="new-inquiry-button" class="secondary-button" type="button">New inquiry <span>＋</span></button>
         </header>
 
@@ -140,6 +199,14 @@
                 <p class="eyebrow">Durable threads</p>
                 <h2 id="workflow-rail-title">Resume an inquiry</h2>
               </div>
+            </div>
+            <div class="workflow-filters" role="group" aria-label="Inquiry lineage filter">
+              <button id="workflow-filter-published" class="workflow-filter is-active" type="button" aria-pressed="true">
+                Published <span id="published-workflow-count">0</span>
+              </button>
+              <button id="workflow-filter-active" class="workflow-filter" type="button" aria-pressed="false">
+                Active <span id="active-workflow-count">0</span>
+              </button>
             </div>
             <div id="workflow-list" class="workflow-list" aria-live="polite">
               <p class="workflow-list-empty">Reading the local archive…</p>
@@ -162,50 +229,182 @@
             <div id="new-inquiry-panel" class="new-inquiry-panel">
               <div class="inquiry-card">
                 <label for="inquiry-input">Your opening question</label>
-                <textarea id="inquiry-input" rows="6" placeholder="I keep wondering whether…"></textarea>
-
-                <fieldset class="choice-fieldset">
-                  <legend>Research host</legend>
-                  <div class="segmented-options">
-                    <label class="segmented-option">
-                      <input type="radio" name="provider" value="codex" checked disabled>
-                      <span><strong>Codex</strong><small>OpenAI research host</small></span>
-                    </label>
-                    <label class="segmented-option">
-                      <input type="radio" name="provider" value="claude" disabled>
-                      <span><strong>Claude</strong><small>Anthropic research host</small></span>
-                    </label>
+                <textarea id="inquiry-input" rows="4" placeholder="What question can you not stop thinking about?"></textarea>
+                <div class="inquiry-paths" role="group" aria-label="Ways to begin an inquiry">
+                  <button class="inquiry-path" type="button" data-inquiry-starter="understand">
+                    <strong>Understand something complicated</strong>
+                    <span>Build a clear mental model from conflicting information.</span>
+                  </button>
+                  <button class="inquiry-path" type="button" data-inquiry-starter="belief">
+                    <strong>Test something I believe</strong>
+                    <span>Look for evidence that supports, complicates, or changes it.</span>
+                  </button>
+                  <button class="inquiry-path" type="button" data-inquiry-starter="material">
+                    <strong>Turn my material into a book</strong>
+                    <span>Begin from notes, conversations, links, or an existing argument.</span>
+                  </button>
+                </div>
+                <div class="guided-inquiry-prompt">
+                  <div>
+                    <strong>Need a starting point?</strong>
+                    <small>Load an example, then make it yours.</small>
                   </div>
-                </fieldset>
+                  <button id="sample-inquiry-button" class="text-button" type="button">Try an example</button>
+                </div>
 
-                <fieldset class="choice-fieldset">
-                  <legend>Source authority</legend>
-                  <div class="segmented-options">
-                    <label class="segmented-option">
-                      <input type="radio" name="research-mode" value="safe" checked>
-                      <span><strong>Review sources</strong><small>Pause before unknown sources</small></span>
-                    </label>
-                    <label class="segmented-option">
-                      <input type="radio" name="research-mode" value="auto_approve">
-                      <span><strong>Trusted autonomy</strong><small>Use the configured approval policy</small></span>
-                    </label>
+                <details class="advanced-inquiry-controls">
+                  <summary>Advanced controls <span>Provider, source authority, and run mode</span></summary>
+                  <div class="advanced-inquiry-grid">
+                    <fieldset class="choice-fieldset">
+                      <legend>Research host</legend>
+                      <div class="segmented-options">
+                        <label class="segmented-option">
+                          <input type="radio" name="provider" value="codex" checked disabled>
+                          <span><strong>Codex</strong><small>OpenAI research host</small></span>
+                        </label>
+                        <label class="segmented-option">
+                          <input type="radio" name="provider" value="claude" disabled>
+                          <span><strong>Claude</strong><small>Anthropic research host</small></span>
+                        </label>
+                      </div>
+                    </fieldset>
+
+                    <fieldset class="choice-fieldset">
+                      <legend>Source authority</legend>
+                      <div class="segmented-options">
+                        <label class="segmented-option">
+                          <input type="radio" name="research-mode" value="safe">
+                          <span><strong>Review unfamiliar sources</strong><small>Pause before each unknown URL</small></span>
+                        </label>
+                        <label class="segmented-option">
+                          <input type="radio" name="research-mode" value="auto_approve" checked>
+                          <span><strong>Use public sources automatically</strong><small>Allow each requested URL once · never trust a whole site</small></span>
+                        </label>
+                      </div>
+                    </fieldset>
+
+                    <fieldset class="choice-fieldset">
+                      <legend>Run mode</legend>
+                      <div class="segmented-options">
+                        <label class="segmented-option">
+                          <input type="radio" name="inquiry-run-mode" value="conversation" checked>
+                          <span><strong>Shape it together</strong><small>Talk before asking the Library to build</small></span>
+                        </label>
+                        <label class="segmented-option">
+                          <input type="radio" name="inquiry-run-mode" value="background_book">
+                          <span><strong>Build with low interruption</strong><small>Continue until a genuinely human decision is required</small></span>
+                        </label>
+                      </div>
+                    </fieldset>
                   </div>
-                </fieldset>
+                </details>
 
-                <button id="begin-inquiry" class="primary-button" type="button" disabled>Create and ask <span>→</span></button>
-                <p id="inquiry-status" class="inquiry-status" role="status">The opening question becomes the first durable conversation turn.</p>
+                <button id="begin-inquiry" class="primary-button" type="button" disabled>Begin my book <span>→</span></button>
+                <p id="inquiry-status" class="inquiry-status" role="status">Your question is preserved before the first response begins.</p>
               </div>
             </div>
 
             <div id="active-workflow-panel" class="active-workflow-panel" hidden>
+              <details id="agent-toolbar" class="agent-toolbar" aria-label="Conversation settings" hidden>
+                <summary>Conversation settings <span>Provider and durable transcript</span></summary>
+                <div class="agent-toolbar-content">
+                  <div>
+                    <span class="agent-toolbar-label">Conversation agent</span>
+                    <strong id="active-agent-label">Provider pending</strong>
+                    <small>Switching keeps the full durable transcript.</small>
+                  </div>
+                  <div id="agent-switcher" class="agent-switcher" role="group" aria-label="Switch conversation agent">
+                    <button type="button" data-switch-provider="codex">Codex</button>
+                    <button type="button" data-switch-provider="claude">Claude</button>
+                  </div>
+                </div>
+              </details>
+
+              <section id="book-seed" class="book-seed" aria-labelledby="book-seed-title" hidden>
+                <div class="book-seed-cover" aria-hidden="true">
+                  <span>INQUIRION ARCHIVE</span>
+                  <strong id="book-seed-cover-title">A question takes form</strong>
+                  <small>WORKING EDITION</small>
+                </div>
+                <div class="book-seed-copy">
+                  <p class="eyebrow">Your book has begun</p>
+                  <h3 id="book-seed-title">A question takes form</h3>
+                  <p id="book-seed-question"></p>
+                  <div class="book-seed-state">
+                    <span aria-hidden="true"></span>
+                    <strong id="book-seed-state-title">Question preserved</strong>
+                    <small id="book-seed-state-detail">The opening investigation can continue while you remain here or begin another inquiry.</small>
+                  </div>
+                </div>
+              </section>
+
+              <section id="workflow-progress" class="workflow-progress" aria-live="polite" hidden>
+                <div class="workflow-progress-heading">
+                  <div>
+                    <span id="workflow-progress-agent">Overall book workflow</span>
+                    <strong id="workflow-progress-phase">Loading the durable inquiry</strong>
+                  </div>
+                  <span id="workflow-progress-percent">0%</span>
+                </div>
+                <div class="workflow-progress-track" aria-hidden="true">
+                  <span id="workflow-progress-fill"></span>
+                </div>
+                <div class="workflow-progress-heading workflow-transition-heading">
+                  <div>
+                    <span id="workflow-transition-agent">Current transition</span>
+                    <strong id="workflow-transition-phase">Preparing the next durable action</strong>
+                  </div>
+                  <span id="workflow-transition-percent">0%</span>
+                </div>
+                <div class="workflow-progress-track is-transition" aria-hidden="true">
+                  <span id="workflow-transition-fill"></span>
+                </div>
+                <div class="workflow-progress-meta">
+                  <span id="workflow-progress-elapsed">00:00 elapsed</span>
+                  <span>Overall milestone and current provider step are shown separately</span>
+                </div>
+                <div class="workflow-agent-activity" aria-label="Live agent activity">
+                  <span class="activity-pulse" aria-hidden="true"></span>
+                  <div>
+                    <strong id="workflow-activity-title">Agent activity</strong>
+                    <span id="workflow-activity-detail">Waiting for the next durable event</span>
+                  </div>
+                </div>
+              </section>
+
+              <section id="finish-readiness" class="finish-readiness" aria-labelledby="finish-readiness-title" hidden>
+                <div class="finish-readiness-heading">
+                  <div>
+                    <p class="eyebrow">One-click completion contract</p>
+                    <h3 id="finish-readiness-title">Checking Finish readiness…</h3>
+                  </div>
+                  <span id="finish-readiness-status" class="finish-readiness-status">Checking</span>
+                </div>
+                <p id="finish-readiness-summary"></p>
+                <div id="finish-readiness-checks" class="finish-readiness-checks"></div>
+                <details class="finish-boundary-details">
+                  <summary>What Finish will automate—and where it will pause</summary>
+                  <div class="finish-boundary-columns">
+                    <div><strong>Continues automatically</strong><ul id="finish-auto-list"></ul></div>
+                    <div><strong>Always pauses for you</strong><ul id="finish-pause-list"></ul></div>
+                  </div>
+                </details>
+              </section>
+
+              <details id="workflow-timeline-panel" class="workflow-timeline-panel">
+                <summary>Durable workflow timeline <span id="workflow-timeline-count"></span></summary>
+                <ol id="workflow-timeline" class="workflow-timeline"></ol>
+              </details>
+
               <div id="conversation-transcript" class="conversation-transcript" aria-live="polite"></div>
 
               <div id="conversation-composer" class="conversation-composer" hidden>
                 <label for="turn-input">Continue the inquiry</label>
                 <textarea id="turn-input" rows="4" placeholder="Ask the next question, challenge the answer, or add context…"></textarea>
+                <p id="finish-guardrails-note" class="composer-hint">Finish allows each unknown source URL once for this inquiry, continues bounded mechanical recovery, and pauses for new authorship or safety decisions.</p>
                 <div class="composer-actions">
-                  <button id="finish-inquiry" class="secondary-button danger-edge" type="button">Finish research conversation</button>
-                  <button id="send-turn" class="primary-button compact" type="button">Send turn <span>→</span></button>
+                  <button id="finish-inquiry" class="secondary-button danger-edge" type="button" aria-describedby="finish-guardrails-note" title="Continue through bounded mechanical decisions; pause only for new authorship or safety authority">Build my book</button>
+                  <button id="send-turn" class="primary-button compact" type="button">Continue inquiry <span>→</span></button>
                 </div>
               </div>
 
@@ -235,6 +434,7 @@
         <span class="book-page-block"></span>
         <span class="book-spine-panel">
           <span class="display-spine-sigil"></span>
+          <span class="spine-sticker">VERIFIED</span>
           <span class="display-spine-title"></span>
           <span class="display-spine-imprint">INQUIRION LABS</span>
           <span class="display-spine-edition"></span>
@@ -247,6 +447,7 @@
           <span class="cover-kicker">INQUIRION ARCHIVE</span>
           <span class="cover-title"></span>
           <span class="cover-subtitle"></span>
+          <span class="cover-quote"></span>
           <span class="cover-edition"></span>
         </span>
       </span>

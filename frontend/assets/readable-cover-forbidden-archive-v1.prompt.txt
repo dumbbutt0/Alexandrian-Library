@@ -1,0 +1,14 @@
+Use case: stylized-concept
+Asset type: portrait book-cover artwork for a digital 3D library UI
+Input images: the five recent user-provided images are mood and visual-language references only; do not copy their compositions, text, figures, or recognizable artwork.
+Primary request: Create an entirely original forbidden-archive cover image for the research book "Readable Without Overclaiming", about making technical writing easier to read without silently increasing certainty or exceeding evidence.
+Scene/backdrop: flat portrait cover art, not a photograph and not a 3D book mockup; a near-black archival chamber that feels like an underground editorial laboratory.
+Subject: a monumental watchful eye assembled from fractured stained-glass panes, annotated manuscript fragments, and precise claim-diagram lines. Beneath it, two pale engraved hands carefully hold a narrow strip of luminous text-like marks without any legible words, as if preserving a fragile claim through revision. One side of the eye is clean bone-white halftone and the other glows in cobalt, amber, and muted crimson stained glass. Small evidence brackets, strike marks, threadlike arrows, censor bars, and torn-paper edges form a disciplined collage around it.
+Style/medium: original fusion of gothic stained glass, 1970s editorial collage, xerox-punk halftone, anatomical engraving, distressed archival paper, and precise scientific annotation. Curated forbidden knowledge, intelligent and severe, not chaotic horror. Do not imitate any named artist, brand, poster, or supplied image.
+Composition/framing: vertical 2:3, iconic centered eye in the upper-middle, hands in the lower-middle, strong silhouette at thumbnail size, controlled quiet dark zones near top and bottom for HTML typography.
+Lighting/mood: luminous evidence under examination; skeptical, sacred, humane, mysterious.
+Color palette: carbon black, bone white, parchment cream, cobalt blue, amber gold, restrained deep crimson.
+Materials/textures: torn paper fibers, ink rub, aged vellum, stained glass, silver-gelatin grain, stamped archive marks.
+Constraints: no readable words, letters, numbers, quotes, logos, watermarks, religious crosses, identifiable people, recognizable existing art, generic fantasy castle, photorealistic book mockup, or decorative clutter that obscures the central eye. Preserve quiet typography zones.
+
+Generation mode: built-in image generation tool.

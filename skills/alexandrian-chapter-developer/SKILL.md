@@ -1,6 +1,6 @@
 ---
 name: alexandrian-chapter-developer
-description: Develop one approved Alexandrian Library chapter through a single evidence-grounded state transition. Use when a prepared chapter context must become an initial research workspace, an existing workspace must gain a bounded research revision, or a sufficiently developed workspace must produce one immutable rough draft and register its provenance without running the full chapter loop.
+description: Develop one approved Alexandrian Narrative Research Book chapter through a single evidence-grounded state transition. Use when a prepared chapter context must become a workspace, gain a bounded research revision, or produce one immutable narrative nonfiction draft with registered provenance without running the full chapter loop.
 ---
 
 # Alexandrian Chapter Developer
@@ -107,13 +107,23 @@ the workspace exactly once to record the decisions, close or route only the
 items they legitimately resolve, and stop without drafting. Preserve the
 decision artifact as provenance for the later draft and finalization audit.
 
-When `recovery_authorization_path` is supplied, read the immutable
-research-access authorization and the blocking assessment completely. This is
-not permission to draft, expand the completion contract, or claim that new
-evidence exists. Revise the workspace exactly once to record that the project
-has authorized one bounded alternative-source attempt. Keep the blocked branch
-and requirement active so a fresh independent assessment can state the exact
-research request. Preserve all draft references unchanged and stop.
+When `recovery_authorization_path` is supplied, read the immutable recovery
+authorization and its bound assessment completely. Follow its
+`recovery_kind`; do not treat every recovery as research access.
+
+- For `planned_draft_revision`, the authorization and `draft_required: true`
+  require Transition 3. Save and register exactly one new draft that completes
+  the listed planned revision IDs and addresses the supplied assessment. Do
+  not revise the workspace merely to restate or acknowledge the authorization.
+- For `final_pass_revision`, save and register exactly one final-pass draft as
+  directed by `final_pass_requested`.
+- For `research_access_retry`, revise the workspace exactly once to record the
+  bounded alternative-source attempt. Keep the blocked branch and requirement
+  active so an independent assessment can state the exact research request.
+  Preserve all draft references and stop.
+
+No recovery kind permits expanding the frozen completion contract, claiming
+that new evidence exists, or inventing authorial intent.
 
 ## Recover an Unregistered Draft First
 
@@ -227,16 +237,61 @@ chapter may return to `chapter_complete`.
 The rough draft must:
 
 - Follow the semantic chapter spine
+- Read as one developing nonfiction argument rather than a textbook module or
+  a sequence of source summaries
 - Preserve the user's original intuition and later belief development
 - Distinguish evidence, interpretation, hypothesis, and open uncertainty
 - Explain necessary historical, philosophical, mathematical, scientific, and
   implementation material at the depth required by this chapter
-- Connect claims to their approved evidence without inventing citations
+- End every approved evidence-backed factual, scientific, historical,
+  statistical, or attributed claim with
+  `[Evidence: exact-receipt-id]`. Use only receipt IDs supplied in the chapter
+  context. Give each evidence-backed context claim its own marker; do not reuse
+  one marker occurrence to satisfy several distinct claims.
+- Keep each marker in the same paragraph as the claim it supports. The reader
+  converts these internal markers into numbered citations, so do not write a
+  separate bibliography number.
+- Do not add evidence markers to user beliefs, interpretations, hypotheses, or
+  project choices unless the context supplies evidence for a distinct external
+  claim in that paragraph. Label those forms of authority honestly instead.
+- Present every approved contradiction as a visible blockquote beginning
+  `> [!CONTRADICTION]`, with its evidence marker in that block when evidence is
+  available. Do not flatten a contradiction into ordinary prose.
 - Explain where an analogy stops and a testable mechanism begins
 - Include falsification conditions, reproducible experiments, and practical
   implications when supported
 - Preserve branches routed to later chapters, books, experiments, or projects
 - Avoid simulated first-person statements on the user's behalf
+
+### Narrative research movement
+
+Use the approved conversation lineage as the chapter's narrative engine. Open
+with a consequential question, contradiction, concrete situation, or
+surprising grounded claim. Establish the tension that makes the obvious answer
+insufficient. Let the investigation move through ideas and evidence as a
+developing argument. Give the strongest counterargument, unexpected
+connection, or contrary evidence enough force to turn the chapter. Synthesize
+what can now be concluded and what remains uncertain, then leave an honest open
+door to the next chapter or inquiry.
+
+Treat that sequence as movement, not a mandatory six-heading template. Vary
+chapter length, pacing, paragraph rhythm, and internal structure according to
+the material. Use concrete examples before abstraction, smooth transitions
+between evidence and interpretation, and analogies that clarify without
+serving as proof. Add subheadings, pull quotes, diagrams, or marginal
+definitions only when the reader genuinely needs them.
+
+Do not use generic AI-textbook scaffolding such as “In this chapter, we will
+explore,” repeated three-item lists, headings every few paragraphs, constant
+recaps, disclaimer-heavy narration, one-source-per-paragraph exposition, or a
+conclusion that merely repeats the opening. Keep necessary limitations close
+to the affected claim but write them into the argument rather than turning the
+chapter into compliance prose.
+
+If admissible evidence is insufficient, preserve the claim as unresolved and
+route it to controlled research. Never invent a receipt or silently search the
+web. The workflow will offer research, refine, or stop through the existing
+source-permission boundary.
 
 Call `save_chapter_draft` once. Use its exact receipt to append the new draft
 reference to the workspace, then call `revise_chapter_workspace` once. Map only

@@ -104,6 +104,64 @@ class ConversationStoreTests(unittest.TestCase):
             [None, "codex", None, "claude"],
         )
 
+    def test_continuation_lineage_exposes_parent_and_local_review_messages(
+        self,
+    ) -> None:
+        parent = self.create_conversation("parent-conversation")
+        parent_turn = conversation_store.append_message(
+            parent,
+            role="user",
+            content="Parent question",
+        )
+        conversation_store.append_message(
+            parent,
+            role="assistant",
+            content="Parent answer",
+            turn_id=parent_turn["turn_id"],
+            agent_host="claude",
+        )
+        conversation_store.finish_conversation(
+            parent,
+            project_root=self.project_path,
+            research_mode="safe",
+        )
+        child = conversation_store.create_conversation(
+            self.conversations_path,
+            "safe",
+            conversation_id="child-conversation",
+            continuation={
+                "kind": "research_revision",
+                "parent_conversation_id": parent.stem,
+            },
+        )
+        child_turn = conversation_store.append_message(
+            child,
+            role="user",
+            content="Child question",
+        )
+        conversation_store.append_message(
+            child,
+            role="assistant",
+            content="Child answer",
+            turn_id=child_turn["turn_id"],
+            agent_host="codex",
+        )
+
+        messages = conversation_store.visible_messages_from_lineage(
+            child,
+            project_root=self.project_path,
+        )
+
+        self.assertEqual(
+            [message["content"] for message in messages],
+            [
+                "Parent question",
+                "Parent answer",
+                "Child question",
+                "Child answer",
+            ],
+        )
+
     def test_finish_is_idempotent_and_writes_exact_hash_receipt(self) -> None:
         conversation_path = self.create_conversation()
         user_event = conversation_store.append_message(

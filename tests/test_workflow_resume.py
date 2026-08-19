@@ -1,6 +1,7 @@
 import json
 import hashlib
 import tempfile
+import threading
 import unittest
 from contextlib import ExitStack
 from pathlib import Path
@@ -282,7 +283,14 @@ class WorkflowResumeTests(unittest.TestCase):
     def test_final_book_waits_for_exact_bookshelf_projection(self) -> None:
         book_directory = self.write_ready_completed_book_state()
         book_path = book_directory / "book.md"
-        book_path.write_text("# Final book\n", encoding="utf-8")
+        book_path.write_text(
+            (
+                "# Final book\n\n"
+                "The finalized evidence remains exact and available for cover "
+                "verification.\n"
+            ),
+            encoding="utf-8",
+        )
         book_sha256 = hashlib.sha256(book_path.read_bytes()).hexdigest()
         assembly_path = book_directory / "assembly.json"
         assembly = {
@@ -304,6 +312,17 @@ class WorkflowResumeTests(unittest.TestCase):
             )
             self.assertEqual(
                 backend_selector.workflow_stage(self.conversation_path),
+                "cover_design",
+            )
+
+            design = backend_selector.cover_design.create_default_design(
+                self.project_path,
+                self.book_id,
+                designer_host="workflow-test",
+            )
+            asset = design["asset"]
+            self.assertEqual(
+                backend_selector.workflow_stage(self.conversation_path),
                 "bookshelf_projection",
             )
 
@@ -323,6 +342,11 @@ class WorkflowResumeTests(unittest.TestCase):
                 "chapter_count": 0,
                 "chapters": [],
                 "source_count": 0,
+                "cover": {
+                    "design_sha256": design["design_sha256"],
+                    "asset_sha256": asset["sha256"],
+                    "asset_status": asset["status"],
+                },
             }
             catalog = {
                 "schema_version": "1.0",
@@ -352,6 +376,80 @@ class WorkflowResumeTests(unittest.TestCase):
                 backend_selector.workflow_stage(self.conversation_path),
                 "bookshelf_projection",
             )
+
+    def test_cover_design_prompt_includes_prior_cover_inventory(self) -> None:
+        self.write_manifest()
+        book_directory = self.books_path / self.book_id
+        book_path = book_directory / "book.md"
+        book_path.write_text(
+            "# Final Book\n\nA durable boundary remains visible.\n",
+            encoding="utf-8",
+        )
+        self.write_json(
+            book_directory / "assembly.json",
+            {
+                "book_id": self.book_id,
+                "book_path": str(book_path.relative_to(self.project_path)),
+                "book_sha256": hashlib.sha256(book_path.read_bytes()).hexdigest(),
+            },
+        )
+        self.write_json(
+            self.books_path / "book-prior" / "cover" / "design.json",
+            {
+                "book_id": "book-prior",
+                "concept": "A monumental brass key in a cobalt archive.",
+                "visual_motifs": ["brass key", "cobalt archive"],
+                "fallback_style": "archive_geometry",
+                "asset": {
+                    "status": "generated",
+                    "render_profile": "graphical-test-profile",
+                },
+            },
+        )
+        captured = {}
+
+        def capture_response(backend, program_path, prompt, purpose):
+            captured["prompt"] = prompt
+            return "", "No design was submitted."
+
+        with ExitStack() as stack:
+            for active_patch in self.patches():
+                stack.enter_context(active_patch)
+            stack.enter_context(
+                patch.object(
+                    backend_selector,
+                    "load_skill_instructions",
+                    return_value="Cover designer instructions",
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    backend_selector,
+                    "capture_backend_response",
+                    side_effect=capture_response,
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    backend_selector.cover_design,
+                    "create_default_design",
+                    return_value={"asset": {"status": "fallback"}},
+                )
+            )
+
+            backend_selector.design_cover_for_final_book(
+                "codex",
+                "/usr/bin/codex",
+                self.book_id,
+            )
+
+        self.assertIn("PRIOR COVER INVENTORY", captured["prompt"])
+        self.assertIn("COVER ADAPTATION ACTION", captured["prompt"])
+        self.assertIn("FOUR MOST RECENT COVERS", captured["prompt"])
+        self.assertIn('"core_question": "its central inquiry"', captured["prompt"])
+        self.assertIn("book-prior", captured["prompt"])
+        self.assertIn("monumental brass key", captured["prompt"])
+        self.assertIn("graphical-test-profile", captured["prompt"])
 
     def test_bookshelf_projection_is_rebuilt_without_provider_work(self) -> None:
         book_directory = self.books_path / self.book_id
@@ -1256,7 +1354,12 @@ class WorkflowResumeTests(unittest.TestCase):
         self.assertIn('"research_continuation_context"', reviewer_prompt)
         self.assertIn('"Use two phases."', reviewer_prompt)
         self.assertIn(
-            "do not submit its transcript references or source receipt IDs",
+            "complete root-to-current lineage",
+            reviewer_prompt,
+        )
+        self.assertIn(
+            "do not reuse transcript references that are not in the supplied "
+            "numbered transcript or reuse parent source receipt IDs",
             reviewer_prompt,
         )
         self.assertIn(
@@ -1585,6 +1688,80 @@ class WorkflowResumeTests(unittest.TestCase):
         self.assertEqual(
             workflows,
             [(self.conversation_path, "research_review")],
+        )
+
+    def test_ready_chapters_run_two_at_a_time_then_release_dependencies(self) -> None:
+        manifest = {
+            "book_id": self.book_id,
+            "chapter_plan": [
+                {
+                    "chapter_id": "CH1",
+                    "readiness": "ready_to_draft",
+                    "dependencies": [],
+                    "material_disposition": "include",
+                },
+                {
+                    "chapter_id": "CH2",
+                    "readiness": "ready_to_draft",
+                    "dependencies": [],
+                    "material_disposition": "include",
+                },
+                {
+                    "chapter_id": "CH3",
+                    "readiness": "ready_to_draft",
+                    "dependencies": ["CH1", "CH2"],
+                    "material_disposition": "include",
+                },
+            ],
+        }
+        barrier = threading.Barrier(2)
+        lock = threading.Lock()
+        active = 0
+        maximum_active = 0
+        starts = []
+
+        def run_chapter(_backend, _program, _book_id, chapter_id):
+            nonlocal active, maximum_active
+            with lock:
+                active += 1
+                maximum_active = max(maximum_active, active)
+                starts.append(chapter_id)
+            if chapter_id in {"CH1", "CH2"}:
+                barrier.wait(timeout=2)
+            with lock:
+                active -= 1
+            return {
+                "book_id": self.book_id,
+                "chapter_id": chapter_id,
+                "status": "chapter_complete",
+            }
+
+        with (
+            patch.object(backend_selector, "BOOKS_PATH", self.books_path),
+            patch.object(backend_selector, "CHAPTER_PARALLELISM", 2),
+            patch.object(
+                backend_selector,
+                "manifest_chapter_is_draft_ready",
+                return_value=True,
+            ),
+            patch.object(
+                backend_selector,
+                "run_ready_chapter",
+                side_effect=run_chapter,
+            ),
+        ):
+            results = backend_selector.run_ready_book_chapters(
+                "codex",
+                "/usr/bin/codex",
+                manifest,
+            )
+
+        self.assertEqual(maximum_active, 2)
+        self.assertEqual(set(starts[:2]), {"CH1", "CH2"})
+        self.assertEqual(starts[2], "CH3")
+        self.assertEqual(
+            [result["chapter_id"] for result in results],
+            ["CH1", "CH2", "CH3"],
         )
 
 

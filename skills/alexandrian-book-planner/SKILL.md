@@ -1,6 +1,6 @@
 ---
 name: alexandrian-book-planner
-description: Plan an evidence-grounded Alexandrian Library book from a completed, human-approved research review. Use when eligible pre-book research must become a scoped manifest and readable chapter outline with claim provenance, evidence requirements, contradictions, research gaps, chapter readiness, and human authorship boundaries before any chapter prose is drafted.
+description: Plan an evidence-grounded Alexandrian Narrative Research Book from a completed, human-approved research review. Use when eligible pre-book research must become a scoped manifest and narrative chapter progression with claim provenance, evidence requirements, contradictions, research gaps, chapter readiness, and human authorship boundaries before prose is drafted.
 ---
 
 # Alexandrian Book Planner
@@ -82,6 +82,19 @@ or reviewer inference. Keep contradictions and limitations visible.
 
 ### 5. Build the progression
 
+Plan an Alexandrian Narrative Research Book: engaging nonfiction with
+textbook-grade evidence underneath it. Use the conversation's starting belief
+as the point of departure, its questions and disagreements as tension, checked
+research as discovery, belief revisions or resistant evidence as turns, and
+deliberately unresolved questions as doors into later chapters or inquiries.
+
+For each chapter, identify the material that can provide an opening hook, the
+insufficient obvious answer, the investigation, the strongest turn, the
+bounded synthesis, and the open door. These are narrative functions, not
+required section headings. Do not impose identical chapter lengths,
+subheading counts, or internal templates. A chapter may compress or expand a
+movement when its approved evidence and purpose require it.
+
 Give every chapter:
 
 - A purpose
@@ -126,6 +139,9 @@ the field empty when the chapter does not use a recorded belief revision.
 
 Explain the overall narrative or argument arc. A chapter must exist because it
 advances the reader's understanding, not merely because source material exists.
+Plan concrete examples before major abstractions where the evidence permits.
+Keep evidence mappings exact but do not organize the reader-facing progression
+as one paragraph or section per source.
 
 ### 6. Assign honest readiness
 
@@ -187,3 +203,6 @@ perform new research, or publish anything.
 - Prefer removal or separation over artificial scope expansion
 - Require human authorship where the user's voice or judgment matters
 - Treat the manifest as a proposal awaiting human approval
+- Plan for the main prose to have a recognizable authorial voice and varied
+  rhythm; reserve ASD-STE100-inspired controlled clarity for definitions,
+  instructions, interface copy, summaries, and technical procedures

@@ -23,9 +23,11 @@ Use only the exact book, chapter, assessment, context hash, workspace version,
 workspace hash, and research request supplied by the wrapper. Never invent or
 alter their identities.
 
-Search snippets locate candidate sources. They are not evidence. Fetch every
-included source with `fetch_chapter_research_source`. Never use host-native page
-fetching, shell commands, or direct filesystem writes.
+Search snippets locate candidate sources. They are not evidence. In the packet
+phase, process the immutable plan with
+`fetch_chapter_research_source_batch`. The singular fetch tool remains a
+compatibility fallback only. Never use host-native page fetching, shell
+commands, or direct filesystem writes.
 
 ## One-Request Rule
 
@@ -45,10 +47,16 @@ evidence target for every URL. Do not fetch sources or submit a research
 packet.
 
 In `packet` phase, use only the immutable source plan and the user's recorded
-decisions. Do not search for, request, or fetch a replacement URL. Fetch the
-approved planned candidates, record rejected or inaccessible candidates, and
-submit a packet even when the honest outcome is `inconclusive` or
-`no_admissible_evidence`.
+decisions. Call `fetch_chapter_research_source_batch` once. It processes the
+plan in order, reuses durable same-book receipts, and returns one bounded result
+set. If it returns `approval_required`, stop immediately: the tool durably
+created the source request. Do not call another tool, submit a packet, or merely
+describe what the user should approve. On a later invocation, call the batch
+again; already durable results are idempotently reused. When it returns
+`complete`, preserve rejected and unavailable candidates in the trail and
+submit one packet even when the honest outcome is `inconclusive` or
+`no_admissible_evidence`. Do not search for, request, or fetch a replacement
+URL.
 
 In `recovery_closeout` phase, do not search or fetch. Read only the supplied
 durable source receipts, prior decisions, and unavailable-source trail. Submit
@@ -96,10 +104,9 @@ Prefer the strongest source appropriate to the claim:
 Prestige, popularity, citation count, domain approval, and search rank do not
 prove a claim. Record source limitations and material counterevidence.
 
-The wrapper obtains all safe-mode decisions for the immutable source batch
-before the packet phase. If a planned fetch unexpectedly returns
-`approval_required`, stop without proposing a replacement. The wrapper owns
-the user's allow-once, allow-domain, or reject decision.
+The wrapper owns every allow-once, allow-domain, or reject decision. A tool
+result of `approval_required` is a successful durable transition, not a reason
+to return prose or continue to another candidate.
 
 ## Evidence Assessment
 
@@ -140,7 +147,8 @@ continuing source discovery.
 ## Submission
 
 Call `submit_chapter_research_packet` exactly once after the bounded
-investigation. Submit:
+investigation, except when the current invocation stopped after creating one
+`approval_required` request. Submit:
 
 - Exact wrapper-supplied identities and research request
 - The assessed receipts and exact excerpts

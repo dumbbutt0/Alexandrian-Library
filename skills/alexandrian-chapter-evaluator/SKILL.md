@@ -1,6 +1,6 @@
 ---
 name: alexandrian-chapter-evaluator
-description: Independently evaluate one current Alexandrian Library chapter workspace and registered draft against its approved context, learning purpose, evidence boundaries, unresolved branches, and completion standards. Use after a Chapter Developer pass to record whether the chapter needs more research, draft revision, human input, one final pass, or may be declared complete without editing the chapter itself.
+description: Independently evaluate one Alexandrian Narrative Research Book chapter against its approved context, narrative movement, learning purpose, evidence boundaries, unresolved branches, and completion standards. Use after a Chapter Developer pass to route research, revision, human input, a final pass, or completion without editing the chapter.
 ---
 
 # Alexandrian Chapter Evaluator
@@ -56,16 +56,28 @@ Evaluate these eight criteria:
 1. `central_lesson`
    - Does the chapter explain its central question and current bounded answer?
    - Can the intended lesson be understood rather than merely named?
+   - Does it move from a grounded opening tension through investigation and a
+     meaningful turn toward synthesis, without forcing those movements into a
+     mechanical heading template?
 2. `evidence_grounding`
    - Are factual claims tied to approved evidence?
    - Are inference, hypothesis, and source limitations distinguishable?
+   - Does every approved evidence-backed factual, scientific, historical,
+     statistical, or attributed claim have its own exact
+     `[Evidence: receipt-id]` marker in the same paragraph?
+   - Are user beliefs and project choices kept distinct from sourced claims
+     instead of receiving invented citations?
 3. `curiosity_and_belief`
    - Are the user's original intuition, importance, belief development, and
      deliberately open questions preserved without simulated first-person
      authorship?
+   - Does the conversation's real intellectual development drive the chapter
+     rather than appearing as decorative background?
 4. `contradictions_and_limits`
    - Are serious counterarguments, conflicting evidence, uncertainty, and
      prohibited overinterpretations visible?
+   - Does every approved contradiction remain in a visible
+     `> [!CONTRADICTION]` block rather than ordinary prose?
 5. `intellectual_foundations`
    - Does the chapter teach the relevant historical, philosophical,
      mathematical, scientific, and implementation foundations at the depth
@@ -79,6 +91,17 @@ Evaluate these eight criteria:
 8. `experiments_and_actionability`
    - Where appropriate, can the reader connect the idea to variables, code,
      observations, reproducible experiments, or later use cases?
+
+Across the eight criteria, protect the Alexandrian Narrative Research Book
+standard. The prose should have a recognizable voice, varied sentence and
+paragraph rhythm, concrete examples before abstraction, smooth movement
+between evidence and interpretation, and analogies that disclose their limits.
+Do not reward generic textbook scaffolding, repetitive three-item lists,
+excessive subheadings, constant recap, disclaimer-heavy narration,
+one-source-per-paragraph organization, identical chapter shapes, or a
+conclusion that merely repeats the introduction. Treat these as substantive
+presentation defects when they prevent the argument from developing, even if
+every individual claim is cited.
 
 For each criterion, choose:
 
@@ -119,8 +142,11 @@ Choose exactly one outcome:
   available evidence, research budget, or approved scope.
 - `ready_for_final_pass`: The substantive lesson is complete enough for one
   final coherence and presentation pass.
-- `chapter_complete`: The newest registered draft has passed the final pass and
-  every applicable criterion is satisfied.
+- `chapter_complete`: Every applicable criterion is satisfied and the newest
+  registered draft has passed the closeout rule selected by the wrapper. Under
+  `workflow-runtime-v1`, this requires the separate final pass. Under
+  `performance-v2`, the first full candidate audit is itself the closeout and
+  a second draft is required only when that audit finds a concrete defect.
 
 Do not use `chapter_complete` merely because a draft is polished, long, or
 internally coherent. Do not use `ready_to_draft` or `ready_for_final_pass`
@@ -154,6 +180,13 @@ purpose itself is to report those completed activities.
 
 ## Final-Pass Standard
 
+Honor the wrapper's `workflow_runtime_version`. For `performance-v2`, do not
+return `ready_for_final_pass` merely to request a general polish pass. Audit the
+entire candidate now and return `chapter_complete` when every criterion is
+satisfied. Return `revise_draft` with exact targeted actions when it is not.
+This changes call scheduling only; it does not lower any evidence, narrative,
+uncertainty, or provenance standard.
+
 When the wrapper identifies the current draft as a final-pass result, still
 evaluate it normally. Declare `chapter_complete` only when:
 
@@ -161,6 +194,8 @@ evaluate it normally. Declare `chapter_complete` only when:
 - Every applicable criterion is satisfied
 - No required next action or human-input request remains
 - The chapter preserves honest uncertainty rather than manufacturing closure
+- The chapter reads as engaging narrative research rather than controlled
+  technical prose, while definitions and procedures remain clear
 
 If the final pass introduced a regression, return `revise_draft`,
 `continue_research`, or `human_input_required` as appropriate.

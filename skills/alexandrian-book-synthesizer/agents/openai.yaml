@@ -1,4 +1,4 @@
 interface:
   display_name: "Alexandrian Book Synthesizer"
-  short_description: "Synthesize a readable claim-preserving book"
-  default_prompt: "Use $alexandrian-book-synthesizer to perform one bounded whole-book synthesis attempt."
+  short_description: "Synthesize compelling, inspectable research books"
+  default_prompt: "Use $alexandrian-book-synthesizer to synthesize one compelling, claim-preserving research edition."

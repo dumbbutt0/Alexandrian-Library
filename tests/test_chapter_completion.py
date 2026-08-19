@@ -34,11 +34,44 @@ class ChapterCompletionControllerTests(unittest.TestCase):
         self.developer_editorial_paths = []
         self.developer_human_input_paths = []
         self.developer_recovery_paths = []
+        self.developer_draft_required_flags = []
         self.evaluation_number = 0
         self.research_number = 0
 
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
+
+    def test_provider_artifact_state_is_scoped_to_active_chapter(self) -> None:
+        book_directory = self.books_path / self.book_id
+        ch1_workspace = book_directory / "workspaces" / "CH1"
+        ch2_workspace = book_directory / "workspaces" / "CH2"
+        ch1_workspace.mkdir(parents=True)
+        ch2_workspace.mkdir(parents=True)
+        (ch1_workspace / "current.json").write_text(
+            '{"chapter":"CH1"}',
+            encoding="utf-8",
+        )
+        (ch2_workspace / "current.json").write_text(
+            '{"chapter":"CH2"}',
+            encoding="utf-8",
+        )
+        (book_directory / "manifest.json").write_text(
+            '{"book":"shared"}',
+            encoding="utf-8",
+        )
+
+        with patch.object(backend_selector, "BOOKS_PATH", self.books_path):
+            scoped = backend_selector.chapter_provider_artifact_state(
+                self.book_id,
+                "CH1",
+            )
+            broad = backend_selector.chapter_provider_artifact_state(
+                self.book_id
+            )
+
+        self.assertEqual(list(scoped), ["workspaces/CH1/current.json"])
+        self.assertIn("workspaces/CH2/current.json", broad)
+        self.assertIn("manifest.json", broad)
 
     def workspace_state(self, book_id: str, chapter_id: str) -> dict | None:
         self.assertEqual(book_id, self.book_id)
@@ -76,6 +109,7 @@ class ChapterCompletionControllerTests(unittest.TestCase):
         editorial_review_path: str | None = None,
         human_input_path: str | None = None,
         recovery_authorization_path: str | None = None,
+        draft_required: bool = False,
     ) -> tuple[Path, Path, str, int]:
         self.assertEqual(book_id, self.book_id)
         self.assertEqual(chapter_id, self.chapter_id)
@@ -93,6 +127,7 @@ class ChapterCompletionControllerTests(unittest.TestCase):
         self.developer_recovery_paths.append(
             recovery_authorization_path
         )
+        self.developer_draft_required_flags.append(draft_required)
         self.state["version"] += 1
         if self.state["version"] == 2:
             self.state["drafts"] = [self.draft("D1")]
@@ -108,6 +143,177 @@ class ChapterCompletionControllerTests(unittest.TestCase):
             "Workspace",
             self.state["version"],
         )
+
+    def test_mechanically_clear_workspace_skips_predraft_evaluation(self) -> None:
+        outcomes = iter(
+            [
+                self.assessment_document(
+                    "ready_for_final_pass",
+                    "Only the final coherence pass remains.",
+                    draft_id="D1",
+                    statuses="satisfied",
+                    actions=["Perform one final pass."],
+                ),
+                self.assessment_document(
+                    "chapter_complete",
+                    "No applicable gap remains.",
+                    draft_id="D2",
+                    statuses="satisfied",
+                ),
+            ]
+        )
+
+        with ExitStack() as stack:
+            for controller_patch in self.controller_patches():
+                stack.enter_context(controller_patch)
+            stack.enter_context(
+                patch.object(
+                    backend_selector,
+                    "chapter_is_mechanically_draftable",
+                    side_effect=lambda _workspace: (
+                        self.state["version"] > 0
+                        and not self.state["drafts"]
+                    ),
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    backend_selector,
+                    "evaluate_chapter_once",
+                    side_effect=lambda *_args: next(outcomes),
+                )
+            )
+            result = backend_selector.run_chapter_completion_loop(
+                "codex",
+                "/usr/bin/codex",
+                self.book_id,
+                self.chapter_id,
+            )
+
+        self.assertEqual(result["status"], "chapter_complete")
+        self.assertEqual(result["developer_passes_total"], 3)
+        self.assertEqual(result["evaluator_passes_total"], 2)
+
+    def test_planned_revision_recovery_routes_to_developer_first(
+        self,
+    ) -> None:
+        self.state["version"] = 4
+        self.state["drafts"] = [self.draft("D1")]
+        recovery = {
+            "recovery_kind": "planned_draft_revision",
+            "baseline_agent_calls_total": 8,
+            "max_recovery_agent_calls": 4,
+            "source_draft_id": "D1",
+            "workspace_path": "workspace/current.json",
+            "workspace_sha256": "4" * 64,
+        }
+        with ExitStack() as stack:
+            for controller_patch in self.controller_patches():
+                stack.enter_context(controller_patch)
+            stack.enter_context(
+                patch.object(
+                    backend_selector,
+                    "load_chapter_recovery_authorization",
+                    return_value=recovery,
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    backend_selector,
+                    "chapter_has_draftable_planned_revision",
+                    return_value=True,
+                )
+            )
+            run = backend_selector.load_or_create_chapter_run(
+                self.book_id,
+                self.chapter_id,
+            )
+            run.update(
+                {
+                    "status": "performance_repair_required",
+                    "developer_passes_total": 6,
+                    "evaluator_passes_total": 3,
+                    "researcher_passes_total": 0,
+                    "last_assessment_id": "A3",
+                    "last_assessment_path": (
+                        "data/books/book-controller-test/assessments/"
+                        "CH1/A3.json"
+                    ),
+                    "last_assessment_outcome": "revise_draft",
+                }
+            )
+            backend_selector.save_chapter_run(run)
+            token = backend_selector.ACTIVE_CHAPTER_CONTRACT.set(
+                (self.project_path / "controller.jsonl", "CC-test")
+            )
+            try:
+                result = backend_selector.run_chapter_completion_loop(
+                    "codex",
+                    "/usr/bin/codex",
+                    self.book_id,
+                    self.chapter_id,
+                )
+            finally:
+                backend_selector.ACTIVE_CHAPTER_CONTRACT.reset(token)
+
+        self.assertEqual(result["developer_passes_total"], 7)
+        self.assertEqual(result["evaluator_passes_total"], 3)
+        self.assertTrue(self.developer_draft_required_flags[-1])
+        self.assertEqual(
+            self.developer_recovery_paths[-1],
+            "data/books/book-controller-test/runs/CH1.recovery.json",
+        )
+
+    def test_performance_runtime_completes_with_one_draft_and_audit(self) -> None:
+        self.state["version"] = 1
+        book_directory = self.books_path / self.book_id
+        book_directory.mkdir(parents=True)
+        (book_directory / "approval.json").write_text(
+            json.dumps(
+                {
+                    "book_id": self.book_id,
+                    "decision": "approved_for_drafting",
+                    "chapter_drafting_gate": "ready",
+                    "workflow_runtime_version": "performance-v2",
+                }
+            ),
+            encoding="utf-8",
+        )
+        outcome = self.assessment_document(
+            "chapter_complete",
+            "No applicable gap remains.",
+            draft_id="D1",
+            statuses="satisfied",
+        )
+
+        with ExitStack() as stack:
+            for controller_patch in self.controller_patches():
+                stack.enter_context(controller_patch)
+            stack.enter_context(
+                patch.object(
+                    backend_selector,
+                    "chapter_is_mechanically_draftable",
+                    side_effect=lambda _workspace: not self.state["drafts"],
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    backend_selector,
+                    "evaluate_chapter_once",
+                    return_value=outcome,
+                )
+            )
+            result = backend_selector.run_chapter_completion_loop(
+                "codex",
+                "/usr/bin/codex",
+                self.book_id,
+                self.chapter_id,
+            )
+
+        self.assertEqual(result["status"], "chapter_complete")
+        self.assertEqual(result["developer_passes_total"], 1)
+        self.assertEqual(result["evaluator_passes_total"], 1)
+        self.assertFalse(result["final_pass_requested"])
 
     def draft(self, draft_id: str) -> dict:
         return {
@@ -2740,6 +2946,259 @@ class ChapterRecoveryAuthorizationTests(unittest.TestCase):
         self.assertEqual(loaded["baseline_agent_calls_total"], 8)
         self.assertEqual(loaded["max_calls"], 6)
 
+    def test_final_pass_repair_can_finish_an_exhausted_human_closeout(
+        self,
+    ) -> None:
+        assessment_id = "A8"
+        workspace_path = (
+            self.book_directory
+            / "workspaces"
+            / self.chapter_id
+            / "versions"
+            / "v008.json"
+        )
+        draft_path = (
+            self.book_directory
+            / "drafts"
+            / self.chapter_id
+            / "D4.md"
+        )
+        draft_path.parent.mkdir(parents=True, exist_ok=True)
+        draft_path.write_text("Assessment-approved draft\n", encoding="utf-8")
+        workspace_document = {
+            "schema_version": "1.0",
+            "workspace_version": 8,
+            "workspace": {
+                "draft_versions": [
+                    {
+                        "draft_id": "D4",
+                        "relative_path": str(
+                            draft_path.relative_to(self.project_path)
+                        ),
+                        "sha256": backend_selector.file_sha256(draft_path),
+                    }
+                ]
+            },
+        }
+        workspace_document["workspace_sha256"] = (
+            backend_selector.canonical_json_sha256(
+                workspace_document,
+                "workspace_sha256",
+            )
+        )
+        self.write_json(workspace_path, workspace_document)
+        workspace_state = {
+            "current_version": 8,
+            "current_json_path": str(
+                workspace_path.relative_to(self.project_path)
+            ),
+        }
+        assessment_path = (
+            self.book_directory
+            / "assessments"
+            / self.chapter_id
+            / f"{assessment_id}.json"
+        )
+        assessment_document = {
+            "schema_version": "1.0",
+            "assessment_id": assessment_id,
+            "assessment": {
+                "book_id": self.book_id,
+                "chapter_id": self.chapter_id,
+                "draft_id": "D4",
+                "outcome": "ready_for_final_pass",
+                "research_request": None,
+                "human_input_requests": [],
+            },
+        }
+        assessment_document["assessment_sha256"] = (
+            backend_selector.canonical_json_sha256(
+                assessment_document,
+                "assessment_sha256",
+            )
+        )
+        self.write_json(assessment_path, assessment_document)
+
+        with (
+            patch.object(backend_selector, "PROJECT_PATH", self.project_path),
+            patch.object(backend_selector, "BOOKS_PATH", self.books_path),
+            patch.object(
+                backend_selector,
+                "load_chapter_workspace_state",
+                return_value=workspace_state,
+            ),
+            patch.object(
+                backend_selector,
+                "load_workspace_document",
+                return_value=workspace_document,
+            ),
+        ):
+            run = backend_selector.load_or_create_chapter_run(
+                self.book_id,
+                self.chapter_id,
+            )
+            run.update(
+                {
+                    "status": "human_input_closeout_failed",
+                    "developer_passes_total": 10,
+                    "evaluator_passes_total": 8,
+                    "final_pass_requested": True,
+                    "final_closeout_source_draft_id": "D4",
+                    "final_closeout_developer_call_started_at": None,
+                    "final_closeout_evaluator_call_started_at": None,
+                    "last_assessment_id": assessment_id,
+                    "last_assessment_path": str(
+                        assessment_path.relative_to(self.project_path)
+                    ),
+                    "last_assessment_sha256": assessment_document[
+                        "assessment_sha256"
+                    ],
+                    "last_assessment_outcome": "ready_for_final_pass",
+                }
+            )
+            backend_selector.save_chapter_run(run)
+            recovery_path = backend_selector.authorize_final_pass_repair(
+                self.book_id,
+                self.chapter_id,
+                "Authorize the exact two-call final-pass pair.",
+            )
+            recovery = backend_selector.load_chapter_recovery_authorization(
+                self.book_id,
+                self.chapter_id,
+            )
+
+        self.assertTrue(recovery_path.is_file())
+        self.assertIsNotNone(recovery)
+        self.assertEqual(recovery["recovery_kind"], "final_pass_revision")
+        self.assertEqual(recovery["assessment_outcome"], "ready_for_final_pass")
+        self.assertEqual(recovery["source_draft_id"], "D4")
+        self.assertEqual(recovery["max_recovery_agent_calls"], 2)
+
+    def test_performance_repair_review_authorizes_exactly_two_calls(
+        self,
+    ) -> None:
+        assessment_id = "A3"
+        workspace_path = (
+            self.book_directory
+            / "workspaces"
+            / self.chapter_id
+            / "versions"
+            / "v004.json"
+        )
+        draft_path = (
+            self.book_directory
+            / "drafts"
+            / self.chapter_id
+            / "D1.md"
+        )
+        draft_path.parent.mkdir(parents=True, exist_ok=True)
+        draft_path.write_text("Performance candidate\n", encoding="utf-8")
+        workspace_document = {
+            "schema_version": "1.0",
+            "workspace_version": 4,
+            "workspace": {
+                "draft_versions": [
+                    {
+                        "draft_id": "D1",
+                        "relative_path": str(
+                            draft_path.relative_to(self.project_path)
+                        ),
+                        "sha256": backend_selector.file_sha256(draft_path),
+                    }
+                ]
+            },
+        }
+        workspace_document["workspace_sha256"] = (
+            backend_selector.canonical_json_sha256(
+                workspace_document,
+                "workspace_sha256",
+            )
+        )
+        self.write_json(workspace_path, workspace_document)
+        workspace_state = {
+            "current_version": 4,
+            "current_json_path": str(
+                workspace_path.relative_to(self.project_path)
+            ),
+        }
+        assessment_path = (
+            self.book_directory
+            / "assessments"
+            / self.chapter_id
+            / f"{assessment_id}.json"
+        )
+        assessment_document = {
+            "schema_version": "1.0",
+            "assessment_id": assessment_id,
+            "assessment": {
+                "book_id": self.book_id,
+                "chapter_id": self.chapter_id,
+                "draft_id": "D1",
+                "outcome": "revise_draft",
+                "research_request": None,
+                "human_input_requests": [],
+            },
+        }
+        assessment_document["assessment_sha256"] = (
+            backend_selector.canonical_json_sha256(
+                assessment_document,
+                "assessment_sha256",
+            )
+        )
+        self.write_json(assessment_path, assessment_document)
+
+        with (
+            patch.object(backend_selector, "PROJECT_PATH", self.project_path),
+            patch.object(backend_selector, "BOOKS_PATH", self.books_path),
+            patch.object(
+                backend_selector,
+                "load_chapter_workspace_state",
+                return_value=workspace_state,
+            ),
+            patch.object(
+                backend_selector,
+                "load_workspace_document",
+                return_value=workspace_document,
+            ),
+        ):
+            run = backend_selector.load_or_create_chapter_run(
+                self.book_id,
+                self.chapter_id,
+            )
+            run.update(
+                {
+                    "status": "performance_repair_required",
+                    "workflow_runtime_version": "performance-v2",
+                    "performance_repair_cycles_total": 1,
+                    "developer_passes_total": 3,
+                    "evaluator_passes_total": 3,
+                    "last_assessment_id": assessment_id,
+                    "last_assessment_path": str(
+                        assessment_path.relative_to(self.project_path)
+                    ),
+                    "last_assessment_sha256": assessment_document[
+                        "assessment_sha256"
+                    ],
+                    "last_assessment_outcome": "revise_draft",
+                }
+            )
+            backend_selector.save_chapter_run(run)
+            recovery_path = backend_selector.authorize_final_pass_repair(
+                self.book_id,
+                self.chapter_id,
+                "Authorize the exact remaining audited correction.",
+            )
+            recovery = backend_selector.load_chapter_recovery_authorization(
+                self.book_id,
+                self.chapter_id,
+            )
+
+        self.assertTrue(recovery_path.is_file())
+        self.assertEqual(recovery["recovery_kind"], "final_pass_revision")
+        self.assertEqual(recovery["baseline_agent_calls_total"], 6)
+        self.assertEqual(recovery["max_recovery_agent_calls"], 2)
+        self.assertIn("bounded performance repair", recovery["reason"])
+
     def test_revision_recovery_binds_pending_draft_without_research_session(
         self,
     ) -> None:
@@ -2893,6 +3352,288 @@ class ChapterRecoveryAuthorizationTests(unittest.TestCase):
         self.assertFalse(recovery["assessment_extension_allowed"])
         self.assertEqual(recovery["pending_drafts"][0]["draft_id"], "D2")
         self.assertNotIn("source_session_path", recovery)
+
+    def test_revision_recovery_binds_planned_workspace_revision(
+        self,
+    ) -> None:
+        draft_directory = (
+            self.book_directory / "drafts" / self.chapter_id
+        )
+        draft_directory.mkdir(parents=True)
+        draft_path = draft_directory / "D1.md"
+        draft_path.write_text("# Assessed draft\n", encoding="utf-8")
+        draft_record = {
+            "draft_id": "D1",
+            "relative_path": str(draft_path.relative_to(self.project_path)),
+            "sha256": backend_selector.file_sha256(draft_path),
+        }
+        workspace_path = (
+            self.book_directory
+            / "workspaces"
+            / self.chapter_id
+            / "versions"
+            / "v006.json"
+        )
+        workspace_document = {
+            "schema_version": "1.0",
+            "workspace_version": 6,
+            "workspace": {
+                "draft_versions": [draft_record],
+                "targeted_revisions": [
+                    {
+                        "revision_id": "REV1",
+                        "source_draft_id": "D1",
+                        "status": "planned",
+                        "result_draft_id": None,
+                    }
+                ],
+            },
+        }
+        workspace_document["workspace_sha256"] = (
+            backend_selector.canonical_json_sha256(
+                workspace_document,
+                "workspace_sha256",
+            )
+        )
+        self.write_json(workspace_path, workspace_document)
+        workspace_state = {
+            "current_version": 6,
+            "current_json_path": str(
+                workspace_path.relative_to(self.project_path)
+            ),
+        }
+        assessment_path = (
+            self.book_directory
+            / "assessments"
+            / self.chapter_id
+            / "A5.json"
+        )
+        assessment_document = {
+            "schema_version": "1.0",
+            "assessment_id": "A5",
+            "assessment": {
+                "book_id": self.book_id,
+                "chapter_id": self.chapter_id,
+                "outcome": "revise_draft",
+            },
+        }
+        assessment_document["assessment_sha256"] = (
+            backend_selector.canonical_json_sha256(
+                assessment_document,
+                "assessment_sha256",
+            )
+        )
+        self.write_json(assessment_path, assessment_document)
+
+        with (
+            patch.object(
+                backend_selector,
+                "PROJECT_PATH",
+                self.project_path,
+            ),
+            patch.object(
+                backend_selector,
+                "BOOKS_PATH",
+                self.books_path,
+            ),
+            patch.object(
+                backend_selector,
+                "load_chapter_workspace_state",
+                return_value=workspace_state,
+            ),
+            patch.object(
+                backend_selector,
+                "chapter_has_draftable_planned_revision",
+                return_value=True,
+            ),
+        ):
+            run = backend_selector.load_or_create_chapter_run(
+                self.book_id,
+                self.chapter_id,
+            )
+            run.update(
+                {
+                    "status": "agent_call_limit_reached",
+                    "developer_passes_total": 6,
+                    "evaluator_passes_total": 2,
+                    "researcher_passes_total": 0,
+                    "last_assessment_id": "A5",
+                    "last_assessment_path": str(
+                        assessment_path.relative_to(self.project_path)
+                    ),
+                    "last_assessment_sha256": assessment_document[
+                        "assessment_sha256"
+                    ],
+                    "last_assessment_outcome": "revise_draft",
+                }
+            )
+            backend_selector.save_chapter_run(run)
+            recovery_path = backend_selector.authorize_chapter_recovery(
+                self.book_id,
+                self.chapter_id,
+                "Approve one bounded planned-revision recovery.",
+            )
+            recovery = json.loads(
+                recovery_path.read_text(encoding="utf-8")
+            )
+            loaded = (
+                backend_selector.load_chapter_recovery_authorization(
+                    self.book_id,
+                    self.chapter_id,
+                )
+            )
+            self.assertEqual(
+                loaded["recovery_authorization_sha256"],
+                recovery["recovery_authorization_sha256"],
+            )
+            workspace_path.write_text("{}\n", encoding="utf-8")
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "changed after approval",
+            ):
+                backend_selector.load_chapter_recovery_authorization(
+                    self.book_id,
+                    self.chapter_id,
+                )
+
+        self.assertEqual(
+            recovery["recovery_kind"],
+            "planned_draft_revision",
+        )
+        self.assertEqual(recovery["max_recovery_agent_calls"], 4)
+        self.assertEqual(recovery["source_draft_id"], "D1")
+        self.assertEqual(recovery["planned_revision_ids"], ["REV1"])
+        self.assertFalse(recovery["assessment_extension_allowed"])
+
+    def test_ready_to_draft_recovery_binds_registered_draft(
+        self,
+    ) -> None:
+        draft_directory = (
+            self.book_directory / "drafts" / self.chapter_id
+        )
+        draft_directory.mkdir(parents=True)
+        draft_path = draft_directory / "D1.md"
+        draft_path.write_text("# Registered draft\n", encoding="utf-8")
+        draft_record = {
+            "draft_id": "D1",
+            "relative_path": str(draft_path.relative_to(self.project_path)),
+            "sha256": backend_selector.file_sha256(draft_path),
+        }
+        workspace_path = (
+            self.book_directory
+            / "workspaces"
+            / self.chapter_id
+            / "versions"
+            / "v005.json"
+        )
+        workspace_document = {
+            "schema_version": "1.0",
+            "workspace_version": 5,
+            "workspace": {"draft_versions": [draft_record]},
+        }
+        workspace_document["workspace_sha256"] = (
+            backend_selector.canonical_json_sha256(
+                workspace_document,
+                "workspace_sha256",
+            )
+        )
+        self.write_json(workspace_path, workspace_document)
+        workspace_state = {
+            "current_version": 5,
+            "current_json_path": str(
+                workspace_path.relative_to(self.project_path)
+            ),
+        }
+        assessment_path = (
+            self.book_directory
+            / "assessments"
+            / self.chapter_id
+            / "A4.json"
+        )
+        assessment_document = {
+            "schema_version": "1.0",
+            "assessment_id": "A4",
+            "assessment": {
+                "book_id": self.book_id,
+                "chapter_id": self.chapter_id,
+                "outcome": "ready_to_draft",
+            },
+        }
+        assessment_document["assessment_sha256"] = (
+            backend_selector.canonical_json_sha256(
+                assessment_document,
+                "assessment_sha256",
+            )
+        )
+        self.write_json(assessment_path, assessment_document)
+
+        with (
+            patch.object(
+                backend_selector,
+                "PROJECT_PATH",
+                self.project_path,
+            ),
+            patch.object(
+                backend_selector,
+                "BOOKS_PATH",
+                self.books_path,
+            ),
+            patch.object(
+                backend_selector,
+                "load_chapter_workspace_state",
+                return_value=workspace_state,
+            ),
+        ):
+            run = backend_selector.load_or_create_chapter_run(
+                self.book_id,
+                self.chapter_id,
+            )
+            run.update(
+                {
+                    "status": "agent_call_limit_reached",
+                    "developer_passes_total": 5,
+                    "evaluator_passes_total": 4,
+                    "researcher_passes_total": 3,
+                    "last_assessment_id": "A4",
+                    "last_assessment_path": str(
+                        assessment_path.relative_to(self.project_path)
+                    ),
+                    "last_assessment_sha256": assessment_document[
+                        "assessment_sha256"
+                    ],
+                    "last_assessment_outcome": "ready_to_draft",
+                }
+            )
+            backend_selector.save_chapter_run(run)
+            recovery_path = backend_selector.authorize_chapter_recovery(
+                self.book_id,
+                self.chapter_id,
+                "Approve evaluation of the registered draft.",
+            )
+            recovery = (
+                backend_selector.load_chapter_recovery_authorization(
+                    self.book_id,
+                    self.chapter_id,
+                )
+            )
+            draft_path.write_text("# Changed draft\n", encoding="utf-8")
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "changed after approval",
+            ):
+                backend_selector.load_chapter_recovery_authorization(
+                    self.book_id,
+                    self.chapter_id,
+                )
+
+        self.assertTrue(recovery_path.is_file())
+        self.assertEqual(
+            recovery["recovery_kind"],
+            "registered_draft_evaluation",
+        )
+        self.assertEqual(recovery["max_recovery_agent_calls"], 4)
+        self.assertFalse(recovery["assessment_extension_allowed"])
+        self.assertEqual(recovery["registered_draft_id"], "D1")
 
     def test_research_access_recovery_binds_blocked_evidence_chain(
         self,

@@ -1,4 +1,4 @@
 interface:
   display_name: "Alexandrian Research Reviewer"
-  short_description: "Build grounded pre-book research records"
-  default_prompt: "Use $alexandrian-reviewer to turn a finished conversation into a scoped, citation-ready research record for human review and book planning."
+  short_description: "Preserve grounded narrative research lineage"
+  default_prompt: "Use $alexandrian-reviewer to turn a finished conversation into grounded narrative-research lineage."

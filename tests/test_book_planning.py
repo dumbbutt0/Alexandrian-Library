@@ -410,6 +410,27 @@ class BookPlanningTests(unittest.TestCase):
             f"{review_id}:C1",
         )
 
+    def test_book_plan_rejects_more_chapters_than_its_evidence_supports(self) -> None:
+        conversation_id = "evidence-sized-plan"
+        review_id = self.create_eligible_review(conversation_id)
+        proposal_data = self.make_proposal(
+            review_id,
+            [f"{review_id}:C1"],
+        ).model_dump(mode="json")
+        first = proposal_data["chapter_plan"][0]
+        proposal_data["chapter_plan"] = [
+            {**first, "chapter_id": f"CH{index}"}
+            for index in range(1, 4)
+        ]
+
+        with self.assertRaisesRegex(
+            ToolError,
+            "evidence-sized chapter budget",
+        ):
+            mcp_server.submit_book_manifest(
+                mcp_server.BookManifestProposal.model_validate(proposal_data)
+            )
+
     def test_book_tool_writes_manifest_and_outline_without_prose(self) -> None:
         conversation_id = "successful-book-plan"
         review_id = self.create_eligible_review(conversation_id)
@@ -600,8 +621,18 @@ class BookPlanningTests(unittest.TestCase):
             patch.object(backend_selector, "BOOKS_PATH", self.books_path),
             patch.object(
                 backend_selector,
+                "REVIEW_SESSIONS_PATH",
+                self.review_sessions_path,
+            ),
+            patch.object(
+                backend_selector,
                 "capture_backend_response",
                 side_effect=capture_side_effect,
+            ),
+            patch.object(
+                backend_selector,
+                "ensure_deterministic_chapter_context",
+                return_value=False,
             ),
         ):
             manifest_path, outline_path, outline = (
@@ -620,6 +651,65 @@ class BookPlanningTests(unittest.TestCase):
             captured_call_purposes,
             [backend_selector.BOOK_PLAN_CALL],
         )
+
+    def test_runtime_observation_directory_does_not_block_first_book_plan(
+        self,
+    ) -> None:
+        conversation_id = "runtime-observation-book-plan"
+        review_id = self.create_eligible_review(conversation_id)
+        review_path = self.reviews_path / f"{conversation_id}.json"
+        decision_path = (
+            self.review_decisions_path / f"{conversation_id}.json"
+        )
+        proposal = self.make_proposal(review_id, [f"{review_id}:C1"])
+        runtime_path = (
+            self.books_path
+            / f"book-{conversation_id}"
+            / "runs"
+            / "runtime.events.jsonl"
+        )
+        runtime_path.parent.mkdir(parents=True)
+        runtime_path.write_text('{"event":"job_started"}\n', encoding="utf-8")
+
+        def capture_side_effect(
+            _backend: str,
+            _program_path: str,
+            _prompt: str,
+            _call_purpose: str,
+        ) -> tuple[list[dict], str]:
+            mcp_server.submit_book_manifest(proposal)
+            return [], "Book plan saved."
+
+        with (
+            patch.object(backend_selector, "BOOKS_PATH", self.books_path),
+            patch.object(
+                backend_selector,
+                "REVIEW_SESSIONS_PATH",
+                self.review_sessions_path,
+            ),
+            patch.object(
+                backend_selector,
+                "capture_backend_response",
+                side_effect=capture_side_effect,
+            ),
+            patch.object(
+                backend_selector,
+                "ensure_deterministic_chapter_context",
+                return_value=False,
+            ),
+        ):
+            manifest_path, outline_path, _ = (
+                backend_selector.plan_book_from_review(
+                    "codex",
+                    "/usr/bin/codex",
+                    review_path,
+                    decision_path,
+                )
+            )
+
+        self.assertTrue(manifest_path.is_file())
+        self.assertTrue(outline_path.is_file())
+        self.assertTrue(runtime_path.is_file())
 
     def test_planner_prompt_bounds_belief_revision_references(self) -> None:
         review_document = {
@@ -646,12 +736,15 @@ class BookPlanningTests(unittest.TestCase):
             {"book_planning_gate": "ready"},
         )
 
-        self.assertIn(
-            '"allowed_belief_revision_transcript_references": [\n'
-            '    "T1",\n'
-            '    "T2"\n'
-            "  ]",
-            prompt,
+        planning_json = prompt.split("<book_planning_data>\n", 1)[1].split(
+            "\n</book_planning_data>",
+            1,
+        )[0]
+        self.assertEqual(
+            json.loads(planning_json)[
+                "allowed_belief_revision_transcript_references"
+            ],
+            ["T1", "T2"],
         )
         self.assertIn(
             "is not a general provenance field",
@@ -709,6 +802,139 @@ class BookPlanningTests(unittest.TestCase):
         self.assertFalse(
             (self.books_path / f"book-{conversation_id}").exists()
         )
+
+    def test_planner_gap_wording_gets_one_bounded_correction_pass(self) -> None:
+        conversation_id = "planner-gap-wording-correction"
+        review_id = self.create_eligible_review(
+            conversation_id,
+            evidence_gap=True,
+        )
+        review_path = self.reviews_path / f"{conversation_id}.json"
+        decision_path = self.review_decisions_path / f"{conversation_id}.json"
+        proposal_data = self.make_proposal(
+            review_id,
+            [f"{review_id}:C1"],
+            research_gaps=[
+                {
+                    "description": "How can evidence become a trustworthy book?",
+                    "source_review_id": review_id,
+                    "transcript_references": ["T1"],
+                    "blocking_chapter_ids": [],
+                }
+            ],
+        ).model_dump(mode="json")
+        proposal_data["prohibited_overinterpretations"] = [
+            "Do not treat the current planning model as validated."
+        ]
+        proposal = mcp_server.BookManifestProposal.model_validate(
+            proposal_data
+        )
+        prompts = []
+
+        def capture_side_effect(
+            _backend: str,
+            _program_path: str,
+            prompt: str,
+            _call_purpose: str,
+        ) -> tuple[list[dict], str]:
+            prompts.append(prompt)
+            if len(prompts) == 1:
+                return [], (
+                    "Manifest submission was rejected because the "
+                    "research-gap descriptions did not exactly match the "
+                    "review's canonical wording. No files were written."
+                )
+            mcp_server.submit_book_manifest(proposal)
+            return [], "Corrected book plan saved."
+
+        with (
+            patch.object(backend_selector, "BOOKS_PATH", self.books_path),
+            patch.object(
+                backend_selector,
+                "REVIEW_SESSIONS_PATH",
+                self.review_sessions_path,
+            ),
+            patch.object(
+                backend_selector,
+                "capture_backend_response",
+                side_effect=capture_side_effect,
+            ),
+        ):
+            manifest_path, outline_path, _ = (
+                backend_selector.plan_book_from_review(
+                    "codex",
+                    "/usr/bin/codex",
+                    review_path,
+                    decision_path,
+                )
+            )
+
+        self.assertTrue(manifest_path.is_file())
+        self.assertTrue(outline_path.is_file())
+        self.assertEqual(len(prompts), 2)
+        self.assertIn(
+            '"code": "canonical_research_gaps_required"',
+            prompts[1],
+        )
+        self.assertIn(
+            '"description": "How can evidence become a trustworthy book?"',
+            prompts[1],
+        )
+        correction = json.loads(
+            (
+                self.review_sessions_path
+                / f"{conversation_id}.book-plan-validation-correction.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertIsNotNone(correction["retry_started_at"])
+        self.assertIsNotNone(correction["resolved_at"])
+
+    def test_repeated_planner_gap_failure_exhausts_durable_retry(self) -> None:
+        conversation_id = "planner-gap-wording-repeated"
+        self.create_eligible_review(conversation_id, evidence_gap=True)
+        review_path = self.reviews_path / f"{conversation_id}.json"
+        decision_path = self.review_decisions_path / f"{conversation_id}.json"
+        provider_response = (
+            "Manifest submission was rejected because the research-gap "
+            "descriptions did not exactly match the review's canonical "
+            "wording. No files were written."
+        )
+
+        with (
+            patch.object(backend_selector, "BOOKS_PATH", self.books_path),
+            patch.object(
+                backend_selector,
+                "REVIEW_SESSIONS_PATH",
+                self.review_sessions_path,
+            ),
+            patch.object(
+                backend_selector,
+                "capture_backend_response",
+                return_value=([], provider_response),
+            ) as capture,
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "one bounded correction pass",
+            ):
+                backend_selector.plan_book_from_review(
+                    "codex",
+                    "/usr/bin/codex",
+                    review_path,
+                    decision_path,
+                )
+            self.assertEqual(capture.call_count, 2)
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "already exhausted",
+            ):
+                backend_selector.plan_book_from_review(
+                    "codex",
+                    "/usr/bin/codex",
+                    review_path,
+                    decision_path,
+                )
+            self.assertEqual(capture.call_count, 2)
 
     def test_timed_out_planner_remains_resumable_at_book_plan(self) -> None:
         conversation_id = "timed-out-wrapper-book-plan"
@@ -864,6 +1090,11 @@ class BookPlanningTests(unittest.TestCase):
                 backend_selector,
                 "capture_backend_response",
                 side_effect=capture_side_effect,
+            ),
+            patch.object(
+                backend_selector,
+                "ensure_deterministic_chapter_context",
+                return_value=False,
             ),
         ):
             json_path, markdown_path, body, version = (

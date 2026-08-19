@@ -115,7 +115,12 @@ class ChapterSnapshot:
     recovery_kind: str | None
     final_closeout_pending: bool
     source_requests_pending: bool
+    workspace_version: int | None = None
+    newest_draft_id: str | None = None
     interrupted_contract_id: str | None = None
+    assessment_sha256: str | None = None
+    workspace_sha256: str | None = None
+    human_input_sha256: str | None = None
 
     @property
     def calls_used(self) -> int:
@@ -178,7 +183,23 @@ def decide_next_action(snapshot: ChapterSnapshot) -> NextAction:
             0,
         )
 
-    if snapshot.legacy_status in TERMINAL_LEGACY_STATUSES:
+    if snapshot.recovery_kind == "final_pass_revision":
+        return NextAction(
+            ChapterState.FINAL_PASS_REQUIRED,
+            ActionKind.RUN_FINAL_PASS_REPAIR,
+            "A bounded final-pass repair is authorized.",
+            min(1, snapshot.calls_remaining),
+        )
+
+    planned_revision_retryable = (
+        snapshot.legacy_status == "controller_no_progress"
+        and snapshot.recovery_kind == "planned_draft_revision"
+        and snapshot.calls_remaining > 0
+    )
+    if (
+        snapshot.legacy_status in TERMINAL_LEGACY_STATUSES
+        and not planned_revision_retryable
+    ):
         return NextAction(
             ChapterState.FAILED,
             ActionKind.RETURN_FAILURE,
@@ -194,6 +215,19 @@ def decide_next_action(snapshot: ChapterSnapshot) -> NextAction:
             ChapterState.RECOVERY_REQUIRED,
             ActionKind.REQUEST_RECOVERY_AUTHORIZATION,
             "The base call budget ended without recovery authorization.",
+            0,
+        )
+
+    if (
+        snapshot.legacy_status == "performance_repair_required"
+        and snapshot.recovery_kind is None
+    ):
+        return NextAction(
+            ChapterState.RECOVERY_REQUIRED,
+            ActionKind.REQUEST_RECOVERY_AUTHORIZATION,
+            "The bounded performance repair was consumed; the remaining "
+            "audited defect needs explicit authority for one terminal "
+            "correction-and-verdict pair.",
             0,
         )
 
@@ -245,14 +279,6 @@ def decide_next_action(snapshot: ChapterSnapshot) -> NextAction:
             ChapterState.WORKSPACE_DEVELOPMENT,
             ActionKind.APPLY_HUMAN_INPUT,
             "The assessment-bound human decision is ready to apply.",
-            min(1, snapshot.calls_remaining),
-        )
-
-    if snapshot.recovery_kind == "final_pass_revision":
-        return NextAction(
-            ChapterState.FINAL_PASS_REQUIRED,
-            ActionKind.RUN_FINAL_PASS_REPAIR,
-            "A bounded final-pass repair is authorized.",
             min(1, snapshot.calls_remaining),
         )
 
@@ -453,10 +479,16 @@ class ChapterEventLedger:
                 "An earlier chapter action requires reconciliation."
             )
 
+        retry_lineage_sha256 = self.retry_lineage_sha256(
+            snapshot,
+            decision,
+        )
         failed_for_action = [
             contract
             for contract in self.failed_contracts(events)
             if contract["action"] == decision.action.value
+            and self.contract_retry_lineage_sha256(contract)
+            == retry_lineage_sha256
         ]
         retry_authorizations = {
             event["payload"]["failed_contract_id"]
@@ -492,6 +524,7 @@ class ChapterEventLedger:
             "max_provider_calls": decision.max_provider_calls,
             "snapshot": asdict(snapshot),
             "run_baseline": run_baseline,
+            "retry_lineage_sha256": retry_lineage_sha256,
         }
         contract = {
             **contract_basis,
@@ -651,6 +684,7 @@ class ChapterEventLedger:
             "no_provider_output",
             "provider_output_accepted",
             "provider_output_rejected",
+            "interrupted_no_artifact",
         }:
             raise ValueError("Unsupported interruption disposition.")
         if not note.strip():
@@ -696,9 +730,14 @@ class ChapterEventLedger:
         ):
             raise RuntimeError("Retry was already authorized.")
         failed_contract = failed_contracts[0]
+        failed_lineage = self.contract_retry_lineage_sha256(
+            failed_contract
+        )
         if (
             sum(
                 contract["action"] == failed_contract["action"]
+                and self.contract_retry_lineage_sha256(contract)
+                == failed_lineage
                 for contract in self.failed_contracts(events)
             )
             >= 2
@@ -710,6 +749,59 @@ class ChapterEventLedger:
                 "failed_contract_id": failed_contract_id,
                 "action": failed_contract["action"],
                 "changed_condition": changed_condition.strip(),
+            },
+        )
+
+    def authorize_system_repair(
+        self,
+        failed_contract_ids: list[str],
+        action: str,
+        repair_code: str,
+        repair_evidence: dict,
+    ) -> dict:
+        """Supersede attempts consumed solely by one proven controller bug."""
+        if len(failed_contract_ids) < 2 or len(set(failed_contract_ids)) != len(
+            failed_contract_ids
+        ):
+            raise ValueError("System repair requires distinct exhausted contracts.")
+        if not repair_code.strip() or not isinstance(repair_evidence, dict):
+            raise ValueError("System repair requires exact durable evidence.")
+        events = self.read()
+        if any(
+            event.get("event_type") == "retry_authorized"
+            and event.get("payload", {}).get("authorization_kind")
+            == "system_repair"
+            and event.get("payload", {}).get("action") == action
+            and event.get("payload", {}).get("repair_code")
+            == repair_code.strip()
+            for event in events
+        ):
+            raise RuntimeError(
+                "This controller action already used system repair code "
+                f"{repair_code.strip()}."
+            )
+        failed = [
+            contract
+            for contract in self.failed_contracts(events)
+            if contract.get("action") == action
+        ]
+        actual_ids = [contract["contract_id"] for contract in failed]
+        if actual_ids != failed_contract_ids:
+            raise RuntimeError(
+                "System repair evidence does not match the exhausted contracts."
+            )
+        return self.append(
+            "retry_authorized",
+            {
+                "authorization_kind": "system_repair",
+                "failed_contract_id": failed_contract_ids[-1],
+                "superseded_failed_contract_ids": failed_contract_ids,
+                "action": action,
+                "changed_condition": (
+                    "A deterministic controller invariant was repaired."
+                ),
+                "repair_code": repair_code.strip(),
+                "repair_evidence": repair_evidence,
             },
         )
 
@@ -756,6 +848,18 @@ class ChapterEventLedger:
             for event in events
             if event.get("event_type") == "contract_opened"
         }
+        superseded = {
+            contract_id
+            for event in events
+            if event.get("event_type") == "retry_authorized"
+            and event.get("payload", {}).get("authorization_kind")
+            == "system_repair"
+            for contract_id in event.get("payload", {}).get(
+                "superseded_failed_contract_ids",
+                [],
+            )
+            if isinstance(contract_id, str)
+        }
         failed = []
         for event in events:
             event_type = event.get("event_type")
@@ -765,12 +869,22 @@ class ChapterEventLedger:
                 and payload.get("disposition")
                 in {"no_provider_output", "provider_output_rejected"}
             )
+            is_legacy_automatic_interruption = (
+                is_failed_reconciliation
+                and payload.get("disposition") == "provider_output_rejected"
+                and str(payload.get("note", "")).startswith(
+                    "The acknowledged provider process ended during restart "
+                    "without changing any canonical chapter artifact."
+                )
+            )
+            if is_legacy_automatic_interruption:
+                continue
             if event_type != "contract_failed" and not (
                 is_failed_reconciliation
             ):
                 continue
             contract_id = payload.get("contract_id")
-            if contract_id in opened:
+            if contract_id in opened and contract_id not in superseded:
                 failed.append(opened[contract_id])
         return failed
 
@@ -781,10 +895,16 @@ class ChapterEventLedger:
     ) -> dict | None:
         """Return the retry gate for the proposed action, if one exists."""
         events = self.read()
+        retry_lineage_sha256 = self.retry_lineage_sha256(
+            snapshot,
+            decision,
+        )
         failed_for_action = [
             contract
             for contract in self.failed_contracts(events)
             if contract["action"] == decision.action.value
+            and self.contract_retry_lineage_sha256(contract)
+            == retry_lineage_sha256
         ]
         if not failed_for_action:
             return None
@@ -808,6 +928,102 @@ class ChapterEventLedger:
             "status": "authorization_required",
             "failed_contract_id": failed["contract_id"],
         }
+
+    @staticmethod
+    def retry_lineage_sha256(
+        snapshot: ChapterSnapshot,
+        decision: NextAction,
+    ) -> str:
+        """Bind retry consumption to one canonical action input.
+
+        A chapter can legitimately evaluate many workspaces and apply many
+        independent human decisions.  Counting failures by action name alone
+        lets an old assessment exhaust every later assessment.  The lineage
+        intentionally excludes mutable counters while binding the artifact
+        that gives the action its authority.
+        """
+        basis: dict[str, Any] = {
+            "action": decision.action.value,
+            "state": decision.state.value,
+        }
+        if decision.action == ActionKind.APPLY_HUMAN_INPUT:
+            basis["assessment_sha256"] = snapshot.assessment_sha256
+        elif decision.action == ActionKind.RUN_CHAPTER_PHASE:
+            if decision.state == ChapterState.AWAITING_EVALUATION:
+                basis["workspace_sha256"] = snapshot.workspace_sha256
+            elif snapshot.assessment_sha256 is not None:
+                basis["assessment_sha256"] = snapshot.assessment_sha256
+            else:
+                basis["workspace_sha256"] = snapshot.workspace_sha256
+        elif decision.action in {
+            ActionKind.PREPARE_FINAL_PASS_CLOSEOUT,
+            ActionKind.RUN_FINAL_PASS_CLOSEOUT,
+            ActionKind.RUN_FINAL_PASS_REPAIR,
+        }:
+            basis["draft_id"] = snapshot.newest_draft_id
+            basis["workspace_sha256"] = snapshot.workspace_sha256
+        elif decision.action == ActionKind.RUN_HUMAN_INPUT_CLOSEOUT:
+            basis["assessment_sha256"] = snapshot.assessment_sha256
+            basis["human_input_sha256"] = snapshot.human_input_sha256
+        elif decision.action == ActionKind.RUN_RESEARCH_ACCESS_RECOVERY:
+            basis["assessment_sha256"] = snapshot.assessment_sha256
+            basis["recovery_kind"] = snapshot.recovery_kind
+        else:
+            basis["workspace_sha256"] = snapshot.workspace_sha256
+            basis["assessment_sha256"] = snapshot.assessment_sha256
+        return canonical_sha256(basis)
+
+    @staticmethod
+    def contract_retry_lineage_sha256(contract: dict) -> str:
+        """Read a stored lineage or derive it for a pre-lineage ledger."""
+        stored = contract.get("retry_lineage_sha256")
+        if isinstance(stored, str) and stored:
+            return stored
+        snapshot = contract.get("snapshot")
+        if not isinstance(snapshot, dict):
+            snapshot = {}
+        baseline = contract.get("run_baseline")
+        if not isinstance(baseline, dict):
+            baseline = {}
+        action = contract.get("action")
+        state = contract.get("state")
+        basis: dict[str, Any] = {"action": action, "state": state}
+        assessment_sha256 = snapshot.get("assessment_sha256") or baseline.get(
+            "last_assessment_sha256"
+        )
+        workspace_sha256 = snapshot.get("workspace_sha256")
+        if action == ActionKind.APPLY_HUMAN_INPUT.value:
+            basis["assessment_sha256"] = assessment_sha256
+        elif action == ActionKind.RUN_CHAPTER_PHASE.value:
+            if state == ChapterState.AWAITING_EVALUATION.value:
+                basis["workspace_sha256"] = workspace_sha256
+                if workspace_sha256 is None:
+                    basis["workspace_version"] = snapshot.get(
+                        "workspace_version"
+                    )
+            elif assessment_sha256 is not None:
+                basis["assessment_sha256"] = assessment_sha256
+            else:
+                basis["workspace_sha256"] = workspace_sha256
+        elif action in {
+            ActionKind.PREPARE_FINAL_PASS_CLOSEOUT.value,
+            ActionKind.RUN_FINAL_PASS_CLOSEOUT.value,
+            ActionKind.RUN_FINAL_PASS_REPAIR.value,
+        }:
+            basis["draft_id"] = snapshot.get("newest_draft_id")
+            basis["workspace_sha256"] = workspace_sha256
+        elif action == ActionKind.RUN_HUMAN_INPUT_CLOSEOUT.value:
+            basis["assessment_sha256"] = assessment_sha256
+            basis["human_input_sha256"] = snapshot.get(
+                "human_input_sha256"
+            ) or baseline.get("last_human_input_sha256")
+        elif action == ActionKind.RUN_RESEARCH_ACCESS_RECOVERY.value:
+            basis["assessment_sha256"] = assessment_sha256
+            basis["recovery_kind"] = snapshot.get("recovery_kind")
+        else:
+            basis["workspace_sha256"] = workspace_sha256
+            basis["assessment_sha256"] = assessment_sha256
+        return canonical_sha256(basis)
 
     def contract_record(self, contract_id: str) -> dict:
         """Return one immutable opened-contract payload."""

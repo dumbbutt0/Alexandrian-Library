@@ -23,6 +23,7 @@ except ModuleNotFoundError:
 MINIMUM_PYTHON = (3, 10)
 DEPENDENCY_REQUIREMENTS = {
     "mcp": ((1, 27), 2),
+    "pypdf": ((5, 0), 7),
     "pydantic": ((2, 0), 3),
 }
 SUPPORTED_BACKENDS = ("codex", "claude")
@@ -35,8 +36,12 @@ REQUIRED_SKILLS = (
     "alexandrian-chapter-researcher",
     "alexandrian-book-synthesizer",
     "alexandrian-claim-auditor",
+    "alexandrian-cover-designer",
 )
 REQUIRED_SCHEMAS = (
+    "citation-contract.v1.schema.json",
+    "cover-design.v1.schema.json",
+    "evidence-locator.v1.schema.json",
     "chapter-controller-event.v1.schema.json",
     "conversation-event.v1.schema.json",
     "conversation-receipt.v1.schema.json",
@@ -51,6 +56,7 @@ REQUIRED_SCHEMAS = (
     "synthesis-provider-diagnostic.v1.schema.json",
     "synthesis-global-plan-audit.v1.schema.json",
     "synthesis-plan-audit.v1.schema.json",
+    "source-document.v1.schema.json",
 )
 REQUIRED_LICENSE_FILES = (
     "LICENSE",
@@ -60,10 +66,13 @@ REQUIRED_LICENSE_FILES = (
 REQUIRED_APPLICATION_FILES = (
     "backend_selector.py",
     "workflow_service.py",
+    "transition_runtime.py",
     "frontend_server.py",
     "frontend/index.html",
     "frontend/styles.css",
     "frontend/app.js",
+    "citation_grounding.py",
+    "source_document.py",
 )
 REQUIRED_POLICY_FIELDS = {
     "approved_domains",
@@ -86,6 +95,8 @@ REQUIRED_MCP_TOOLS = {
     "submit_chapter_assessment",
     "revise_chapter_workspace",
     "prepare_book_synthesis_context",
+    "read_book_synthesis_attempt_input",
+    "read_book_synthesis_audit_input",
     "initialize_book_synthesis",
     "save_book_synthesis_attempt",
     "submit_book_synthesis_audit",

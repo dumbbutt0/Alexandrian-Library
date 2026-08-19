@@ -1,4 +1,4 @@
 interface:
   display_name: "Alexandrian Chapter Developer"
-  short_description: "Develop evidence-grounded chapter workspaces"
-  default_prompt: "Use $alexandrian-chapter-developer to perform one bounded development pass on an approved Alexandrian Library chapter."
+  short_description: "Develop grounded narrative research chapters"
+  default_prompt: "Use $alexandrian-chapter-developer to develop one grounded narrative research chapter transition."

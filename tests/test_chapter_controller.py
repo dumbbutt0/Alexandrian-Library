@@ -96,6 +96,76 @@ class ChapterControllerDecisionTests(unittest.TestCase):
             chapter_controller.ActionKind.REQUEST_CLOSEOUT_AUTHORIZATION,
         )
 
+    def test_authorized_final_repair_overrides_failed_closeout_status(
+        self,
+    ) -> None:
+        decision = chapter_controller.decide_next_action(
+            self.snapshot(
+                legacy_status="human_input_closeout_failed",
+                developer_calls=10,
+                evaluator_calls=8,
+                call_limit=20,
+                recovery_kind="final_pass_revision",
+                final_closeout_pending=True,
+                assessment_outcome="ready_for_final_pass",
+            )
+        )
+        self.assertEqual(
+            decision.action,
+            chapter_controller.ActionKind.RUN_FINAL_PASS_REPAIR,
+        )
+        self.assertEqual(decision.max_provider_calls, 1)
+
+    def test_exhausted_performance_repair_waits_for_bounded_authority(
+        self,
+    ) -> None:
+        decision = chapter_controller.decide_next_action(
+            self.snapshot(legacy_status="performance_repair_required")
+        )
+        self.assertEqual(
+            decision.state,
+            chapter_controller.ChapterState.RECOVERY_REQUIRED,
+        )
+        self.assertEqual(
+            decision.action,
+            chapter_controller.ActionKind.REQUEST_RECOVERY_AUTHORIZATION,
+        )
+        self.assertFalse(decision.executable)
+
+    def test_planned_revision_no_progress_remains_ledger_retryable(
+        self,
+    ) -> None:
+        retryable = chapter_controller.decide_next_action(
+            self.snapshot(
+                legacy_status="controller_no_progress",
+                developer_calls=6,
+                evaluator_calls=3,
+                call_limit=12,
+                recovery_kind="planned_draft_revision",
+                assessment_outcome="revise_draft",
+            )
+        )
+        exhausted = chapter_controller.decide_next_action(
+            self.snapshot(
+                legacy_status="controller_no_progress",
+                developer_calls=7,
+                evaluator_calls=5,
+                call_limit=12,
+                recovery_kind="planned_draft_revision",
+                assessment_outcome="revise_draft",
+            )
+        )
+
+        self.assertEqual(
+            retryable.action,
+            chapter_controller.ActionKind.RUN_CHAPTER_PHASE,
+        )
+        self.assertTrue(retryable.executable)
+        self.assertEqual(
+            exhausted.action,
+            chapter_controller.ActionKind.RETURN_FAILURE,
+        )
+
     def test_authorized_closeout_keeps_authority_after_input_is_applied(
         self,
     ) -> None:
@@ -402,6 +472,89 @@ class ChapterEventLedgerTests(unittest.TestCase):
                 chapter_controller.decide_next_action(changed_again),
             )
 
+    def test_exhausted_human_input_does_not_poison_new_assessment(
+        self,
+    ) -> None:
+        first_snapshot = replace(
+            self.snapshot,
+            legacy_status="human_input_required",
+            workspace_exists=True,
+            matching_assessment_exists=True,
+            assessment_outcome="human_input_required",
+            human_input_exists=True,
+            assessment_sha256="a" * 64,
+            workspace_sha256="w" * 64,
+            human_input_sha256="h" * 64,
+            call_limit=4,
+        )
+        first_decision = chapter_controller.decide_next_action(
+            first_snapshot
+        )
+        first = self.ledger.open_contract(first_snapshot, first_decision)
+        self.ledger.mark_started(first["contract_id"])
+        self.ledger.fail(first["contract_id"], "RuntimeError", "first")
+        self.ledger.authorize_retry(
+            first["contract_id"],
+            "The same assessment received an exact changed condition.",
+        )
+        retry_snapshot = replace(first_snapshot, developer_calls=1)
+        retry = self.ledger.open_contract(
+            retry_snapshot,
+            chapter_controller.decide_next_action(retry_snapshot),
+        )
+        self.ledger.mark_started(retry["contract_id"])
+        self.ledger.fail(retry["contract_id"], "RuntimeError", "second")
+
+        new_assessment = replace(
+            retry_snapshot,
+            developer_calls=2,
+            assessment_sha256="b" * 64,
+            human_input_sha256="i" * 64,
+        )
+        new_decision = chapter_controller.decide_next_action(new_assessment)
+
+        self.assertIsNone(
+            self.ledger.retry_requirement(new_assessment, new_decision)
+        )
+        contract = self.ledger.open_contract(
+            new_assessment,
+            new_decision,
+        )
+        self.assertEqual(contract["attempt_number"], 1)
+
+    def test_proven_system_repair_restores_one_fresh_retry_budget(self) -> None:
+        first = self.ledger.open_contract(self.snapshot, self.decision)
+        self.ledger.mark_started(first["contract_id"])
+        self.ledger.fail(first["contract_id"], "RuntimeError", "first")
+        self.ledger.authorize_retry(
+            first["contract_id"],
+            "The automatic question constraint was recorded.",
+        )
+        second = self.ledger.open_contract(self.snapshot, self.decision)
+        self.ledger.mark_started(second["contract_id"])
+        self.ledger.fail(second["contract_id"], "RuntimeError", "second")
+
+        self.ledger.authorize_system_repair(
+            [first["contract_id"], second["contract_id"]],
+            self.decision.action.value,
+            "mutable_knowledge_graph_snapshot_validation",
+            {"context_sha256": "a" * 64},
+        )
+
+        repaired = self.ledger.open_contract(self.snapshot, self.decision)
+        self.assertEqual(repaired["attempt_number"], 1)
+        self.assertEqual(
+            self.ledger.failed_contracts(self.ledger.read()),
+            [],
+        )
+        with self.assertRaisesRegex(RuntimeError, "already used system repair"):
+            self.ledger.authorize_system_repair(
+                [first["contract_id"], second["contract_id"]],
+                self.decision.action.value,
+                "mutable_knowledge_graph_snapshot_validation",
+                {"context_sha256": "a" * 64},
+            )
+
     def test_contract_preserves_the_exact_run_baseline(self) -> None:
         baseline = {
             "book_id": "book-test",
@@ -501,6 +654,130 @@ class ChapterControllerIntegrationTests(unittest.TestCase):
             patch.object(backend_selector, "BOOKS_PATH", self.books),
         )
 
+    def test_retry_condition_is_bound_only_to_the_next_contract(self) -> None:
+        with self.patches()[0], self.patches()[1]:
+            snapshot = backend_selector.build_chapter_controller_snapshot(
+                self.book_id,
+                self.chapter_id,
+            )
+            decision = chapter_controller.decide_next_action(snapshot)
+            ledger = chapter_controller.ChapterEventLedger(
+                backend_selector.chapter_controller_ledger_path(
+                    self.book_id,
+                    self.chapter_id,
+                )
+            )
+            failed = ledger.open_contract(snapshot, decision)
+            ledger.mark_started(failed["contract_id"])
+            ledger.fail(
+                failed["contract_id"],
+                "no_progress",
+                "The provider made no workspace transition.",
+            )
+            ledger.authorize_retry(
+                failed["contract_id"],
+                "Narrow the chapter and preserve all unresolved choices.",
+            )
+            retry = ledger.open_contract(snapshot, decision)
+            ledger.mark_started(retry["contract_id"])
+            token = backend_selector.ACTIVE_CHAPTER_CONTRACT.set(
+                (ledger.path, retry["contract_id"])
+            )
+            try:
+                authorization = (
+                    backend_selector.active_chapter_retry_authorization()
+                )
+            finally:
+                backend_selector.ACTIVE_CHAPTER_CONTRACT.reset(token)
+
+            self.assertEqual(
+                authorization,
+                {
+                    "failed_contract_id": failed["contract_id"],
+                    "action": decision.action.value,
+                    "changed_condition": (
+                        "Narrow the chapter and preserve all unresolved "
+                        "choices."
+                    ),
+                },
+            )
+
+            ledger.complete(retry["contract_id"], snapshot)
+            later = ledger.open_contract(snapshot, decision)
+            token = backend_selector.ACTIVE_CHAPTER_CONTRACT.set(
+                (ledger.path, later["contract_id"])
+            )
+            try:
+                self.assertIsNone(
+                    backend_selector.active_chapter_retry_authorization()
+                )
+            finally:
+                backend_selector.ACTIVE_CHAPTER_CONTRACT.reset(token)
+
+    def test_chapter_prompt_exposes_bounded_retry_condition(self) -> None:
+        changed_condition = (
+            "Remove the deferred answers as dependencies and narrow claims."
+        )
+        prompt = backend_selector.build_chapter_developer_prompt(
+            "Developer rules",
+            self.book_id,
+            self.chapter_id,
+            True,
+            {"current_version": 2},
+            [],
+            retry_authorization={
+                "failed_contract_id": "CC-1-example",
+                "action": "run_chapter_phase",
+                "changed_condition": changed_condition,
+            },
+        )
+
+        self.assertIn('"retry_authorization": {', prompt)
+        self.assertIn(changed_condition, prompt)
+        self.assertIn(
+            "exact human-authorized narrowing for this transition",
+            prompt,
+        )
+
+    def test_exhausted_retry_status_is_saved_without_provider_work(self) -> None:
+        with self.patches()[0], self.patches()[1]:
+            snapshot = backend_selector.build_chapter_controller_snapshot(
+                self.book_id,
+                self.chapter_id,
+            )
+            decision = chapter_controller.decide_next_action(snapshot)
+            ledger = chapter_controller.ChapterEventLedger(
+                backend_selector.chapter_controller_ledger_path(
+                    self.book_id,
+                    self.chapter_id,
+                )
+            )
+            first = ledger.open_contract(snapshot, decision)
+            ledger.mark_started(first["contract_id"])
+            ledger.fail(first["contract_id"], "RuntimeError", "first")
+            ledger.authorize_retry(first["contract_id"], "Narrow scope")
+            second = ledger.open_contract(snapshot, decision)
+            ledger.mark_started(second["contract_id"])
+            ledger.fail(second["contract_id"], "RuntimeError", "second")
+
+            result = backend_selector.run_chapter_controller_action(
+                "codex",
+                "/usr/bin/codex",
+                self.book_id,
+                self.chapter_id,
+            )
+            saved = backend_selector.load_or_create_chapter_run(
+                self.book_id,
+                self.chapter_id,
+            )
+
+        self.assertEqual(result["status"], "controller_retry_exhausted")
+        self.assertEqual(saved["status"], "controller_retry_exhausted")
+        self.assertEqual(
+            saved["stop_reason"],
+            "The chapter action exhausted its one authorized retry.",
+        )
+
     def test_preflight_failure_is_not_counted_and_cannot_loop(self) -> None:
         def fail_after_legacy_precount(*_args):
             run = backend_selector.load_or_create_chapter_run(
@@ -542,6 +819,110 @@ class ChapterControllerIntegrationTests(unittest.TestCase):
                 retry["status"],
                 "retry_authorization_required",
             )
+
+    def test_legacy_performance_no_progress_hold_requires_ledger_proof(
+        self,
+    ) -> None:
+        with self.patches()[0], self.patches()[1]:
+            run = backend_selector.load_or_create_chapter_run(
+                self.book_id,
+                self.chapter_id,
+            )
+            run.update(
+                {
+                    "status": "performance_repair_required",
+                    "workflow_runtime_version": "performance-v2",
+                    "performance_repair_cycles_total": 1,
+                    "last_assessment_outcome": "revise_draft",
+                }
+            )
+            backend_selector.save_chapter_run(run)
+            snapshot = backend_selector.build_chapter_controller_snapshot(
+                self.book_id,
+                self.chapter_id,
+            )
+            legacy_bad_decision = chapter_controller.NextAction(
+                chapter_controller.ChapterState.WORKSPACE_DEVELOPMENT,
+                chapter_controller.ActionKind.RUN_CHAPTER_PHASE,
+                "The current assessment permits another development phase.",
+                1,
+            )
+            ledger = chapter_controller.ChapterEventLedger(
+                backend_selector.chapter_controller_ledger_path(
+                    self.book_id,
+                    self.chapter_id,
+                )
+            )
+            contract = ledger.open_contract(
+                snapshot,
+                legacy_bad_decision,
+                run_baseline=run,
+            )
+            ledger.mark_started(contract["contract_id"])
+            run["status"] = "controller_no_progress"
+            backend_selector.save_chapter_run(run)
+            ledger.fail(
+                contract["contract_id"],
+                "no_progress",
+                "No approved artifact or provider-call record changed.",
+            )
+
+            self.assertTrue(
+                backend_selector.performance_repair_review_required(
+                    self.book_id,
+                    self.chapter_id,
+                )
+            )
+
+            ledger.append(
+                "diagnostic_recorded",
+                {"note": "A later unrelated event breaks direct lineage."},
+            )
+            self.assertFalse(
+                backend_selector.performance_repair_review_required(
+                    self.book_id,
+                    self.chapter_id,
+                )
+            )
+
+    def test_performance_repair_hold_opens_no_zero_call_contract(self) -> None:
+        with self.patches()[0], self.patches()[1], patch.object(
+            backend_selector,
+            "run_chapter_completion_loop",
+        ) as provider_executor:
+            run = backend_selector.load_or_create_chapter_run(
+                self.book_id,
+                self.chapter_id,
+            )
+            run.update(
+                {
+                    "status": "performance_repair_required",
+                    "workflow_runtime_version": "performance-v2",
+                    "performance_repair_cycles_total": 1,
+                    "last_assessment_outcome": "revise_draft",
+                }
+            )
+            backend_selector.save_chapter_run(run)
+
+            held = backend_selector.run_chapter_controller_action(
+                "codex",
+                "/usr/bin/codex",
+                self.book_id,
+                self.chapter_id,
+            )
+
+        provider_executor.assert_not_called()
+        self.assertEqual(held["status"], "performance_repair_required")
+        self.assertEqual(
+            held["controller_action"],
+            "request_recovery_authorization",
+        )
+        self.assertFalse(
+            backend_selector.chapter_controller_ledger_path(
+                self.book_id,
+                self.chapter_id,
+            ).exists()
+        )
 
     def test_acknowledged_call_becomes_the_only_counted_call(self) -> None:
         def acknowledge_and_finish(*_args):
@@ -586,6 +967,84 @@ class ChapterControllerIntegrationTests(unittest.TestCase):
             ledger.read()[-1]["event_type"],
             "contract_completed",
         )
+
+    def test_exhausted_active_run_materializes_call_limit_hold(self) -> None:
+        run = json.loads(self.run_path.read_text(encoding="utf-8"))
+        run.update(
+            {
+                "developer_passes_total": 5,
+                "evaluator_passes_total": 4,
+                "researcher_passes_total": 3,
+            }
+        )
+        self.run_path.write_text(
+            json.dumps(run) + "\n",
+            encoding="utf-8",
+        )
+
+        with (
+            self.patches()[0],
+            self.patches()[1],
+            patch.object(
+                backend_selector,
+                "run_chapter_completion_loop",
+            ) as provider_executor,
+        ):
+            result = backend_selector.run_chapter_controller_action(
+                "codex",
+                "/usr/bin/codex",
+                self.book_id,
+                self.chapter_id,
+            )
+            persisted = backend_selector.load_or_create_chapter_run(
+                self.book_id,
+                self.chapter_id,
+            )
+
+        provider_executor.assert_not_called()
+        self.assertEqual(result["status"], "agent_call_limit_reached")
+        self.assertIn("lifetime", result["stop_reason"])
+        self.assertEqual(persisted["status"], "agent_call_limit_reached")
+
+    def test_final_repair_budget_takes_priority_over_old_closeout_limit(
+        self,
+    ) -> None:
+        run = json.loads(self.run_path.read_text(encoding="utf-8"))
+        run.update(
+            {
+                "developer_passes_total": 10,
+                "evaluator_passes_total": 8,
+                "status": "human_input_closeout_failed",
+            }
+        )
+        recovery = {
+            "recovery_kind": "final_pass_revision",
+            "baseline_agent_calls_total": 18,
+            "max_recovery_agent_calls": 2,
+        }
+        closeout = {
+            "baseline_agent_calls_total": 13,
+            "max_calls": 6,
+        }
+        with (
+            patch.object(
+                backend_selector,
+                "load_chapter_recovery_authorization",
+                return_value=recovery,
+            ),
+            patch.object(
+                backend_selector,
+                "load_chapter_human_input_closeout",
+                return_value=closeout,
+            ),
+        ):
+            limit = backend_selector.chapter_provider_call_limit(
+                self.book_id,
+                self.chapter_id,
+                run,
+            )
+
+        self.assertEqual(limit, 20)
 
     def test_exact_limit_prepares_two_call_final_closeout_without_provider(
         self,
@@ -1165,7 +1624,7 @@ class ChapterControllerIntegrationTests(unittest.TestCase):
             "no_provider_output",
         )
 
-    def test_ack_without_artifact_change_requires_review(self) -> None:
+    def test_ack_without_artifact_change_authorizes_bounded_retry(self) -> None:
         with self.patches()[0], self.patches()[1]:
             snapshot = (
                 backend_selector.build_chapter_controller_snapshot(
@@ -1202,28 +1661,37 @@ class ChapterControllerIntegrationTests(unittest.TestCase):
                     self.chapter_id,
                 )
             )
+            current = backend_selector.build_chapter_controller_snapshot(
+                self.book_id,
+                self.chapter_id,
+            )
+            retry = ledger.retry_requirement(
+                current,
+                chapter_controller.decide_next_action(current),
+            )
+            recovered_run = backend_selector.load_or_create_chapter_run(
+                self.book_id,
+                self.chapter_id,
+            )
 
-        self.assertEqual(
-            result["status"],
-            "artifact_review_required",
-        )
+        self.assertEqual(result["status"], "controller_reconciled")
         self.assertEqual(
             result["call_kind"],
             backend_selector.CHAPTER_DEVELOPMENT_CALL,
         )
         self.assertEqual(result["artifact_changes"], [])
+        self.assertTrue(result["replacement_call_available"])
+        self.assertEqual(recovered_run["developer_passes_total"], 1)
+        self.assertIsNone(ledger.interrupted_contract_id())
+        self.assertIsNone(retry)
         self.assertEqual(
-            ledger.artifact_review_requirement(
-                contract["contract_id"]
-            )["failure_kind"],
-            "InterruptedProviderCall",
-        )
-        self.assertEqual(
-            ledger.interrupted_contract_id(),
-            contract["contract_id"],
+            ledger.read()[-1]["payload"]["disposition"],
+            "interrupted_no_artifact",
         )
 
-    def test_ack_without_artifact_can_be_rejected_for_one_retry(self) -> None:
+    def test_legacy_empty_artifact_review_is_reconciled_automatically(
+        self,
+    ) -> None:
         with self.patches()[0], self.patches()[1]:
             snapshot = (
                 backend_selector.build_chapter_controller_snapshot(
@@ -1254,29 +1722,21 @@ class ChapterControllerIntegrationTests(unittest.TestCase):
                 contract["contract_id"],
                 backend_selector.CHAPTER_DEVELOPMENT_CALL,
             )
+            ledger.require_artifact_review(
+                contract["contract_id"],
+                backend_selector.CHAPTER_DEVELOPMENT_CALL,
+                "InterruptedProviderCall",
+                (
+                    "One provider call was acknowledged, but no canonical "
+                    "chapter artifact transition was observed after restart."
+                ),
+            )
             reconciliation = (
                 backend_selector.reconcile_interrupted_chapter_action(
                     self.book_id,
                     self.chapter_id,
                 )
             )
-            with patch(
-                "builtins.input",
-                side_effect=[
-                    "1",
-                    (
-                        "The provider process was interrupted and no "
-                        "canonical chapter transition exists."
-                    ),
-                ],
-            ):
-                reviewed = (
-                    backend_selector
-                    .record_chapter_artifact_review_checkpoint(
-                        self.book_id,
-                        self.chapter_id,
-                    )
-                )
             current = (
                 backend_selector.build_chapter_controller_snapshot(
                     self.book_id,
@@ -1290,17 +1750,67 @@ class ChapterControllerIntegrationTests(unittest.TestCase):
 
         self.assertEqual(
             reconciliation["status"],
-            "artifact_review_required",
+            "controller_reconciled",
         )
-        self.assertEqual(
-            reviewed["payload"]["disposition"],
-            "provider_output_rejected",
-        )
+        self.assertTrue(reconciliation["replacement_call_available"])
         self.assertIsNone(ledger.interrupted_contract_id())
-        self.assertEqual(retry["status"], "authorization_required")
+        self.assertIsNone(retry)
+
+    def test_legacy_automatic_interruption_does_not_exhaust_retry(self) -> None:
+        with self.patches()[0], self.patches()[1]:
+            snapshot = backend_selector.build_chapter_controller_snapshot(
+                self.book_id,
+                self.chapter_id,
+            )
+            decision = chapter_controller.decide_next_action(snapshot)
+            baseline = backend_selector.load_or_create_chapter_run(
+                self.book_id,
+                self.chapter_id,
+            )
+            ledger = chapter_controller.ChapterEventLedger(
+                backend_selector.chapter_controller_ledger_path(
+                    self.book_id,
+                    self.chapter_id,
+                )
+            )
+            interrupted = ledger.open_contract(
+                snapshot,
+                decision,
+                run_baseline=baseline,
+            )
+            ledger.mark_started(interrupted["contract_id"])
+            ledger.acknowledge_provider_call(
+                interrupted["contract_id"],
+                backend_selector.CHAPTER_DEVELOPMENT_CALL,
+            )
+            ledger.reconcile(
+                interrupted["contract_id"],
+                "provider_output_rejected",
+                snapshot,
+                (
+                    "The acknowledged provider process ended during restart "
+                    "without changing any canonical chapter artifact. The "
+                    "incomplete output was rejected and its attempt remains "
+                    "counted."
+                ),
+            )
+            retry_contract = ledger.open_contract(
+                snapshot,
+                decision,
+                run_baseline=baseline,
+            )
+            ledger.mark_started(retry_contract["contract_id"])
+            ledger.fail(
+                retry_contract["contract_id"],
+                "RuntimeError",
+                "The provider missed its required tool transition.",
+            )
+            requirement = ledger.retry_requirement(snapshot, decision)
+
+        self.assertEqual(requirement["status"], "authorization_required")
         self.assertEqual(
-            retry["failed_contract_id"],
-            contract["contract_id"],
+            requirement["failed_contract_id"],
+            retry_contract["contract_id"],
         )
 
     def test_first_human_input_uses_the_pending_assessment_id(self) -> None:
